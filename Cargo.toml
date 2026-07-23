@@ -265,6 +265,7 @@ members = [
     #
     "kask/crates/kask_bridge",
     "kask/crates/kask_panel",
+    "kask/crates/hkask-types",
 ]
 default-members = ["crates/zed"]
 
@@ -804,6 +805,9 @@ serde_yaml = "0.9.34"
 serde_path_to_error = "0.1.17"
 serde_urlencoded = "0.7"
 sha2 = "0.10"
+blake3 = "1"
+rusqlite = { version = "0.39", features = ["bundled-sqlcipher", "blob", "backup"] }
+hkask-types = { path = "kask/crates/hkask-types" }
 shellexpand = "3.1"
 shlex = "1.3.0"
 simplelog = "0.12.2"

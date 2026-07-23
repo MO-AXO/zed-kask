@@ -1,0 +1,40 @@
+[package]
+name = "hkask-types"
+version = "0.31.0"
+edition = "2024"
+license = "MIT"
+description = "ID types, nu-event, and visibility types for hKask"
+publish = false
+
+[dependencies]
+# NOTE: hkask-types must NOT depend on hkask-capability (would create a cycle).
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+dirs.workspace = true
+zeroize.workspace = true
+hex.workspace = true
+futures-util.workspace = true
+async-trait.workspace = true
+blake3 = "1"
+sha2.workspace = true
+tracing.workspace = true
+
+rusqlite = { workspace = true, optional = true }
+
+[dev-dependencies]
+# hKask dev-deps (hkask-capability, hkask-goal, hkask-test-harness) will be
+# re-added here when those crates are migrated under kask/crates/.
+serde_yaml_neo = "0.11"
+tokio = { workspace = true, features = ["macros", "rt"] }
+proptest = "1"
+tempfile = "3"
+
+[features]
+default = []
+sql = ["dep:rusqlite"]
+
+# The types_contract test will be re-enabled when hkask-capability/hkask-goal
+# are migrated. See T0.6.
