@@ -52,7 +52,7 @@ impl MemoryPort for LoggingMemoryPort {
                 target: "reg.memory",
                 thread_id = %record.thread_id,
                 model = %record.model,
-                prompt_len = record.user_prompt.len(),
+                prompt_len = record.user_input.len(),
                 response_len = record.agent_response.len(),
                 title = ?record.thread_title,
                 "Turn ingested into memory (logging no-op — HKASK_DB_PATH not set)"
@@ -160,7 +160,7 @@ impl MemoryPort for RealMemoryPort {
     ) -> Pin<Box<dyn Future<Output = Result<(), MemoryError>> + Send + 'a>> {
         Box::pin(async move {
             let thread_id = record.thread_id.clone();
-            let user_prompt = record.user_prompt.clone();
+            let user_input = record.user_input.clone();
             let agent_response = record.agent_response.clone();
             let model = record.model.clone();
             let title = record.thread_title.clone();
@@ -172,7 +172,7 @@ impl MemoryPort for RealMemoryPort {
             // experience — only the owning agent can recall it.
             let entity = format!("chat:thread:{thread_id}");
             let turn_value = serde_json::json!({
-                "user_input": user_prompt,
+                "user_input": user_input,
                 "agent_response": agent_response,
                 "model": model,
                 "title": title,
@@ -228,10 +228,10 @@ impl MemoryPort for RealMemoryPort {
             // The embedding enables semantic search (KNN) for context
             // injection — when the user asks a similar question later,
             // this turn can be recalled and injected into the prompt.
-            let embedding_entity = format!("embedding:thread:{thread_id}:user_prompt");
+            let embedding_entity = format!("embedding:thread:{thread_id}:user_input");
             let vectors = self
                 .embedding_router
-                .embed_sentences(&self.embedding_model, &[user_prompt.as_str()])
+                .embed_sentences(&self.embedding_model, &[user_input.as_str()])
                 .await;
 
             match vectors {
@@ -302,7 +302,7 @@ impl agent::ThreadMemoryPort for BridgeMemoryPort {
             inner
                 .ingest_turn(TurnRecord {
                     thread_id: record.thread_id,
-                    user_prompt: record.user_prompt,
+                    user_input: record.user_input,
                     agent_response: record.agent_response,
                     model: record.model,
                     thread_title: record.thread_title,
@@ -351,7 +351,7 @@ mod tests {
         let webid = port.user_webid;
         let record = TurnRecord {
             thread_id: "test-thread".to_string(),
-            user_prompt: "What is Rust?".to_string(),
+            user_input: "What is Rust?".to_string(),
             agent_response: "Rust is a systems programming language.".to_string(),
             model: "test-model".to_string(),
             thread_title: Some("Rust Discussion".to_string()),
@@ -374,7 +374,7 @@ mod tests {
         let port = in_memory_port();
         let record = TurnRecord {
             thread_id: "test-thread-2".to_string(),
-            user_prompt: "Explain async Rust".to_string(),
+            user_input: "Explain async Rust".to_string(),
             agent_response: "Async Rust uses tokio.".to_string(),
             model: "test-model".to_string(),
             thread_title: None,
@@ -398,7 +398,7 @@ mod tests {
         let webid = port.user_webid;
         let record = TurnRecord {
             thread_id: "test-empty".to_string(),
-            user_prompt: String::new(),
+            user_input: String::new(),
             agent_response: "Response".to_string(),
             model: "test".to_string(),
             thread_title: None,
