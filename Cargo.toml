@@ -287,6 +287,7 @@ members = [
     "kask/crates/hkask-services-self-heal",
     "kask/crates/hkask-services-inference",
     "kask/crates/hkask-services-kata-kanban",
+    "kask/crates/hkask-services-runtime",
     "kask/crates/hkask-services-corpus",
     "kask/crates/hkask-services-context",
     "kask/crates/hkask-services-compose",
