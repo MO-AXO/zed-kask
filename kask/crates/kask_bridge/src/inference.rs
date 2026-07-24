@@ -16,7 +16,6 @@
 use std::sync::Arc;
 
 use futures_util::{FutureExt, StreamExt};
-use gpui::AppContext;
 use gpui::AsyncApp;
 use hkask_types::template::LLMParameters;
 use hkask_types::{
@@ -45,7 +44,6 @@ struct InferenceRequest {
 /// The adapter holds only a channel sender (`Send + Sync`); the actual inference
 /// call happens on the GPUI side via a spawned task that owns the `AsyncApp`.
 pub struct LanguageModelInferencePort {
-    model: Arc<dyn LanguageModel>,
     tx: tokio::sync::mpsc::UnboundedSender<InferenceRequest>,
 }
 
@@ -62,13 +60,15 @@ impl LanguageModelInferencePort {
             while let Some(req) = rx.recv().await {
                 let model = model_for_task.clone();
                 let cx = cx.clone();
-                cx.background_spawn(async move {
+                // Run on the foreground executor — stream_completion needs &AsyncApp
+                // which is not Send, so it can't go to background_spawn.
+                let result = async move {
                     let stream_result = model
                         .stream_completion(req.request, &cx)
                         .await
                         .map_err(|e| InferenceError::Connection(e.to_string()));
 
-                    let result = match stream_result {
+                    match stream_result {
                         Err(e) => Err(e),
                         Ok(mut stream) => {
                             let mut text = String::new();
@@ -125,10 +125,7 @@ impl LanguageModelInferencePort {
                                     }
                                     Ok(_) => {}
                                     Err(e) => {
-                                        let _ = req
-                                            .reply
-                                            .send(Err(InferenceError::Generation(e.to_string())));
-                                        return;
+                                        return Err(InferenceError::Generation(e.to_string()));
                                     }
                                 }
                             }
@@ -147,15 +144,15 @@ impl LanguageModelInferencePort {
                                 },
                             })
                         }
-                    };
+                    }
+                }
+                .await;
 
-                    let _ = req.reply.send(result);
-                })
-                .detach();
+                let _ = req.reply.send(result);
             }
         });
 
-        (Self { model, tx }, task)
+        (Self { tx }, task)
     }
 
     fn build_request(
