@@ -44,8 +44,9 @@ mds_categories: [composition, trust, lifecycle]
 > **Revised approach for `hkask-inference`:** Kept (MCP servers use it directly). Reads API keys via `SecretsPort` (D9b). Long-term: replace with `InferencePort` over zed's `LanguageModel`, but keeping it unblocks the MCP servers immediately.
 >
 > **Current priorities (next work):**
-> 1. **R4 — Daemon refactor** — refactor MCP servers off `DaemonClient` to direct in-process handles. This is the big one — it dissolves the `hkask-services-*` scaffolding and the daemon layer in `hkask-mcp-server/src/daemon/`.
-> 2. **Continue dead code pruning** — daemon layer, stale docs, `hkask-services-*` scaffolding, `hkask-inference` env-var reads that should use `SecretsPort`.
+> 1. **R4 — Daemon refactor** — refactor MCP servers off `DaemonClient` to direct in-process handles. This is the big one — it dissolves the daemon layer in `hkask-mcp-server/src/daemon/` and the `hkask-services-*` scaffolding. The `hkask-services-*` crates are still needed by MCP server binaries (corpus, curator, kata-kanban) — R4 would inline the needed functionality or provide in-process handles.
+> 2. **Stale docs cleanup** — `kask/docs/reference/api-reference.md` references deleted `hkask-repl` and `hkask-api` crates. These should be updated or marked as historical.
+> 3. **Pre-existing: `hkask-services-core` manifest issue** — the kask sub-workspace's `hkask-services-core/Cargo.toml` fails to inherit `serde` from the workspace root. This is a pre-existing issue, not caused by the zed-kask integration.
 >
 > **One-line frame:** `zed-kask` is a **fork of Zed** that tracks `upstream` (`zed/zed`) and diverges in **exactly three places**: (1) the **skill module** (skill execution → hKask's `ManifestExecutor`), (2) the **Curator agent** (a new native agent backed by hKask), and (3) the **hKask tool-processing code** (compiled-in hKask crates + in-process tool hosting). Everything else stays byte-identical to upstream and is re-merged regularly. hKask is trimmed to **only** the Curator + user sovereignty + the tools. **No backward compatibility.** Principle: *as simple and minimal as possible — and the fork's divergence surface is itself minimal.*
 
