@@ -14,7 +14,8 @@
 //! It is called from the tool-result handling path in `run_turn_internal`.
 
 use agent::ThreadCondenser;
-use hkask_condenser::{CondenserEngine, Profile};
+use hkask_condenser::engine::CondenserEngine;
+use hkask_condenser::types::Profile;
 use std::sync::Mutex;
 
 /// Bridge thread condenser — wraps `CondenserEngine` for use in zed's agent threads.
