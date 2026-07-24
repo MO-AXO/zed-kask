@@ -3728,13 +3728,33 @@ impl Thread {
                 Err(output) => (true, output),
             };
 
+            // D12: Compress tool result text before storing in message history.
+            // When a ThreadCondenser is wired, tool output text is compressed
+            // to fit within the configured token budget. Non-text content
+            // (images) is passed through unchanged.
+            let content = if let Some(condenser) = crate::thread_condenser() {
+                output
+                    .llm_output
+                    .into_iter()
+                    .map(|part| match part {
+                        LanguageModelToolResultContent::Text(text) => {
+                            let compressed = condenser.compress_tool_result(&tool_name, &text);
+                            LanguageModelToolResultContent::Text(Arc::from(compressed))
+                        }
+                        other => other,
+                    })
+                    .collect()
+            } else {
+                output.llm_output
+            };
+
             (
                 owning_message_ix,
                 LanguageModelToolResult {
                     tool_use_id,
                     tool_name,
                     is_error,
-                    content: output.llm_output,
+                    content,
                     output: Some(output.raw_output),
                 },
             )
@@ -4352,6 +4372,11 @@ impl Thread {
             messages.extend(message.to_request());
         }
 
+        // Place cache breakpoints after pending-message extension so the
+        // breakpoints land on the final request shape (which may end with a
+        // pending tool result, not a stored message).
+        set_cache_breakpoints(&mut messages);
+
         messages
     }
 
@@ -4388,33 +4413,6 @@ impl Thread {
             reasoning_details: None,
         }];
         self.extend_request_history_until(&mut messages, end_ix);
-
-        // Place cache breakpoints. Two breakpoints mirror Kilocode's default
-        // policy (`tools + system + latest-user-message`):
-        //   1. The latest *user* message — this is the high-value boundary for
-        //      agentic tool loops. The user message stays fixed while a single
-        //      turn explodes into many assistant/tool round-trips, so caching
-        //      at this boundary lets every intra-turn request hit the prefix
-        //      up to and including the user's instruction.
-        //   2. The last message overall — covers the case where the thread ends
-        //      on a tool result or assistant turn, and satisfies the
-        //      `any_message_wants_cache` gate for Anthropic's automatic
-        //      top-level cache_control.
-        // Both are marked because the Anthropic automatic-mode lowering places
-        // the conversation-tail breakpoint on the last cacheable block, and
-        // marking the latest user message ensures the breakpoint lands on the
-        // semantically meaningful boundary rather than whichever tool result
-        // happens to be last.
-        if let Some(last_user_message) = messages
-            .iter_mut()
-            .rev()
-            .find(|message| message.role == Role::User)
-        {
-            last_user_message.cache = true;
-        }
-        if let Some(last_message) = messages.last_mut() {
-            last_message.cache = true;
-        }
 
         messages
     }
@@ -4715,6 +4713,35 @@ fn billed_input_tokens(usage: language_model::TokenUsage) -> u64 {
     usage
         .input_tokens
         .saturating_add(usage.cache_creation_input_tokens)
+}
+
+/// Place cache breakpoints on the final request message list. Two breakpoints
+/// mirror Kilocode's default cache policy (`tools + system + latest-user-message`):
+///
+///   1. The latest *user* message — the high-value boundary for agentic tool
+///      loops. The user message stays fixed while a single turn explodes into
+///      many assistant/tool round-trips, so caching at this boundary lets every
+///      intra-turn request hit the prefix up to and including the user's
+///      instruction.
+///   2. The last message overall — covers the case where the thread ends on a
+///      tool result or assistant turn, and satisfies the `any_message_wants_cache`
+///      gate for Anthropic's automatic top-level cache_control.
+///
+/// Both are marked because the Anthropic automatic-mode lowering places the
+/// conversation-tail breakpoint on the last cacheable block, and marking the
+/// latest user message ensures the breakpoint lands on the semantically
+/// meaningful boundary rather than whichever tool result happens to be last.
+fn set_cache_breakpoints(messages: &mut [LanguageModelRequestMessage]) {
+    if let Some(last_user_message) = messages
+        .iter_mut()
+        .rev()
+        .find(|message| message.role == Role::User)
+    {
+        last_user_message.cache = true;
+    }
+    if let Some(last_message) = messages.last_mut() {
+        last_message.cache = true;
+    }
 }
 
 fn auto_compact_threshold_token_count(
