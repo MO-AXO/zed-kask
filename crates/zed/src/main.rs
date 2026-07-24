@@ -498,10 +498,52 @@ fn main() {
         // The manifest YAMLs in kask/registry/manifests/ drive the cascade.
         //
         // This uses a OnceLock global hook so the agent crate doesn't depend on kask_bridge.
-        // TODO: construct the InferencePort over the selected LanguageModel, and the
-        // a2a_secret from the keystore. For now this is a placeholder that will be
-        // completed when the full KaskCore composition root is wired (D3/D4/D5).
-        // agent::set_manifest_executor(None); // disabled until InferencePort is wired
+        {
+            let async_cx = cx.to_async();
+            // Resolve the a2a_secret for OCAP delegation token minting.
+            // Falls back to a random key if the keystore is unavailable (first-run).
+            let a2a_secret = hkask_keystore::resolve_a2a_secret()
+                .map(|s| s.to_vec())
+                .unwrap_or_else(|_| {
+                    use hkask_types::crypto::Ed25519PublicKey;
+                    let mut key = vec![0u8; 32];
+                    rand::fill(&mut key);
+                    key
+                });
+
+            // Resolve the registry paths relative to the app's data directory.
+            // In development, these are relative to the CWD (the repo root).
+            // In production, they'd be under the app bundle's resources.
+            let registry_manifests_dir = std::path::PathBuf::from("kask/registry/manifests");
+            let registry_templates_dir = std::path::PathBuf::from("kask/registry/templates");
+
+            // Get the default LanguageModel from zed's registry.
+            // The InferencePort adapter collects the stream into InferenceResult.
+            // If no model is configured yet, the manifest executor is not wired —
+            // skills fall back to body injection until a model is selected.
+            let model_registry = language_model::LanguageModelRegistry::read_global(cx);
+            if let Some(configured) = model_registry.default_model() {
+                let (inference_port, inference_task) =
+                    kask_bridge::LanguageModelInferencePort::new(
+                        configured.model.clone(),
+                        async_cx.clone(),
+                    );
+                inference_task.detach();
+
+                let executor = std::sync::Arc::new(
+                    kask_bridge::BridgeManifestExecutor::new(
+                        std::sync::Arc::new(inference_port),
+                        a2a_secret,
+                        registry_manifests_dir,
+                        registry_templates_dir,
+                    ),
+                );
+                agent::set_manifest_executor(Some(executor));
+                log::info!("hKask manifest executor wired — skills will run the cascade");
+            } else {
+                log::warn!("No default LanguageModel configured — hKask manifest executor not wired; skills will use body injection");
+            }
+        }
 
         if let Some(app_commit_sha) = app_commit_sha {
             AppCommitSha::set_global(app_commit_sha, cx);
