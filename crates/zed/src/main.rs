@@ -679,6 +679,17 @@ fn main() {
                 Vec::new()
             };
             cx.background_spawn(async move {
+                // Set HKASK_MCP_HOST so MCP server binaries can bootstrap.
+                // The daemon verification will fail gracefully (no daemon running)
+                // and servers will start in degraded mode with daemon_client = None.
+                // This is the correct mode for zed-kask — tool invocation goes through
+                // the in-process McpRuntime, not the daemon.
+                let mut mcp_env = std::collections::HashMap::new();
+                mcp_env.insert(
+                    "HKASK_MCP_HOST".to_string(),
+                    "zed-kask-user".to_string(),
+                );
+
                 for server_id in &servers_to_start {
                     let binary = format!("hkask-mcp-{server_id}");
                     mcp_runtime_for_spawn
@@ -689,7 +700,7 @@ fn main() {
                         })
                         .await;
                     match mcp_runtime_for_spawn
-                        .start_server(server_id, &binary)
+                        .start_server_with_env(server_id, &binary, mcp_env.clone())
                         .await
                     {
                         Ok(()) => log::info!("Kask MCP server '{server_id}' started"),

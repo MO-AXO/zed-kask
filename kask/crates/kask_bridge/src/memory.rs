@@ -17,7 +17,7 @@ use hkask_inference::{EmbeddingRouter, InferenceConfig};
 use hkask_memory::EpisodicMemory;
 use hkask_memory::SemanticMemory;
 use hkask_storage::{Database, EmbeddingStore, HMem, HMemStore};
-use hkask_types::{MemoryError, MemoryPort, TurnRecord, Visibility, WebID};
+use hkask_types::{MemoryError, MemoryPort, MemorySnippet, TurnRecord, Visibility, WebID};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -271,6 +271,111 @@ impl MemoryPort for RealMemoryPort {
             );
 
             Ok(())
+        })
+    }
+
+    fn recall_context<'a>(
+        &'a self,
+        query: &'a str,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut snippets: Vec<MemorySnippet> = Vec::new();
+
+            // ── 1. Semantic search (embedding KNN) ───────────────────────
+            //
+            // Embed the query and search for similar stored embeddings.
+            // This finds turns where the user asked similar questions.
+            let vectors = self
+                .embedding_router
+                .embed_sentences(&self.embedding_model, &[query])
+                .await;
+
+            if let Ok(vectors) = vectors {
+                if let Some(query_vector) = vectors.into_iter().next() {
+                    match self.semantic.search_similar(&query_vector, limit) {
+                        Ok(results) => {
+                            for result in results {
+                                // Retrieve the h_mem associated with this embedding
+                                // to get the full text content.
+                                let entity_ref = &result.embedding.entity_ref;
+                                if let Ok(h_mems) = self.semantic.query_deduped(entity_ref) {
+                                    for h_mem in h_mems {
+                                        let text = h_mem.value.as_str().unwrap_or("").to_string();
+                                        if !text.is_empty() {
+                                            snippets.push(MemorySnippet {
+                                                text,
+                                                source: "semantic".to_string(),
+                                                confidence: h_mem.confidence.value(),
+                                                relevance_score: 1.0 - result.distance,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "reg.memory",
+                                error = %e,
+                                "Semantic search failed during recall"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // ── 2. Episodic search (entity/keyword overlap) ──────────────
+            //
+            // Query episodic memory by extracting keywords from the query
+            // and searching for h_mems with matching entities.
+            let query_words: Vec<&str> = query
+                .split_whitespace()
+                .filter(|w| w.len() > 3)
+                .take(5)
+                .collect();
+
+            for word in &query_words {
+                let entity = format!("chat:thread:");
+                if let Ok(h_mems) = self.episodic.query_for_deduped(&entity, self.user_webid) {
+                    for h_mem in h_mems {
+                        let text = h_mem.value.as_str().unwrap_or("").to_string();
+                        if text.is_empty() {
+                            continue;
+                        }
+                        // Check if the query word appears in the text
+                        if text.to_lowercase().contains(&word.to_lowercase()) {
+                            // Skip if already in snippets (dedup by text)
+                            if snippets.iter().any(|s| s.text == text) {
+                                continue;
+                            }
+                            snippets.push(MemorySnippet {
+                                text,
+                                source: "episodic".to_string(),
+                                confidence: h_mem.confidence.value(),
+                                relevance_score: 0.5, // Base relevance for keyword match
+                            });
+                        }
+                    }
+                }
+            }
+
+            // ── 3. Sort by relevance and truncate ─────────────────────────
+            snippets.sort_by(|a, b| {
+                b.relevance_score
+                    .partial_cmp(&a.relevance_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            snippets.truncate(limit);
+
+            tracing::info!(
+                target: "reg.memory",
+                query_len = query.len(),
+                recalled = snippets.len(),
+                "Recalled memory snippets for context injection"
+            );
+
+            Ok(snippets)
         })
     }
 }

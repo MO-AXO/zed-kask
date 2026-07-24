@@ -52,11 +52,30 @@ impl TurnRecord {
     }
 }
 
-/// Error type for memory ingestion failures.
+/// A recalled memory snippet for context injection.
+///
+/// Lightweight representation of a stored memory — just enough to format
+/// into a prompt. The `source` field identifies where the memory came from
+/// (e.g., "episodic", "semantic", "embedding_search") for debugging.
+#[derive(Debug, Clone)]
+pub struct MemorySnippet {
+    /// The text content of the memory (e.g., a chat turn, a fact, a summary).
+    pub text: String,
+    /// Where the memory was recalled from (e.g., "episodic", "semantic").
+    pub source: String,
+    /// The memory's confidence score (0.0–1.0), decayed by time since recall.
+    pub confidence: f64,
+    /// Relevance score to the query (0.0–1.0), computed by the recall method.
+    pub relevance_score: f64,
+}
+
+/// Error type for memory operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryError {
     #[error("memory ingestion failed: {0}")]
     Ingestion(String),
+    #[error("memory recall failed: {0}")]
+    Recall(String),
 }
 
 /// Pinned boxed future for dyn-compatibility.
@@ -78,4 +97,22 @@ pub trait MemoryPort: Send + Sync {
     /// This is fire-and-forget from the caller's perspective — the memory system
     /// handles classification, confidence scoring, and consolidation asynchronously.
     fn ingest_turn<'a>(&'a self, record: TurnRecord) -> MemoryFuture<'a, Result<(), MemoryError>>;
+
+    /// Recall memory snippets relevant to a query for context injection.
+    ///
+    /// The implementation should:
+    /// 1. Embed the query and search semantic memory (KNN)
+    /// 2. Query episodic memory by entity/keyword overlap
+    /// 3. Merge, dedup, and score results by relevance
+    /// 4. Return up to `limit` snippets, sorted by relevance descending
+    ///
+    /// The default implementation returns an empty vec — graceful degradation
+    /// when no memory store is configured.
+    fn recall_context<'a>(
+        &'a self,
+        _query: &'a str,
+        _limit: usize,
+    ) -> MemoryFuture<'a, Result<Vec<MemorySnippet>, MemoryError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
 }
