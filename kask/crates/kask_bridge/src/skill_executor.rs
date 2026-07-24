@@ -38,7 +38,7 @@ impl BridgeManifestExecutor {
 }
 
 #[async_trait]
-impl agent::tools::skill_tool::SkillManifestExecutor for BridgeManifestExecutor {
+impl agent::SkillManifestExecutor for BridgeManifestExecutor {
     async fn execute_knowact(
         &self,
         skill_directory: &Path,
@@ -71,16 +71,16 @@ impl agent::tools::skill_tool::SkillManifestExecutor for BridgeManifestExecutor 
 struct NoOpToolPort;
 
 #[async_trait::async_trait]
-impl hkask_types::ToolPort for NoOpToolPort {
+impl hkask_capability::ToolPort for NoOpToolPort {
     fn invoke<'a>(
         &'a self,
         _server: &'a str,
         tool: &'a str,
         _args: Value,
         _token: &'a hkask_capability::DelegationToken,
-    ) -> hkask_types::ports::ToolFuture<'a, Result<Value, hkask_types::ToolPortError>> {
+    ) -> hkask_capability::ToolFuture<'a, Result<Value, hkask_capability::ToolPortError>> {
         Box::pin(async move {
-            Err(hkask_types::ToolPortError::NotFound(
+            Err(hkask_capability::ToolPortError::NotFound(
                 hkask_types::NotFound {
                     entity_type: "tool".to_string(),
                     id: format!(
@@ -92,14 +92,14 @@ impl hkask_types::ToolPort for NoOpToolPort {
         })
     }
 
-    fn discover_tools<'a>(&'a self) -> hkask_types::ports::ToolFuture<'a, Vec<String>> {
+    fn discover_tools<'a>(&'a self) -> hkask_capability::ToolFuture<'a, Vec<String>> {
         Box::pin(async move { Vec::new() })
     }
 
     fn get_tool_info<'a>(
         &'a self,
         _tool_name: &'a str,
-    ) -> hkask_types::ports::ToolFuture<'a, Option<hkask_types::ToolInfo>> {
+    ) -> hkask_capability::ToolFuture<'a, Option<hkask_capability::ToolInfo>> {
         Box::pin(async move { None })
     }
 }
