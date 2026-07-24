@@ -1806,6 +1806,70 @@ mod tests {
     }
 
     #[test]
+    fn test_process_content_truncated_with_spillover_path() {
+        // When the terminal output is truncated and a spillover path is
+        // provided, the message must include the path so the model can
+        // re-read the full output with `read_file`.
+        let output = acp::TerminalOutputResponse::new(
+            "line one\nline two\nline three".to_string(),
+            true, // truncated
+        )
+        .exit_status(acp::TerminalExitStatus::new().exit_code(0));
+
+        let result = process_content(
+            output,
+            "cargo build",
+            false,
+            false,
+            TerminalOutputSelection::default(),
+            Some("/tmp/zed-agent-output-abc123.txt"),
+        );
+
+        assert!(
+            result.contains("Command output too long"),
+            "Expected truncation message, got: {result}"
+        );
+        assert!(
+            result.contains("/tmp/zed-agent-output-abc123.txt"),
+            "Expected spillover path in message, got: {result}"
+        );
+        assert!(
+            result.contains("read_file"),
+            "Expected read_file hint in message, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_process_content_truncated_without_spillover_path() {
+        // When truncated but no spillover path is provided (e.g. the spillover
+        // write failed), the message should still include the truncated output
+        // without a spillover path reference.
+        let output = acp::TerminalOutputResponse::new(
+            "line one\nline two".to_string(),
+            true, // truncated
+        )
+        .exit_status(acp::TerminalExitStatus::new().exit_code(0));
+
+        let result = process_content(
+            output,
+            "cargo build",
+            false,
+            false,
+            TerminalOutputSelection::default(),
+            None,
+        );
+
+        assert!(
+            result.contains("Command output too long"),
+            "Expected truncation message, got: {result}"
+        );
+        assert!(
+            !result.contains("read_file"),
+            "Should not mention read_file when no spillover path, got: {result}"
+        );
+    }
+
+    #[test]
     fn test_process_content_with_success_empty_output() {
         let output = acp::TerminalOutputResponse::new("".to_string(), false)
             .exit_status(acp::TerminalExitStatus::new().exit_code(0));

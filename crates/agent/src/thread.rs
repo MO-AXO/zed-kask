@@ -750,6 +750,45 @@ pub trait SubagentHandle {
     fn num_entries(&self, cx: &App) -> usize;
     /// Runs a turn for a given message and returns both the response and the index of that output message.
     fn send(&self, message: String, cx: &AsyncApp) -> Task<Result<String>>;
+    /// Runs a turn for a given message non-blockingly. Returns a receiver
+    /// that delivers the final tool result when the subagent completes.
+    /// The default implementation delegates to `send` and wraps the result
+    /// into a `LanguageModelToolResult` — blocking the caller. Implementations
+    /// that support non-blocking execution should override this to spawn the
+    /// turn in the background and return immediately.
+    fn send_streaming(
+        &self,
+        message: String,
+        tool_use_id: LanguageModelToolUseId,
+        cx: &AsyncApp,
+    ) -> oneshot::Receiver<Result<LanguageModelToolResult>> {
+        let (tx, rx) = oneshot::channel();
+        let task = self.send(message, cx);
+        cx.spawn(async move |_cx| {
+            let result = task.await;
+            let tool_result = match result {
+                Ok(output) => LanguageModelToolResult {
+                    tool_use_id,
+                    tool_name: Arc::from("spawn_agent"),
+                    is_error: false,
+                    content: vec![LanguageModelToolResultContent::Text(Arc::from(output))],
+                    output: None,
+                },
+                Err(error) => LanguageModelToolResult {
+                    tool_use_id,
+                    tool_name: Arc::from("spawn_agent"),
+                    is_error: true,
+                    content: vec![LanguageModelToolResultContent::Text(Arc::from(
+                        error.to_string(),
+                    ))],
+                    output: None,
+                },
+            };
+            let _ = tx.send(Ok(tool_result));
+        })
+        .detach();
+        rx
+    }
 }
 
 pub trait ThreadEnvironment {
@@ -5968,6 +6007,31 @@ pub struct ToolCallEventStream {
 }
 
 impl ToolCallEventStream {
+    /// Enqueue a deferred tool result on the parent thread. The receiver
+    /// will be polled on each outer-loop iteration; when it completes, the
+    /// result is injected as a synthetic user message. Used by non-blocking
+    /// tools (e.g. `spawn_agent`) that return an immediate placeholder and
+    /// deliver the real result later.
+    ///
+    /// Returns `true` if the deferred result was successfully enqueued,
+    /// `false` if the parent thread is no longer alive.
+    pub(crate) fn enqueue_deferred_result(
+        &self,
+        receiver: oneshot::Receiver<Result<LanguageModelToolResult>>,
+        cx: &mut App,
+    ) -> bool {
+        let Some(thread) = self.thread.as_ref() else {
+            return false;
+        };
+        let Some(thread) = thread.upgrade() else {
+            return false;
+        };
+        thread.update(cx, |thread, _cx| {
+            thread.enqueue_deferred_tool_result(self.tool_use_id.clone(), receiver);
+        });
+        true
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn test() -> (Self, ToolCallEventStreamReceiver) {
         let (stream, receiver, _cancellation_tx) = Self::test_with_cancellation();
@@ -9326,5 +9390,93 @@ mod tests {
             );
             assert!(last_message.tool_results.contains_key(&tool_use_id));
         })
+    }
+
+    #[gpui::test]
+    async fn test_deferred_tool_result_appears_in_next_request(cx: &mut TestAppContext) {
+        let (thread, event_stream) = setup_thread_for_test(cx).await;
+
+        // Enqueue a deferred tool result with an already-completed receiver.
+        let tool_use_id = LanguageModelToolUseId::from("test-deferred-id");
+        let (tx, rx) = oneshot::channel();
+        let tool_result = LanguageModelToolResult {
+            tool_use_id: tool_use_id.clone(),
+            tool_name: Arc::from("test_tool"),
+            is_error: false,
+            content: vec![LanguageModelToolResultContent::Text(Arc::from(
+                "deferred result content",
+            ))],
+            output: None,
+        };
+        tx.send(Ok(tool_result)).ok();
+
+        let message_count_before = thread.read_with(cx, |thread, _| thread.messages.len());
+
+        // Enqueue and inject in one update.
+        let injected = thread.update(cx, |thread, cx| {
+            thread.enqueue_deferred_tool_result(tool_use_id.clone(), rx);
+            thread.inject_completed_deferred_results(&event_stream, cx)
+        });
+
+        assert!(injected, "deferred result should have been injected");
+
+        let message_count_after = thread.read_with(cx, |thread, _| thread.messages.len());
+        assert_eq!(
+            message_count_after,
+            message_count_before + 1,
+            "one synthetic agent message should have been added"
+        );
+
+        // Verify the injected message contains the tool result.
+        let last_message = thread.read_with(cx, |thread, _| thread.messages.last().cloned());
+        let last_message = last_message.expect("should have a message");
+        let agent_message = last_message
+            .as_agent_message()
+            .expect("last message should be an agent message");
+        assert_eq!(
+            agent_message.tool_results.len(),
+            1,
+            "should contain one tool result"
+        );
+        assert!(agent_message.tool_results.contains_key(&tool_use_id));
+    }
+
+    #[gpui::test]
+    async fn test_deferred_tool_result_pending_stays_in_queue(cx: &mut TestAppContext) {
+        let (thread, event_stream) = setup_thread_for_test(cx).await;
+
+        // Enqueue a deferred tool result with a receiver that has NOT been
+        // sent to yet — it should stay pending.
+        let tool_use_id = LanguageModelToolUseId::from("test-pending-id");
+        let (_tx, rx) = oneshot::channel();
+
+        thread.update(cx, |thread, cx| {
+            thread.enqueue_deferred_tool_result(tool_use_id.clone(), rx);
+            let injected = thread.inject_completed_deferred_results(&event_stream, cx);
+            assert!(!injected, "pending result should not be injected");
+        });
+
+        // The deferred result should still be in the queue.
+        let queue_len = thread.read_with(cx, |thread, _| thread.deferred_tool_results.len());
+        assert_eq!(queue_len, 1, "pending deferred result should stay in queue");
+    }
+
+    #[gpui::test]
+    async fn test_deferred_tool_result_cancel_clears_queue(cx: &mut TestAppContext) {
+        let (thread, _event_stream) = setup_thread_for_test(cx).await;
+
+        let tool_use_id = LanguageModelToolUseId::from("test-cancel-id");
+        let (_tx, rx) = oneshot::channel();
+
+        thread.update(cx, |thread, cx| {
+            thread.enqueue_deferred_tool_result(tool_use_id, rx);
+            assert_eq!(thread.deferred_tool_results.len(), 1);
+            thread.cancel(cx).detach();
+            assert_eq!(
+                thread.deferred_tool_results.len(),
+                0,
+                "cancel should clear deferred results"
+            );
+        });
     }
 }
