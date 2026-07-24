@@ -120,6 +120,30 @@ pub type SkillBodyResolver =
 pub struct SkillTool {
     skills: SkillsResolver,
     body_resolver: SkillBodyResolver,
+    /// Optional hKask ManifestExecutor for cascade-based skill execution (D1).
+    /// When present, skill activation runs the manifest cascade instead of
+    /// injecting the SKILL.md body. When absent, falls back to body injection.
+    manifest_executor: Option<Arc<dyn SkillManifestExecutor>>,
+}
+
+/// Trait for executing hKask skill manifests (D1 seam).
+///
+/// Implemented by `kask_bridge` over the compiled-in `ManifestExecutor`.
+/// This keeps zed's `agent` crate from depending on hKask crates directly —
+/// the bridge provides the implementation.
+#[async_trait::async_trait]
+pub trait SkillManifestExecutor: Send + Sync {
+    /// Execute a KnowAct skill manifest and return the result as text.
+    ///
+    /// `skill_directory` is the path to the skill's directory (where
+    /// `manifest.yaml` and templates live). `context` is the initial context
+    /// for the cascade.
+    async fn execute_knowact(
+        &self,
+        skill_directory: &std::path::Path,
+        template_ref: &str,
+        context: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<String, String>;
 }
 
 impl SkillTool {
@@ -131,6 +155,29 @@ impl SkillTool {
         Self {
             skills: Arc::new(skills),
             body_resolver: Arc::new(body_resolver),
+            manifest_executor: None,
+        }
+    }
+
+    /// Construct with an hKask ManifestExecutor for cascade-based skill execution (D1).
+    ///
+    /// When a manifest executor is present, skill activation runs the hKask
+    /// cascade (KnowAct/FlowDef/RenderAct + PDCA + gas/rjoule + OCAP) instead
+    /// of injecting the SKILL.md body. The `SKILL.md` frontmatter stays the
+    /// discovery-only catalog entry.
+    pub fn with_manifest_executor<F, R>(
+        skills: F,
+        body_resolver: R,
+        manifest_executor: Arc<dyn SkillManifestExecutor>,
+    ) -> Self
+    where
+        F: Fn(&App) -> Arc<Vec<Skill>> + Send + Sync + 'static,
+        R: Fn(Skill, &mut AsyncApp) -> Task<Result<String>> + Send + Sync + 'static,
+    {
+        Self {
+            skills: Arc::new(skills),
+            body_resolver: Arc::new(body_resolver),
+            manifest_executor: Some(manifest_executor),
         }
     }
 }
@@ -205,31 +252,56 @@ impl AgentTool for SkillTool {
 
             // For built-in skills the body is already in memory (compiled
             // into the binary). For user skills, read on demand from disk.
-            let body = if let Some(embedded) = skill.embedded_body {
-                embedded.to_string()
-            } else {
-                (self.body_resolver)(skill.clone(), cx).await.map_err(|e| {
-                    SkillToolOutput::Error {
-                        error: e.to_string(),
-                    }
-                })?
-            };
-            let rendered = render_skill_envelope(&skill, &body);
-
-            // Built-in skills ship with Zed and are trusted by default,
-            // so they skip the authorization prompt. User-installed skills
-            // go through the standard Allow-Once / Always-Allow UX.
+            //
+            // When a ManifestExecutor is present (D1), the skill's manifest
+            // cascade is executed instead of body injection. The SKILL.md
+            // frontmatter stays the discovery-only catalog entry.
             let is_builtin = skill.source == agent_skills::SkillSource::BuiltIn;
             if !is_builtin {
                 let authorize = cx.update(|cx| {
                     let context =
                         crate::ToolPermissionContext::new(Self::NAME, vec![skill_file_path]);
-                    event_stream.authorize(self.initial_title(Ok(input), cx), context, cx)
+                    event_stream.authorize(self.initial_title(Ok(input.clone()), cx), context, cx)
                 });
                 authorize.await.map_err(|e| SkillToolOutput::Error {
                     error: e.to_string(),
                 })?;
             }
+
+            let skill_name = input.name.clone();
+            let rendered = if let Some(executor) = &self.manifest_executor {
+                // D1: run the hKask manifest cascade (KnowAct/FlowDef/RenderAct + PDCA).
+                // The skill directory contains manifest.yaml + templates.
+                let skill_dir = skill
+                    .skill_file_path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .to_path_buf();
+                let context = std::collections::HashMap::new();
+                match executor.execute_knowact(&skill_dir, "main", context).await {
+                    Ok(result_text) => render_skill_envelope(&skill, &result_text),
+                    Err(e) => {
+                        return Err(SkillToolOutput::Error {
+                            error: format!(
+                                "Skill '{}' manifest execution failed: {}",
+                                skill_name, e
+                            ),
+                        });
+                    }
+                }
+            } else {
+                // Fallback: body injection (original behavior)
+                let body = if let Some(embedded) = skill.embedded_body {
+                    embedded.to_string()
+                } else {
+                    (self.body_resolver)(skill.clone(), cx).await.map_err(|e| {
+                        SkillToolOutput::Error {
+                            error: e.to_string(),
+                        }
+                    })?
+                };
+                render_skill_envelope(&skill, &body)
+            };
 
             Ok(SkillToolOutput::Found { rendered })
         })
