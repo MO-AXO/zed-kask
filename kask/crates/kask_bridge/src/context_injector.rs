@@ -18,10 +18,7 @@ use agent::ContextInjector;
 use hkask_types::MemoryPort;
 use language_model::{LanguageModelRequestMessage, Role};
 use language_model_core::MessageContent;
-use settings::Settings as _;
 use std::sync::Arc;
-
-use crate::settings::KaskSettings;
 
 /// Bridge context injector — retrieves memories and formats them for prompt injection.
 pub struct BridgeContextInjector {
@@ -34,17 +31,12 @@ impl BridgeContextInjector {
     /// Construct a new context injector.
     ///
     /// Reads `recall_limit` and `recall_min_confidence` from `KaskMemorySettings`.
-    pub fn new(memory_port: Arc<dyn MemoryPort>) -> Self {
-        let settings = KaskSettings::get_global();
-        Self {
-            memory_port,
-            recall_limit: settings.memory.recall_limit,
-            recall_min_confidence: settings.memory.recall_min_confidence,
-        }
-    }
-
-    /// Construct with explicit settings (for testing).
-    pub fn with_settings(
+    /// Construct a new context injector with explicit settings.
+    ///
+    /// Reads `recall_limit` and `recall_min_confidence` from `KaskMemorySettings`
+    /// at the composition root (which has access to `cx: &App`) and passes them
+    /// here.
+    pub fn new(
         memory_port: Arc<dyn MemoryPort>,
         recall_limit: u32,
         recall_min_confidence: f64,
