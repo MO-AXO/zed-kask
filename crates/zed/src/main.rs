@@ -501,19 +501,15 @@ fn main() {
         {
             let async_cx = cx.to_async();
             // Resolve the a2a_secret for OCAP delegation token minting.
-            // Falls back to a random key if the keystore is unavailable (first-run).
+            // Falls back to an empty vec if the keystore is unavailable (first-run).
+            // KnowAct skills don't need it; FlowDef skills (which invoke tools) will
+            // fail to mint tokens until the keystore is properly initialized (D5).
             let a2a_secret = hkask_keystore::resolve_a2a_secret()
                 .map(|s| s.to_vec())
-                .unwrap_or_else(|_| {
-                    use hkask_types::crypto::Ed25519PublicKey;
-                    let mut key = vec![0u8; 32];
-                    rand::fill(&mut key);
-                    key
-                });
+                .unwrap_or_default();
 
-            // Resolve the registry paths relative to the app's data directory.
-            // In development, these are relative to the CWD (the repo root).
-            // In production, they'd be under the app bundle's resources.
+            // Resolve the registry paths relative to the repo root (dev) or
+            // the app bundle's resources (production).
             let registry_manifests_dir = std::path::PathBuf::from("kask/registry/manifests");
             let registry_templates_dir = std::path::PathBuf::from("kask/registry/templates");
 
