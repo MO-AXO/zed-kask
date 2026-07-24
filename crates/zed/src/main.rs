@@ -490,6 +490,19 @@ fn main() {
 
         release_channel::init(app_version, cx);
         gpui_tokio::init(cx);
+
+        // D1 composition root: wire the hKask manifest executor into the SkillTool.
+        // After this call, skill activations run the hKask cascade (KnowAct/FlowDef/
+        // RenderAct + PDCA + gas/rjoule + OCAP) instead of injecting the SKILL.md body.
+        // The SKILL.md files in .agents/skills/ remain the discovery-only catalog entries.
+        // The manifest YAMLs in kask/registry/manifests/ drive the cascade.
+        //
+        // This uses a OnceLock global hook so the agent crate doesn't depend on kask_bridge.
+        // TODO: construct the InferencePort over the selected LanguageModel, and the
+        // a2a_secret from the keystore. For now this is a placeholder that will be
+        // completed when the full KaskCore composition root is wired (D3/D4/D5).
+        // agent::set_manifest_executor(None); // disabled until InferencePort is wired
+
         if let Some(app_commit_sha) = app_commit_sha {
             AppCommitSha::set_global(app_commit_sha, cx);
         }
