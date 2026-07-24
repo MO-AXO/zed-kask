@@ -8267,12 +8267,12 @@ mod tests {
                 }))
             }
             fn run(
-                &self,
-                _input: ToolInput,
+                self: std::sync::Arc<Self>,
+                _input: ToolInput<Self::Input>,
                 _event_stream: ToolCallEventStream,
-                _cx: &mut AsyncApp,
-            ) -> Task<Result<ToolOutput>> {
-                Task::ready(Ok(ToolOutput::text("ok")))
+                _cx: &mut App,
+            ) -> Task<Result<Self::Output, Self::Output>> {
+                Task::ready(Ok(String::new()))
             }
         }
         cx.update(|cx| {
