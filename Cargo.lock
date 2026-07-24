@@ -12200,6 +12200,7 @@ dependencies = [
  "language_model",
  "language_model_core",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

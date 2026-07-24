@@ -16,6 +16,7 @@
 use std::sync::Arc;
 
 use futures_util::{FutureExt, StreamExt};
+use gpui::AppContext;
 use gpui::AsyncApp;
 use hkask_types::template::LLMParameters;
 use hkask_types::{
@@ -23,12 +24,10 @@ use hkask_types::{
     InferenceUsage, StructuredToolCall,
 };
 use language_model::LanguageModel;
-use language_model_core::language_model_core::{
-    LanguageModelCompletionEvent, LanguageModelToolUseInput, StopReason,
-};
-use language_model_core::request::{
-    LanguageModelRequest, LanguageModelRequestMessage, LanguageModelRequestTool,
-    LanguageModelToolChoice, MessageContent, Role,
+use language_model_core::{
+    LanguageModelCompletionEvent, LanguageModelRequest, LanguageModelRequestMessage,
+    LanguageModelRequestTool, LanguageModelToolChoice, LanguageModelToolUseInput, MessageContent,
+    Role, StopReason,
 };
 use tokio::sync::oneshot;
 
@@ -59,7 +58,7 @@ impl LanguageModelInferencePort {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<InferenceRequest>();
         let model_for_task = model.clone();
 
-        let task = cx.spawn(async move |_this, cx| {
+        let task = cx.spawn(async move |cx| {
             while let Some(req) = rx.recv().await {
                 let model = model_for_task.clone();
                 let cx = cx.clone();
@@ -84,7 +83,8 @@ impl LanguageModelInferencePort {
                                         text.push_str(&delta);
                                     }
                                     Ok(LanguageModelCompletionEvent::Thinking {
-                                        thinking, ..
+                                        text: thinking,
+                                        ..
                                     }) => {
                                         reasoning.push_str(&thinking);
                                     }
@@ -102,7 +102,7 @@ impl LanguageModelInferencePort {
                                             server: tool_use.name.to_string(),
                                             tool: tool_use.name.to_string(),
                                             args,
-                                            call_id: Some(tool_use.id.0.to_string()),
+                                            call_id: Some(tool_use.id.to_string()),
                                         });
                                     }
                                     Ok(LanguageModelCompletionEvent::Stop(reason)) => {

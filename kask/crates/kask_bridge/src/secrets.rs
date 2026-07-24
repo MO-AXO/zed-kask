@@ -59,7 +59,7 @@ impl CredentialsSecretsPort {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<CredentialRequest>();
 
         // Spawn a GPUI task that owns the AsyncApp and processes requests.
-        let task = cx.spawn(async move |_this, cx| {
+        let task = cx.spawn(async move |cx| {
             while let Some(req) = rx.recv().await {
                 match req {
                     CredentialRequest::Read { key, reply } => {
@@ -101,7 +101,7 @@ impl SecretsPort for CredentialsSecretsPort {
     fn read<'a>(
         &'a self,
         key: &'a str,
-    ) -> hkask_types::ports::SecretsFuture<'a, Result<Option<String>, hkask_types::SecretsError>>
+    ) -> hkask_types::SecretsFuture<'a, Result<Option<String>, hkask_types::SecretsError>>
     {
         let (tx_reply, rx_reply) = oneshot::channel();
         let key = key.to_string();
@@ -124,7 +124,7 @@ impl SecretsPort for CredentialsSecretsPort {
         &'a self,
         key: &'a str,
         value: &'a str,
-    ) -> hkask_types::ports::SecretsFuture<'a, Result<(), hkask_types::SecretsError>> {
+    ) -> hkask_types::SecretsFuture<'a, Result<(), hkask_types::SecretsError>> {
         let (tx_reply, rx_reply) = oneshot::channel();
         let key = key.to_string();
         let value = value.to_string();
@@ -147,7 +147,7 @@ impl SecretsPort for CredentialsSecretsPort {
     fn delete<'a>(
         &'a self,
         key: &'a str,
-    ) -> hkask_types::ports::SecretsFuture<'a, Result<(), hkask_types::SecretsError>> {
+    ) -> hkask_types::SecretsFuture<'a, Result<(), hkask_types::SecretsError>> {
         let (tx_reply, rx_reply) = oneshot::channel();
         let key = key.to_string();
         async move {
