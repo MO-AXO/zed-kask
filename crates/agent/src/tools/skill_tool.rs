@@ -256,19 +256,19 @@ impl AgentTool for SkillTool {
             // When a ManifestExecutor is present (D1), the skill's manifest
             // cascade is executed instead of body injection. The SKILL.md
             // frontmatter stays the discovery-only catalog entry.
+            let skill_name = input.name.clone();
             let is_builtin = skill.source == agent_skills::SkillSource::BuiltIn;
             if !is_builtin {
                 let authorize = cx.update(|cx| {
                     let context =
                         crate::ToolPermissionContext::new(Self::NAME, vec![skill_file_path]);
-                    event_stream.authorize(self.initial_title(Ok(input.clone()), cx), context, cx)
+                    event_stream.authorize(self.initial_title(Ok(input), cx), context, cx)
                 });
                 authorize.await.map_err(|e| SkillToolOutput::Error {
                     error: e.to_string(),
                 })?;
             }
 
-            let skill_name = input.name.clone();
             let rendered = if let Some(executor) = &self.manifest_executor {
                 // D1: run the hKask manifest cascade (KnowAct/FlowDef/RenderAct + PDCA).
                 // The skill directory contains manifest.yaml + templates.
