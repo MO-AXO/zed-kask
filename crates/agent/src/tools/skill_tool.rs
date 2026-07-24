@@ -133,17 +133,29 @@ pub struct SkillTool {
 /// the bridge provides the implementation.
 #[async_trait::async_trait]
 pub trait SkillManifestExecutor: Send + Sync {
-    /// Execute a KnowAct skill manifest and return the result as text.
+    /// Execute an hKask skill manifest by name and return the result as text.
     ///
-    /// `skill_directory` is the path to the skill's directory (where
-    /// `manifest.yaml` and templates live). `context` is the initial context
-    /// for the cascade.
-    async fn execute_knowact(
+    /// The implementation resolves the skill name to its `manifest.yaml` in the
+    /// hKask registry (`kask/registry/manifests/<name>.yaml`), loads it as a
+    /// `BundleManifest`, and runs the `ManifestExecutor` cascade (KnowAct/FlowDef/
+    /// RenderAct + PDCA + gas/rjoule + OCAP).
+    ///
+    /// `skill_name` is the hKask skill ID (e.g., "grill-me", "essentialist").
+    /// `context` is the initial context for the cascade (user input, etc.).
+    ///
+    /// Returns the cascade's final output as text, or an error message.
+    async fn execute_skill(
         &self,
-        skill_directory: &std::path::Path,
-        template_ref: &str,
+        skill_name: &str,
         context: std::collections::HashMap<String, serde_json::Value>,
     ) -> Result<String, String>;
+
+    /// Check whether a skill has an hKask manifest in the registry.
+    ///
+    /// Returns `true` if `kask/registry/manifests/<skill_name>.yaml` exists.
+    /// Used by the `SkillTool` to decide whether to run the cascade or fall
+    /// back to body injection.
+    fn has_manifest(&self, skill_name: &str) -> bool;
 }
 
 impl SkillTool {
@@ -271,26 +283,37 @@ impl AgentTool for SkillTool {
 
             let rendered = if let Some(executor) = &self.manifest_executor {
                 // D1: run the hKask manifest cascade (KnowAct/FlowDef/RenderAct + PDCA).
-                // The skill directory contains manifest.yaml + templates.
-                let skill_dir = skill
-                    .skill_file_path
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .to_path_buf();
-                let context = std::collections::HashMap::new();
-                match executor.execute_knowact(&skill_dir, "main", context).await {
-                    Ok(result_text) => render_skill_envelope(&skill, &result_text),
-                    Err(e) => {
-                        return Err(SkillToolOutput::Error {
-                            error: format!(
-                                "Skill '{}' manifest execution failed: {}",
-                                skill_name, e
-                            ),
-                        });
+                // Check if this skill has an hKask manifest in the registry.
+                // If it does, run the cascade; if not, fall back to body injection.
+                let skill_name = skill.name.as_ref();
+                if executor.has_manifest(skill_name) {
+                    let context = std::collections::HashMap::new();
+                    match executor.execute_skill(skill_name, context).await {
+                        Ok(result_text) => render_skill_envelope(&skill, &result_text),
+                        Err(e) => {
+                            return Err(SkillToolOutput::Error {
+                                error: format!(
+                                    "Skill '{}' manifest execution failed: {}",
+                                    skill_name, e
+                                ),
+                            });
+                        }
                     }
+                } else {
+                    // No hKask manifest — fall back to body injection
+                    let body = if let Some(embedded) = skill.embedded_body {
+                        embedded.to_string()
+                    } else {
+                        (self.body_resolver)(skill.clone(), cx).await.map_err(|e| {
+                            SkillToolOutput::Error {
+                                error: e.to_string(),
+                            }
+                        })?
+                    };
+                    render_skill_envelope(&skill, &body)
                 }
             } else {
-                // Fallback: body injection (original behavior)
+                // No manifest executor configured — body injection (original behavior)
                 let body = if let Some(embedded) = skill.embedded_body {
                     embedded.to_string()
                 } else {
