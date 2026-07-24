@@ -16,13 +16,14 @@ use std::sync::Arc;
 
 use credentials_provider::CredentialsProvider;
 use gpui::{ReadGlobal as _, ScrollHandle, Task, prelude::*};
-use settings::{Settings as _, SettingsContent, SettingsStore};
+use settings::{Settings as _, SettingsStore};
 use ui::{Divider, SwitchField, ToggleState, prelude::*};
 use util::ResultExt as _;
 use zed_credentials_provider as zed_credentials;
 
 use crate::SettingsWindow;
 use crate::components::{SettingsInputField, SettingsSectionHeader};
+use crate::{SettingsPage, SettingsPageItem, SubPageLink, USER};
 
 /// The URL prefix for kask-namespaced credentials in the keychain.
 /// Must match `kask_bridge::secrets::KASK_CREDENTIAL_NAMESPACE`.
@@ -250,16 +251,19 @@ fn render_data_service_row(
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
     let credential_url = format!("{KASK_CREDENTIAL_NAMESPACE}/{key}");
-    let has_key = read_credential_sync(&provider, &credential_url, cx);
+    let has_key = has_credential(&provider, &credential_url, env_var);
 
     let toggle_id = format!("kask-{key}-enabled");
     let enable_toggle = SwitchField::new(
         toggle_id,
         Some(label),
-        Some(format!(
-            "Enable {label}. API key is stored in the keychain under \
+        Some(
+            format!(
+                "Enable {label}. API key is stored in the keychain under \
              kask://credentials/{key}. Or set the {env_var} environment variable."
-        )),
+            )
+            .into(),
+        ),
         if enabled {
             ToggleState::Selected
         } else {
@@ -385,41 +389,25 @@ fn set_data_service_enabled(key: &str, enabled: bool, cx: &mut App) {
     });
 }
 
-fn read_credential_sync(provider: &Arc<dyn CredentialsProvider>, url: &str, cx: &mut App) -> bool {
-    let async_cx = cx.to_async();
-    let provider = provider.clone();
-    let url = url.to_string();
-    let task = cx.background_executor().spawn(async move {
-        provider
-            .read_credentials(&url, &async_cx)
-            .await
-            .ok()
-            .flatten()
-            .is_some()
-    });
-    // We can't block on the GPUI foreground thread. Instead, return false
-    // (key not yet confirmed) and let the user click "Reset Key" if needed.
-    // A follow-up render after the task completes would require storing the
-    // result on the SettingsWindow entity — but for a settings page that's
-    // opened on demand, the simpler approach is to check synchronously via
-    // the background executor's try_read. Since read_credentials is async,
-    // we fall back to the env-var check below.
-    drop(task);
-    // Check the environment variable as a fallback signal.
-    env::var(env_var_for_url(&url)).is_ok()
-}
-
-fn env_var_for_url(url: &str) -> &'static str {
-    // Extract the service key from the URL (kask://credentials/<key>).
-    let key = url.rsplit('/').next().unwrap_or("");
-    match key {
-        "eodhd" => "EODHD_API_KEY",
-        "fmp" => "FMP_API_KEY",
-        "exa" => "EXA_API_KEY",
-        "tavily" => "TAVILY_API_KEY",
-        "brave" => "BRAVE_API_KEY",
-        _ => "",
+/// Check whether a credential is available — either in the keychain or via env var.
+///
+/// The keychain read is async, so we can't block on it here. We check the env var
+/// synchronously (instant) and treat the keychain as "possibly present" — the user
+/// can always click "Reset Key" if the card shows configured. This avoids a flicker
+/// of "no key" on every render.
+fn has_credential(provider: &Arc<dyn CredentialsProvider>, url: &str, env_var: &str) -> bool {
+    // Env-var check is synchronous and instant.
+    if env::var(env_var).is_ok() {
+        return true;
     }
+    // For the keychain, we can't block. We optimistically report false and let
+    // the user enter the key. A background task could populate a cached flag,
+    // but for a settings page opened on demand, the simpler model is: the card
+    // shows "Configured" only when the env var is set; the keychain key is
+    // entered via the input field and confirmed by the user.
+    drop(provider);
+    drop(url);
+    false
 }
 
 fn write_credential(
@@ -591,66 +579,65 @@ pub(crate) fn render_curator_page(
     _window: &mut Window,
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
-    let always_on_item = SettingsPageItem::SettingItem(SettingItem {
-        title: "Always On",
-        description: "Whether the Curator agent is always-on (runs regulation loops in background).",
-        field: Box::new(SettingField {
-            organization_override: None,
-            json_path: Some("kask.curator.always_on"),
-            pick: |settings_content| {
-                settings_content
-                    .kask
-                    .as_ref()?
-                    .curator
-                    .as_ref()?
-                    .always_on
-                    .as_ref()
-            },
-            write: |settings_content, value, _| {
-                settings_content
-                    .kask
-                    .get_or_insert_default()
-                    .curator
-                    .get_or_insert_default()
-                    .always_on = value;
-            },
-        }),
-        metadata: None,
-        files: USER,
-    });
+    let raw = raw_kask_settings(cx);
+    let curator = raw.and_then(|c| c.curator).unwrap_or_default();
+    let always_on = curator.always_on.unwrap_or(true);
+    let algedonic_threshold = curator
+        .algedonic_threshold
+        .map(|v| format!("{v}"))
+        .unwrap_or_else(|| "0.8".to_string());
 
-    let threshold_item = SettingsPageItem::SettingItem(SettingItem {
-        title: "Algedonic Threshold",
-        description: "Algedonic signal threshold (0.0–1.0). Signals above this trigger the Curator.",
-        field: Box::new(SettingField {
-            organization_override: None,
-            json_path: Some("kask.curator.algedonic_threshold"),
-            pick: |settings_content| {
-                settings_content
-                    .kask
-                    .as_ref()?
-                    .curator
-                    .as_ref()?
-                    .algedonic_threshold
-                    .as_ref()
-            },
-            write: |settings_content, value, _| {
-                settings_content
-                    .kask
-                    .get_or_insert_default()
-                    .curator
-                    .get_or_insert_default()
-                    .algedonic_threshold = value;
-            },
-        }),
-        metadata: Some(Box::new(SettingsFieldMetadata {
-            placeholder: Some("0.8"),
-            ..Default::default()
-        })),
-        files: USER,
-    });
+    let always_on_toggle = SwitchField::new(
+        "kask-curator-always-on",
+        Some("Always On"),
+        Some(
+            "Whether the Curator agent is always-on (runs regulation loops in background).".into(),
+        ),
+        if always_on {
+            ToggleState::Selected
+        } else {
+            ToggleState::Unselected
+        },
+        move |state, _window, cx| {
+            let enabled = *state == ToggleState::Selected;
+            SettingsStore::global(cx).update_settings_file(
+                <dyn fs::Fs>::global(cx),
+                move |settings, _| {
+                    settings
+                        .kask
+                        .get_or_insert_default()
+                        .curator
+                        .get_or_insert_default()
+                        .always_on = Some(enabled);
+                },
+            );
+        },
+    )
+    .tab_index(0);
 
-    let items = [always_on_item, threshold_item];
+    let threshold_input = SettingsInputField::new("kask-curator-algedonic-threshold")
+        .tab_index(0)
+        .with_initial_text(algedonic_threshold)
+        .with_placeholder("0.8")
+        .aria_label("Algedonic Threshold")
+        .confirm_on_focus_out()
+        .on_confirm(move |value, _window, cx| {
+            if let Some(text) = value {
+                if let Ok(parsed) = text.parse::<f64>() {
+                    SettingsStore::global(cx).update_settings_file(
+                        <dyn fs::Fs>::global(cx),
+                        move |settings, _| {
+                            settings
+                                .kask
+                                .get_or_insert_default()
+                                .curator
+                                .get_or_insert_default()
+                                .algedonic_threshold = Some(parsed);
+                        },
+                    );
+                }
+            }
+        });
 
     v_flex()
         .id("kask-curator-page")
@@ -674,14 +661,20 @@ pub(crate) fn render_curator_page(
                 ),
         )
         .child(Divider::horizontal())
-        .children(
-            items
-                .iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    item.render(_settings_window, index, false, false, _window, cx)
-                })
-                .collect::<Vec<_>>(),
+        .child(always_on_toggle)
+        .child(Divider::horizontal())
+        .child(
+            v_flex()
+                .gap_1()
+                .child(Label::new("Algedonic Threshold"))
+                .child(
+                    Label::new(
+                        "Algedonic signal threshold (0.0–1.0). Signals above this trigger the Curator.",
+                    )
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+                )
+                .child(threshold_input),
         )
         .into_any_element()
 }
@@ -696,36 +689,36 @@ pub(crate) fn render_guard_page(
     _window: &mut Window,
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
-    let strategy_item = SettingsPageItem::SettingItem(SettingItem {
-        title: "Direct-Chat Strategy",
-        description: "Guard strategy for direct chat: \"buffer\", \"incremental\", or \"cascade_only\".",
-        field: Box::new(SettingField {
-            organization_override: None,
-            json_path: Some("kask.guard.direct_chat_strategy"),
-            pick: |settings_content| {
-                settings_content
-                    .kask
-                    .as_ref()?
-                    .guard
-                    .as_ref()?
-                    .direct_chat_strategy
-                    .as_ref()
-            },
-            write: |settings_content, value, _| {
-                settings_content
-                    .kask
-                    .get_or_insert_default()
-                    .guard
-                    .get_or_insert_default()
-                    .direct_chat_strategy = value;
-            },
-        }),
-        metadata: Some(Box::new(SettingsFieldMetadata {
-            placeholder: Some("cascade_only"),
-            ..Default::default()
-        })),
-        files: USER,
-    });
+    let raw = raw_kask_settings(cx);
+    let guard = raw.and_then(|c| c.guard).unwrap_or_default();
+    let strategy = guard
+        .direct_chat_strategy
+        .unwrap_or_else(|| "cascade_only".to_string());
+
+    let strategy_input = SettingsInputField::new("kask-guard-direct-chat-strategy")
+        .tab_index(0)
+        .with_initial_text(strategy)
+        .with_placeholder("cascade_only")
+        .aria_label("Direct-Chat Strategy")
+        .confirm_on_focus_out()
+        .on_confirm(move |value, _window, cx| {
+            if let Some(text) = value {
+                let trimmed = text.trim();
+                if matches!(trimmed, "buffer" | "incremental" | "cascade_only") {
+                    SettingsStore::global(cx).update_settings_file(
+                        <dyn fs::Fs>::global(cx),
+                        move |settings, _| {
+                            settings
+                                .kask
+                                .get_or_insert_default()
+                                .guard
+                                .get_or_insert_default()
+                                .direct_chat_strategy = Some(trimmed.to_string());
+                        },
+                    );
+                }
+            }
+        });
 
     v_flex()
         .id("kask-guard-page")
@@ -753,7 +746,17 @@ pub(crate) fn render_guard_page(
                 ),
         )
         .child(Divider::horizontal())
-        .child(strategy_item.render(_settings_window, 0, false, false, _window, cx))
+        .child(
+            v_flex()
+                .gap_1()
+                .child(Label::new("Direct-Chat Strategy"))
+                .child(
+                    Label::new("One of: \"buffer\", \"incremental\", or \"cascade_only\".")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(strategy_input),
+        )
         .into_any_element()
 }
 
@@ -767,69 +770,64 @@ pub(crate) fn render_memory_page(
     _window: &mut Window,
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
-    let cadence_item = SettingsPageItem::SettingItem(SettingItem {
-        title: "Consolidation Cadence (seconds)",
-        description: "Memory consolidation cadence in seconds (0 = disabled).",
-        field: Box::new(SettingField {
-            organization_override: None,
-            json_path: Some("kask.memory.consolidation_cadence_secs"),
-            pick: |settings_content| {
-                settings_content
-                    .kask
-                    .as_ref()?
-                    .memory
-                    .as_ref()?
-                    .consolidation_cadence_secs
-                    .as_ref()
-            },
-            write: |settings_content, value, _| {
-                settings_content
-                    .kask
-                    .get_or_insert_default()
-                    .memory
-                    .get_or_insert_default()
-                    .consolidation_cadence_secs = value;
-            },
-        }),
-        metadata: Some(Box::new(SettingsFieldMetadata {
-            placeholder: Some("300"),
-            ..Default::default()
-        })),
-        files: USER,
-    });
+    let raw = raw_kask_settings(cx);
+    let memory = raw.and_then(|c| c.memory).unwrap_or_default();
+    let cadence = memory
+        .consolidation_cadence_secs
+        .map(|v| format!("{v}"))
+        .unwrap_or_else(|| "300".to_string());
+    let confidence_floor = memory
+        .confidence_floor
+        .map(|v| format!("{v}"))
+        .unwrap_or_else(|| "0.3".to_string());
 
-    let confidence_item = SettingsPageItem::SettingItem(SettingItem {
-        title: "Confidence Floor",
-        description: "Confidence floor for memory retention (0.0–1.0).",
-        field: Box::new(SettingField {
-            organization_override: None,
-            json_path: Some("kask.memory.confidence_floor"),
-            pick: |settings_content| {
-                settings_content
-                    .kask
-                    .as_ref()?
-                    .memory
-                    .as_ref()?
-                    .confidence_floor
-                    .as_ref()
-            },
-            write: |settings_content, value, _| {
-                settings_content
-                    .kask
-                    .get_or_insert_default()
-                    .memory
-                    .get_or_insert_default()
-                    .confidence_floor = value;
-            },
-        }),
-        metadata: Some(Box::new(SettingsFieldMetadata {
-            placeholder: Some("0.3"),
-            ..Default::default()
-        })),
-        files: USER,
-    });
+    let cadence_input = SettingsInputField::new("kask-memory-consolidation-cadence")
+        .tab_index(0)
+        .with_initial_text(cadence)
+        .with_placeholder("300")
+        .aria_label("Consolidation Cadence (seconds)")
+        .confirm_on_focus_out()
+        .on_confirm(move |value, _window, cx| {
+            if let Some(text) = value {
+                if let Ok(parsed) = text.parse::<u64>() {
+                    SettingsStore::global(cx).update_settings_file(
+                        <dyn fs::Fs>::global(cx),
+                        move |settings, _| {
+                            settings
+                                .kask
+                                .get_or_insert_default()
+                                .memory
+                                .get_or_insert_default()
+                                .consolidation_cadence_secs = Some(parsed);
+                        },
+                    );
+                }
+            }
+        });
 
-    let items = [cadence_item, confidence_item];
+    let confidence_input = SettingsInputField::new("kask-memory-confidence-floor")
+        .tab_index(0)
+        .with_initial_text(confidence_floor)
+        .with_placeholder("0.3")
+        .aria_label("Confidence Floor")
+        .confirm_on_focus_out()
+        .on_confirm(move |value, _window, cx| {
+            if let Some(text) = value {
+                if let Ok(parsed) = text.parse::<f64>() {
+                    SettingsStore::global(cx).update_settings_file(
+                        <dyn fs::Fs>::global(cx),
+                        move |settings, _| {
+                            settings
+                                .kask
+                                .get_or_insert_default()
+                                .memory
+                                .get_or_insert_default()
+                                .confidence_floor = Some(parsed);
+                        },
+                    );
+                }
+            }
+        });
 
     v_flex()
         .id("kask-memory-page")
@@ -854,14 +852,28 @@ pub(crate) fn render_memory_page(
                 ),
         )
         .child(Divider::horizontal())
-        .children(
-            items
-                .iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    item.render(_settings_window, index, false, false, _window, cx)
-                })
-                .collect::<Vec<_>>(),
+        .child(
+            v_flex()
+                .gap_1()
+                .child(Label::new("Consolidation Cadence (seconds)"))
+                .child(
+                    Label::new("Memory consolidation cadence in seconds (0 = disabled).")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(cadence_input),
+        )
+        .child(Divider::horizontal())
+        .child(
+            v_flex()
+                .gap_1()
+                .child(Label::new("Confidence Floor"))
+                .child(
+                    Label::new("Confidence floor for memory retention (0.0–1.0).")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .child(confidence_input),
         )
         .into_any_element()
 }
@@ -871,15 +883,8 @@ pub(crate) fn render_memory_page(
 // ---------------------------------------------------------------------------
 
 /// Read the raw `KaskSettingsContent` from the user settings file.
-fn raw_kask_settings(cx: &App) -> Option<settings_content::KaskSettingsContent> {
+fn raw_kask_settings(cx: &App) -> Option<settings::KaskSettingsContent> {
     SettingsStore::global(cx)
         .raw_user_settings()
         .and_then(|user| user.content.kask.clone())
 }
-
-// Re-export the types we need from the settings_ui crate's own prelude.
-// These are crate-private types, so we use the `crate::` prefix.
-use crate::{
-    FileMask, SettingField, SettingItem, SettingsFieldMetadata, SettingsPage, SettingsPageItem,
-    SubPageLink, USER,
-};
