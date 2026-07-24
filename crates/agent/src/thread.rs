@@ -57,6 +57,7 @@ use settings::{
 };
 use sha2::{Digest, Sha256};
 use std::fmt::Write;
+use std::pin::Pin;
 use std::{cell::RefCell, ops::ControlFlow};
 use std::{
     collections::BTreeMap,
@@ -1821,6 +1822,7 @@ impl Thread {
                 &db_thread.sandbox_grants,
             ))),
             cached_system_prompt: None,
+            deferred_tool_results: Vec::new(),
         }
     }
 
@@ -2273,6 +2275,13 @@ impl Thread {
             if let Some(subagent) = subagent.upgrade() {
                 subagent.update(cx, |thread, cx| thread.cancel(cx)).detach();
             }
+        }
+
+        // Drop deferred tool results — their tasks are cancelled when dropped.
+        let deferred_count = self.deferred_tool_results.len();
+        self.deferred_tool_results.clear();
+        if deferred_count > 0 {
+            log::debug!("Cancelled {deferred_count} deferred tool results");
         }
 
         let Some(running_turn) = self.running_turn.take() else {
@@ -3360,14 +3369,17 @@ impl Thread {
     ///
     /// This is used by non-blocking tools (e.g. `spawn_agent`) that return an
     /// immediate placeholder result and deliver the real output later.
+    #[allow(dead_code)]
     pub(crate) fn enqueue_deferred_tool_result(
         &mut self,
         tool_use_id: LanguageModelToolUseId,
-        task: Task<Result<LanguageModelToolResult>>,
+        receiver: oneshot::Receiver<Result<LanguageModelToolResult>>,
     ) {
-        log::debug!("Enqueued deferred tool result for {}", tool_use_id.as_ref());
-        self.deferred_tool_results
-            .push(DeferredToolResult { task, tool_use_id });
+        log::debug!("Enqueued deferred tool result for {tool_use_id}");
+        self.deferred_tool_results.push(DeferredToolResult {
+            receiver: Some(Box::pin(receiver)),
+            tool_use_id,
+        });
     }
 
     /// Poll all deferred tool results and return those that have completed.
@@ -3378,18 +3390,31 @@ impl Thread {
         if self.deferred_tool_results.is_empty() {
             return Vec::new();
         }
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
         let mut completed = Vec::new();
         let mut remaining = Vec::with_capacity(self.deferred_tool_results.len());
-        for deferred in self.deferred_tool_results.drain(..) {
-            match deferred.task.now_or_never() {
-                Some(result) => {
-                    let result = result.map_err(|err| anyhow!(err));
+        for mut deferred in self.deferred_tool_results.drain(..) {
+            // Poll the receiver in place without consuming it. If ready, take
+            // it out and extract the result. If pending, keep it for the next
+            // poll cycle.
+            let Some(receiver) = deferred.receiver.as_mut() else {
+                remaining.push(deferred);
+                continue;
+            };
+            match receiver.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(result) => {
+                    deferred.receiver = None;
+                    let result = match result {
+                        Ok(result) => result.map_err(|err| anyhow!(err)),
+                        Err(err) => Err(anyhow!(err)),
+                    };
                     completed.push(CompletedDeferredResult {
                         tool_use_id: deferred.tool_use_id,
                         result,
                     });
                 }
-                None => {
+                std::task::Poll::Pending => {
                     remaining.push(deferred);
                 }
             }
@@ -3411,14 +3436,12 @@ impl Thread {
             return false;
         }
 
-        let mut tool_results = IndexMap::new();
+        let mut tool_results: IndexMap<LanguageModelToolUseId, LanguageModelToolResult> =
+            IndexMap::default();
         for result in completed {
             match result.result {
                 Ok(tool_result) => {
-                    log::debug!(
-                        "Deferred tool result completed for {}",
-                        result.tool_use_id.as_ref()
-                    );
+                    log::debug!("Deferred tool result completed for {}", result.tool_use_id);
                     // Emit a tool-call update so the UI reflects completion.
                     event_stream.update_tool_call_fields(
                         &scoped_tool_call_id(self.messages.len(), &result.tool_use_id),
@@ -3436,7 +3459,7 @@ impl Thread {
                 Err(error) => {
                     log::warn!(
                         "Deferred tool result failed for {}: {error}",
-                        result.tool_use_id.as_ref()
+                        result.tool_use_id
                     );
                     let error_result = LanguageModelToolResult {
                         tool_use_id: result.tool_use_id.clone(),
@@ -5192,9 +5215,10 @@ fn take_text_within_byte_budget(text: String, remaining_bytes: &mut usize) -> Op
 /// inner loop's `FuturesUnordered` drain semantics unchanged while allowing
 /// tools to defer their real output beyond the current batch.
 pub(crate) struct DeferredToolResult {
-    /// The task producing the final tool result. Once it completes, the result
-    /// is drained into a synthetic user message.
-    pub task: Task<Result<LanguageModelToolResult>>,
+    /// Receiver for the final tool result, wrapped in a `Pin<Box<...>>` so it
+    /// can be polled in place without consuming. If the receiver is not ready,
+    /// it stays in the `Option` for the next poll cycle.
+    pub receiver: Option<Pin<Box<oneshot::Receiver<Result<LanguageModelToolResult>>>>>,
     /// The tool use ID this result corresponds to. Used for logging and
     /// telemetry; the `LanguageModelToolResult` itself also carries the ID.
     pub tool_use_id: LanguageModelToolUseId,

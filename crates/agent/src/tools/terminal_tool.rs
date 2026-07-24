@@ -1541,7 +1541,7 @@ mod tests {
             },
         );
 
-        assert_eq!(result, "one\ntwo\n\ntwo\nthree");
+        assert_eq!(result, "one\ntwo\n\nthree");
     }
 
     #[test]
@@ -1608,6 +1608,7 @@ mod tests {
                 head_lines: Some(1),
                 tail_lines: Some(1),
             },
+            None,
         );
 
         assert_eq!(result, "```\none\n\nfour\n```");
@@ -1627,6 +1628,7 @@ mod tests {
                 head_lines: None,
                 tail_lines: Some(1),
             },
+            None,
         );
 
         assert!(result.contains("failed with exit code 1"));
@@ -1648,6 +1650,7 @@ mod tests {
                 head_lines: Some(1),
                 tail_lines: None,
             },
+            None,
         );
 
         assert!(result.contains("timed out"));
@@ -1669,6 +1672,7 @@ mod tests {
                 head_lines: None,
                 tail_lines: Some(1),
             },
+            None,
         );
 
         assert!(result.contains("user stopped"));
@@ -1692,6 +1696,7 @@ mod tests {
                 head_lines: Some(1),
                 tail_lines: Some(1),
             },
+            None,
         );
 
         assert!(!result.contains("Showing"));
