@@ -3471,30 +3471,6 @@ impl Thread {
         });
     }
 
-    /// Create a future that awaits the completion of any deferred tool
-    /// result. The future resolves when at least one receiver is ready or
-    /// cancellation is requested. This allows the outer turn loop to block
-    /// cooperatively — the GPUI executor can run other tasks (e.g. the
-    /// subagent's turn) while the parent waits.
-    fn await_any_deferred_result(
-        &self,
-        cx: &mut Context<Self>,
-        cancellation_rx: watch::Receiver<bool>,
-    ) -> Task<()> {
-        cx.background_spawn(async move {
-            loop {
-                if *cancellation_rx.borrow() {
-                    return;
-                }
-                // Poll with a short timer to yield control. The GPUI
-                // background executor will run other tasks between polls.
-                cx.background_executor()
-                    .timer(Duration::from_millis(10))
-                    .await;
-            }
-        })
-    }
-
     /// Poll all deferred tool results and return those that have completed.
     /// Completed entries are removed from `deferred_tool_results`. Uses a
     /// noop waker to poll receivers non-blockingly — incomplete tasks stay
