@@ -551,31 +551,31 @@ fn main() {
             agent::set_memory_port(Some(bridge_memory));
             log::info!("hKask memory port wired (logging) — will upgrade when Zed user resolves");
 
-            // D5: Inject the SecretsPort into hkask-keystore so sovereignty keys
-            // are stored/read via zed's CredentialsProvider in the kask://credentials/<key>
-            // namespace, not via the keyring crate's "hkask" service directly.
-            // This must happen before resolve_a2a_secret() below.
+            // D5: Resolve the a2a_secret BEFORE injecting the SecretsPort.
+            //
+            // The SecretsPort adapter sends credential requests to a GPUI foreground
+            // task via a channel. If we inject it first and then call resolve_a2a_secret()
+            // on the main thread, the SecretsPort adapter uses block_in_place +
+            // Handle::current().block_on() to wait for the GPUI task's reply — but the
+            // GPUI task can't run because the main thread is blocked. Deadlock.
+            //
+            // By resolving before injection, the keychain read falls back to the
+            // `keyring` crate directly (synchronous platform I/O, no channel, no
+            // deadlock). The SecretsPort is injected afterward for all subsequent
+            // reads (which happen on background tasks, not the main thread).
+            let a2a_secret = hkask_keystore::keychain::resolve_a2a_secret()
+                .map(|s| s.to_vec())
+                .unwrap_or_default();
+
+            // Inject the SecretsPort into hkask-keystore so subsequent sovereignty
+            // key reads/writes route through zed's CredentialsProvider in the
+            // kask://credentials/<key> namespace.
             let credentials_provider = zed_credentials_provider::global(cx);
             let (secrets_port, secrets_task) =
                 kask_bridge::CredentialsSecretsPort::new(credentials_provider, async_cx.clone());
             secrets_task.detach();
             hkask_keystore::set_secrets_port(Some(std::sync::Arc::new(secrets_port)));
             log::info!("hKask SecretsPort injected — sovereignty keys via CredentialsProvider");
-
-            // Resolve the a2a_secret for OCAP delegation token minting.
-            // Falls back to an empty vec if the keystore is unavailable (first-run).
-            //
-            // The SecretsPort adapter uses tokio::task::block_in_place +
-            // Handle::current().block_on() to bridge the async credential read.
-            // This requires a Tokio runtime context on the current thread, which
-            // we enter via Tokio::handle(cx).enter() (same pattern as the HTTP
-            // client setup below).
-            let a2a_secret = {
-                let _guard = Tokio::handle(cx).enter();
-                hkask_keystore::keychain::resolve_a2a_secret()
-                    .map(|s| s.to_vec())
-                    .unwrap_or_default()
-            };
 
             // Resolve the registry paths relative to the repo root (dev) or
             // the app bundle's resources (production).
