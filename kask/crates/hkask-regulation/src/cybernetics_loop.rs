@@ -30,8 +30,6 @@
 use crate::dampener::{Dampener, StagnationDetector};
 use crate::energy::{AgentGasStatus, GasBudget, GasCost, GasError};
 use crate::energy_budget_management::GasBudgetManager;
-use crate::seam_watcher::SeamWatcher;
-use crate::set_point_calibrator::SetPointCalibrator;
 
 use crate::runtime::{RegulationCycleEntry, RegulationLedger};
 use crate::sensor_provider::{
@@ -39,7 +37,6 @@ use crate::sensor_provider::{
     WalletKeyHealthSensor,
 };
 use crate::set_points::{InferenceThrottleMode, SetPoints};
-use crate::slo_manager::SloDataProvider;
 use crate::strategy_evaluator::StrategyEvaluator;
 use crate::system_simulator::MovingAverageExtrapolator;
 use crate::tool_stats::ToolStats;
@@ -67,10 +64,6 @@ use std::sync::Mutex;
 use tokio::sync::{RwLock, mpsc};
 
 /// Runtime-calibratable regulation thresholds — mutable layer over `SetPoints` defaults.
-///
-/// The `SetPointCalibrator` updates these from observed regulation outcomes;
-/// the tick reads them for per-cycle regulation decisions. This closes the
-/// Conant-Ashby self-tuning loop: the regulator adapts its own thresholds.
 struct CalibratedThresholds {
     stagnation_thresholds: HashMap<String, u32>,
     block_worsening_ratio: f64,
@@ -102,9 +95,6 @@ pub struct CyberneticsLoop {
     curator_directive_rx: Option<Arc<RwLock<mpsc::UnboundedReceiver<CuratorDirective>>>>,
     /// Loop-quality telemetry from the most recent tick cycle.
     loop_quality: RwLock<LoopMetrics>,
-    /// SLO data provider for periodic SLO evaluation. If set, SLOs are evaluated
-    /// on each tick and breaches are escalated through the algedonic pathway.
-    slo_provider: Option<Arc<dyn SloDataProvider>>,
     /// Path for persisting gas budgets across restarts.
     budget_persistence_path: Option<std::path::PathBuf>,
     /// Detects regulatory plateaus — repeated ineffective (metric, action) pairs.
@@ -120,11 +110,6 @@ pub struct CyberneticsLoop {
     simulator: MovingAverageExtrapolator,
     /// Runtime-calibratable thresholds — updated by `SetPointCalibrator` background task.
     calibrated_thresholds: Arc<RwLock<CalibratedThresholds>>,
-    /// Architectural seam watcher — monitors boundary coverage drift.
-    seam_watcher: Option<Arc<tokio::sync::Mutex<SeamWatcher>>>,
-    /// Last seam drift check timestamp — throttles seam checks to avoid
-    /// running on every tick.
-    last_seam_check: tokio::sync::Mutex<std::time::Instant>,
 }
 
 impl CyberneticsLoop {
@@ -191,7 +176,6 @@ impl CyberneticsLoop {
             event_sink: None,
             alerts_tx: None,
             alert_email_sink: None,
-            slo_provider: None,
             curator_directive_rx: None,
             loop_quality: RwLock::new(LoopMetrics::default()),
             budget_persistence_path: None,
@@ -202,8 +186,6 @@ impl CyberneticsLoop {
             strategy_evaluator: Mutex::new(StrategyEvaluator::new()),
             simulator: MovingAverageExtrapolator::new(10),
             calibrated_thresholds,
-            seam_watcher: None,
-            last_seam_check: tokio::sync::Mutex::new(std::time::Instant::now()),
         }
     }
 
