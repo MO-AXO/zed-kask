@@ -1717,6 +1717,7 @@ impl Thread {
             let tool_event_stream = ToolCallEventStream::new(
                 tool_use.id.clone(),
                 tool_call_id.clone(),
+                message_ix,
                 stream.clone(),
                 Some(self.project.read(cx).fs().clone()),
                 cancellation_rx,
@@ -6404,6 +6405,7 @@ impl ToolCallEventStream {
         let stream = ToolCallEventStream::new(
             "test_id".into(),
             acp::ToolCallId::new("test_id"),
+            0,
             ThreadEventStream(events_tx),
             None,
             cancellation_rx,
@@ -6422,6 +6424,7 @@ impl ToolCallEventStream {
         let stream = ToolCallEventStream::new(
             "test_id".into(),
             acp::ToolCallId::new("test_id"),
+            0,
             ThreadEventStream(events_tx),
             None,
             cancellation_rx,
