@@ -235,19 +235,6 @@ impl CyberneticsLoop {
         self
     }
 
-    /// Wire the SLO data provider for periodic SLO evaluation.
-    ///
-    /// When set, SLOs are evaluated on each tick and breaches are
-    /// escalated through the algedonic pathway.
-    ///
-    /// expect: "The system provides configurable cybernetic self-regulation"
-    /// post: returns Self for chaining
-    #[must_use = "builder methods must be chained or assigned"]
-    pub fn with_slo_provider(mut self, provider: Arc<dyn SloDataProvider>) -> Self {
-        self.slo_provider = Some(provider);
-        self
-    }
-
     /// Enable gas budget persistence across restarts.
     ///
     /// Budgets are saved to the given path after each replenishment cycle
