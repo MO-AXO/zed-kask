@@ -37,6 +37,7 @@ pub mod wallet_budget; // Loop 6 — wallet-backed energy budgets (Phase 5)
 pub mod wallet_manager;
 pub mod well;
 pub use algedonic::{AlertEmailSink, RuntimeAlert};
+pub use cybernetics_loop::CyberneticsLoop;
 pub use energy::{AgentGasStatus, DEFAULT_GAS_ALERT_THRESHOLD, GasBudget, GasCost, GasError};
 pub use energy_budget_management::GasBudgetManager;
 pub use energy_estimator::EnergyEstimator;

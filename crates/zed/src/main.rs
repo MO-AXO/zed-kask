@@ -564,9 +564,18 @@ fn main() {
 
             // Resolve the a2a_secret for OCAP delegation token minting.
             // Falls back to an empty vec if the keystore is unavailable (first-run).
-            let a2a_secret = hkask_keystore::keychain::resolve_a2a_secret()
-                .map(|s| s.to_vec())
-                .unwrap_or_default();
+            //
+            // The SecretsPort adapter uses tokio::task::block_in_place +
+            // Handle::current().block_on() to bridge the async credential read.
+            // This requires a Tokio runtime context on the current thread, which
+            // we enter via Tokio::handle(cx).enter() (same pattern as the HTTP
+            // client setup below).
+            let a2a_secret = {
+                let _guard = Tokio::handle(cx).enter();
+                hkask_keystore::keychain::resolve_a2a_secret()
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default()
+            };
 
             // Resolve the registry paths relative to the repo root (dev) or
             // the app bundle's resources (production).
