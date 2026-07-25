@@ -62,5 +62,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install Linux dependencies
         run: ./script/linux
-      - name: Build zed-kask binary
-        run: cargo check -p zed --bin zed-kask
+      - name: Build all binaries
+        run: cargo build --workspace --bins
