@@ -814,16 +814,21 @@ fn main() {
 
                 // D6: Provision the userpod and replace the logging memory port
                 // with a real one. `provision_userpod` handles first-run setup
-                // as lookups and directory creation — no interactive onboarding:
-                //   1. Create the userpod directory structure on disk
-                //   2. Ensure a DB passphrase exists (auto-generate a random
-                //      English word if none, stored in the keychain)
-                //   3. Return the resolved DB path and passphrase
+                // as lookups and directory creation — no interactive onboarding.
+                //
+                // Run on a background thread because it does blocking I/O (keychain
+                // access via the SecretsPort adapter, which uses tokio block_in_place
+                // — not safe on the GPUI foreground thread).
                 let kask_settings = cx.update(|cx| kask_bridge::KaskSettings::get_global(cx).clone());
                 let embedding_model = std::env::var("HKASK_EMBEDDING_MODEL")
                     .unwrap_or_else(|_| "DI/Qwen/Qwen3-Embedding-0.6B".to_string());
+                let username_for_provision = username.clone();
 
-                match kask_bridge::provision_userpod(&username) {
+                let provision_result = cx.background_spawn(async move {
+                    kask_bridge::provision_userpod(&username_for_provision)
+                }).await;
+
+                match provision_result {
                     Ok(provisioned) => {
                         let kask_bridge::ProvisionedUserpod { db_path, passphrase, webid: user_webid } = provisioned;
                         match kask_bridge::RealMemoryPort::new(
