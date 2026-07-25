@@ -430,62 +430,6 @@ impl CyberneticsLoop {
         self
     }
 
-    /// Wire the `SetPointCalibrator` — spawns a background task that periodically
-    /// evaluates regulation outcomes from the RegulationArchive and adjusts the three
-    /// calibratable thresholds (`stagnation_thresholds`, `block_worsening_ratio`,
-    /// `substitution_after`) within bounded ranges.
-    ///
-    /// This closes the Conant-Ashby self-tuning loop: the regulator adapts its
-    /// own set-points from observed regulation history. The calibrator requires
-    /// a `LedgerStoragePort` to query algedonic/regulation events.
-    ///
-    /// expect: "The system provides configurable cybernetic self-regulation"
-    /// post: returns Self for chaining; background calibration task spawned
-    #[must_use = "builder methods must be chained or assigned"]
-    pub fn with_set_point_calibrator(
-        self,
-        store: Arc<dyn hkask_types::LedgerStoragePort>,
-        interval: std::time::Duration,
-    ) -> Self {
-        let calibrator = Arc::new(SetPointCalibrator::new(store, chrono::Duration::hours(1)));
-        let thresholds = Arc::clone(&self.calibrated_thresholds);
-
-        calibrator.spawn_calibration(interval, move |adjustments| {
-            let mut guard = thresholds.blocking_write();
-            let t = &mut *guard;
-            SetPointCalibrator::apply_adjustments(
-                &adjustments,
-                &mut t.stagnation_thresholds,
-                &mut t.block_worsening_ratio,
-                &mut t.substitution_after,
-            );
-        });
-        self
-    }
-
-    /// Wire the `SeamWatcher` — loads the architectural seam inventory and
-    /// schedules periodic drift checks. When seam coverage regresses, an
-    /// algedonic alert is emitted through the event sink.
-    ///
-    /// expect: "The system provides configurable cybernetic self-regulation"
-    /// post: returns Self for chaining; seam watcher loaded if inventory found
-    #[must_use = "builder methods must be chained or assigned"]
-    pub fn with_seam_watcher(mut self) -> Self {
-        match SeamWatcher::load() {
-            Some(watcher) => {
-                self.seam_watcher = Some(Arc::new(tokio::sync::Mutex::new(watcher)));
-            }
-            None => {
-                tracing::warn!(
-                    target: "hkask.seam",
-                    "SeamWatcher not loaded — no inventory found. \
-                     Set HKASK_SEAM_INVENTORY_PATH or embed at build time."
-                );
-            }
-        }
-        self
-    }
-
     /// Attempt to load persisted budgets from the configured path.
     /// Called automatically during `build()` if a persistence path is set.
     /// Returns count loaded (0 if first run or no path configured).
@@ -1365,13 +1309,6 @@ impl RegulationLoop for CyberneticsLoop {
     async fn tick(&self) {
         let start = std::time::Instant::now();
 
-        // SLO evaluation — runs every tick when provider is wired.
-        if let Some(ref provider) = self.slo_provider {
-            let ledger = self.ledger.read().await;
-            let _ = ledger.evaluate_and_escalate_slos(provider.as_ref()).await;
-            drop(ledger);
-        }
-
         let signals = self.sense().await;
         let deviations = self.compare(&signals).await;
         let actions = self.compute(&deviations).await;
@@ -1500,62 +1437,6 @@ impl RegulationLoop for CyberneticsLoop {
             }),
         )
         .await;
-
-        // ── Seam drift check (throttled to every 10 minutes) ──
-        // Closes the boundary-monitoring loop: detects architectural seam
-        // coverage regression and emits Regulation spans + algedonic alerts.
-        if let Some(ref watcher) = self.seam_watcher {
-            let should_check = {
-                let mut last = self.last_seam_check.lock().await;
-                let elapsed = last.elapsed();
-                if elapsed >= std::time::Duration::from_secs(600) {
-                    *last = std::time::Instant::now();
-                    true
-                } else {
-                    false
-                }
-            };
-            if should_check {
-                let ledger = self.ledger.read().await;
-                let mut watcher = watcher.lock().await;
-                if let Some(ref sink) = self.event_sink {
-                    let drifts = watcher.check_drift(&ledger, sink.as_ref()).await;
-                    if !drifts.is_empty()
-                        && let Some(ref tx) = self.alerts_tx
-                    {
-                        for drift in &drifts {
-                            if drift.delta_pct < 0.0 {
-                                let alert = crate::algedonic::RuntimeAlert {
-                                    domain: format!("seam_drift:{}", drift.crate_name),
-                                    deficit: 1,
-                                    threshold: 1,
-                                    severity: if drift.delta_pct < -5.0 {
-                                        AlertSeverity::Critical
-                                    } else {
-                                        AlertSeverity::Warning
-                                    },
-                                    escalated: true,
-                                    timestamp: chrono::Utc::now(),
-                                    message: format!(
-                                        "Seam coverage regression in {}: {:.1}% → {:.1}% ({:+.1}%)",
-                                        drift.crate_name,
-                                        drift.previous_coverage_pct,
-                                        drift.current_coverage_pct,
-                                        drift.delta_pct,
-                                    ),
-                                };
-                                if tx.send(CurationInput::Alert(alert)).is_err() {
-                                    tracing::warn!(
-                                        target: "hkask.seam",
-                                        "Seam drift alert send failed — channel closed"
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
