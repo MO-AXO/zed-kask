@@ -360,20 +360,6 @@ impl SetPoints {
                 self.outcome_critical_threshold
             ));
         }
-        if self.fed_sync_latency_warning_ms >= self.fed_sync_latency_critical_ms {
-            return Err(anyhow::anyhow!(
-                "fed_sync_latency_warning_ms ({}) must be < fed_sync_latency_critical_ms ({})",
-                self.fed_sync_latency_warning_ms,
-                self.fed_sync_latency_critical_ms
-            ));
-        }
-        if self.fed_link_downtime_warning_secs >= self.fed_link_downtime_critical_secs {
-            return Err(anyhow::anyhow!(
-                "fed_link_downtime_warning_secs ({}) must be < fed_link_downtime_critical_secs ({})",
-                self.fed_link_downtime_warning_secs,
-                self.fed_link_downtime_critical_secs
-            ));
-        }
         if self.variety_max_deficit <= 0.0 {
             return Err(anyhow::anyhow!(
                 "variety_max_deficit must be > 0, got {}",

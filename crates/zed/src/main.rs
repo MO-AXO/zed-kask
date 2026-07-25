@@ -585,116 +585,12 @@ fn main() {
             // D3: McpRuntime is constructed above (before the block) so it's
             // available for both the manifest executor and the post-settings
             // auto-launch.
-
-            // Get the default LanguageModel from zed's registry.
-            let model_registry = language_model::LanguageModelRegistry::read_global(cx);
-            if let Some(configured) = model_registry.default_model() {
-                let (inference_port, inference_task) =
-                    kask_bridge::LanguageModelInferencePort::new(
-                        configured.model.clone(),
-                        async_cx.clone(),
-                    );
-                inference_task.detach();
-
-                // D4: Wrap the InferencePort with GuardedInferencePort so every
-                // skill cascade invocation is scanned for prompt injection (input)
-                // and secret leakage (output). The guard is mandatory (P3.1) —
-                // core scanners (injection, role override, token limit, secrets)
-                // are always active. GuardConfig::from_env() picks up
-                // HKASK_GUARD_TOKEN_LIMIT if set.
-                //
-                // This guards the skill cascade path (ManifestExecutor). Direct
-                // chat uses zed's LanguageModel::stream_completion directly and
-                // relies on provider-side safety + zed's refusal fallback.
-                // The kask.guard.direct_chat_strategy setting controls future
-                // direct-chat guard integration (cascade_only = no guard on
-                // direct chat, only the cascade is guarded — the default).
-                let guard_config = hkask_guard::GuardConfig::from_env();
-                let content_guard = hkask_guard::ContentGuard::mandatory(&guard_config);
-                let guarded_inference = std::sync::Arc::new(
-                    hkask_guard::GuardedInferencePort::new(
-                        std::sync::Arc::new(inference_port),
-                        content_guard,
-                    )
-                );
-
-                // Clone references for the kask panel adapters (below).
-                let panel_inference_port = guarded_inference.clone();
-                let panel_tool_port = tool_port.clone();
-                let panel_a2a_secret = a2a_secret.clone();
-
-                let executor = std::sync::Arc::new(
-                    kask_bridge::BridgeManifestExecutor::new(
-                        guarded_inference,
-                        tool_port,
-                        a2a_secret,
-                        registry_manifests_dir,
-                        registry_templates_dir,
-                    ),
-                );
-                agent::set_manifest_executor(Some(executor));
-                log::info!("hKask manifest executor wired with GuardedInferencePort — skills will run the guarded cascade");
-
-                // D6: The logging memory port was installed above (before this block)
-                // so it is always available. The upgrade to RealMemoryPort happens
-                // in the deferred task after the Zed user resolves.
-
-                // D11: Wire the context injector for memory-based prompt enrichment.
-                //
-                // When auto_inject is enabled in KaskMemorySettings, the injector
-                // retrieves salient memories and injects them into prompts before
-                // inference. The injector shares the same memory_port as the
-                // ingestion path — reads and writes go to the same store.
-                //
-                // Deferred: the context injector needs the real memory port, so
-                // it is wired in the deferred task below (after the userpod resolves).
-                let kask_settings = kask_bridge::KaskSettings::get_global(cx);
-                if kask_settings.memory.auto_inject {
-                    log::info!("hKask context injection enabled — injector will be wired after userpod resolves");
-                } else {
-                    log::info!("hKask context injection disabled (kask.memory.auto_inject = false)");
-                }
-
-                // D12: Wire the thread condenser for tool result compression.
-                //
-                // The condenser does not depend on userpod identity, so it can
-                // be wired immediately.
-                let condenser_settings = &kask_settings.condenser;
-                if condenser_settings.auto_compress_tool_results {
-                    let condenser = std::sync::Arc::new(kask_bridge::BridgeThreadCondenser::new(
-                        &condenser_settings.profile,
-                        condenser_settings.auto_compress_tool_results,
-                    ));
-                    agent::set_thread_condenser(Some(condenser));
-                    log::info!(
-                        "hKask thread condenser wired — tool results will be compressed (profile: {})",
-                        condenser_settings.profile
-                    );
-                } else {
-                    log::info!("hKask tool result compression disabled (kask.condenser.auto_compress_tool_results = false)");
-                }
-
-                // D10: Wire the kask panel's tool invoker and scoped inference.
-                // The panel uses global hooks (set_tool_invoker / set_scoped_inference)
-                // so it doesn't depend on kask_bridge. These adapters wrap the
-                // BridgeToolPort (for direct tool invocation) and the
-                // GuardedInferencePort (for scoped inference).
-                let panel_tool_invoker = std::sync::Arc::new(PanelToolInvoker {
-                    tool_port: panel_tool_port,
-                    a2a_secret: panel_a2a_secret,
-                    executor: cx.background_executor().clone(),
-                });
-                kask_panel::set_tool_invoker(Some(panel_tool_invoker));
-
-                let panel_inference = std::sync::Arc::new(PanelScopedInference {
-                    inference: panel_inference_port,
-                    executor: cx.background_executor().clone(),
-                });
-                kask_panel::set_scoped_inference(Some(panel_inference));
-                log::info!("Kask panel tool invoker + scoped inference wired");
-            } else {
-                log::warn!("No default LanguageModel configured — hKask manifest executor not wired; skills will use body injection");
-            }
+            //
+            // The model-dependent wiring (manifest executor, guard, panel) is
+            // deferred to after language_model::init() — see the block after
+            // language_models::init() below. The SecretsPort, a2a_secret, and
+            // logging memory port are wired here (early) because they don't
+            // depend on the language model registry.
         }
 
         if let Some(app_commit_sha) = app_commit_sha {
@@ -1089,6 +985,92 @@ fn main() {
         );
         kask_panel::init(cx);
         zed::watch_user_agents_md(app_state.fs.clone(), cx);
+
+        // D1/D3/D4/D10/D12: Model-dependent kask wiring.
+        //
+        // This block runs after language_model::init() and language_models::init()
+        // so that LanguageModelRegistry::read_global(cx) is available.
+        //
+        // The SecretsPort, a2a_secret, and logging memory port were wired earlier
+        // (before AppState::set_global) because they don't depend on the language
+        // model registry and are needed by the deferred userpod provisioning task.
+        {
+            let async_cx = cx.to_async();
+            let registry_manifests_dir = std::path::PathBuf::from("kask/registry/manifests");
+            let registry_templates_dir = std::path::PathBuf::from("kask/registry/templates");
+
+            let model_registry = language_model::LanguageModelRegistry::read_global(cx);
+            if let Some(configured) = model_registry.default_model() {
+                let (inference_port, inference_task) =
+                    kask_bridge::LanguageModelInferencePort::new(
+                        configured.model.clone(),
+                        async_cx.clone(),
+                    );
+                inference_task.detach();
+
+                let guard_config = hkask_guard::GuardConfig::from_env();
+                let content_guard = hkask_guard::ContentGuard::mandatory(&guard_config);
+                let guarded_inference = std::sync::Arc::new(
+                    hkask_guard::GuardedInferencePort::new(
+                        std::sync::Arc::new(inference_port),
+                        content_guard,
+                    )
+                );
+
+                let panel_inference_port = guarded_inference.clone();
+                let panel_tool_port = tool_port.clone();
+
+                let executor = std::sync::Arc::new(
+                    kask_bridge::BridgeManifestExecutor::new(
+                        guarded_inference,
+                        tool_port,
+                        a2a_secret.clone(),
+                        registry_manifests_dir,
+                        registry_templates_dir,
+                    ),
+                );
+                agent::set_manifest_executor(Some(executor));
+                log::info!("hKask manifest executor wired with GuardedInferencePort — skills will run the guarded cascade");
+
+                let kask_settings = kask_bridge::KaskSettings::get_global(cx);
+                if kask_settings.memory.auto_inject {
+                    log::info!("hKask context injection enabled — injector will be wired after userpod resolves");
+                } else {
+                    log::info!("hKask context injection disabled (kask.memory.auto_inject = false)");
+                }
+
+                let condenser_settings = &kask_settings.condenser;
+                if condenser_settings.auto_compress_tool_results {
+                    let condenser = std::sync::Arc::new(kask_bridge::BridgeThreadCondenser::new(
+                        &condenser_settings.profile,
+                        condenser_settings.auto_compress_tool_results,
+                    ));
+                    agent::set_thread_condenser(Some(condenser));
+                    log::info!(
+                        "hKask thread condenser wired — tool results will be compressed (profile: {})",
+                        condenser_settings.profile
+                    );
+                } else {
+                    log::info!("hKask tool result compression disabled (kask.condenser.auto_compress_tool_results = false)");
+                }
+
+                let panel_tool_invoker = std::sync::Arc::new(PanelToolInvoker {
+                    tool_port: panel_tool_port,
+                    a2a_secret: a2a_secret.clone(),
+                    executor: cx.background_executor().clone(),
+                });
+                kask_panel::set_tool_invoker(Some(panel_tool_invoker));
+
+                let panel_inference = std::sync::Arc::new(PanelScopedInference {
+                    inference: panel_inference_port,
+                    executor: cx.background_executor().clone(),
+                });
+                kask_panel::set_scoped_inference(Some(panel_inference));
+                log::info!("Kask panel tool invoker + scoped inference wired");
+            } else {
+                log::warn!("No default LanguageModel configured — hKask manifest executor not wired; skills will use body injection");
+            }
+        }
 
         repl::init(app_state.fs.clone(), cx);
         recent_projects::init(cx);
