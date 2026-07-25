@@ -458,9 +458,8 @@ impl SerializableItem for KaskPanel {
         _window: &mut Window,
         _cx: &mut App,
     ) -> Task<anyhow::Result<Entity<Self>>> {
-        let workspace_handle = workspace.clone();
         _cx.spawn(async move |cx| {
-            workspace_handle.update_in(cx, |workspace, window, cx| {
+            workspace.update_in(cx, |workspace, window, cx| {
                 KaskPanel::new(workspace, window, cx)
             })
         })
