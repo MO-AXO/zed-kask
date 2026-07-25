@@ -416,12 +416,6 @@ pub async fn run(
                     runpod_container_disk_gb: parse_optional_u32(
                         ctx.credentials.get("RUNPOD_CONTAINER_DISK_GB"),
                     ),
-                    runpod_min_memory_gb: parse_optional_u32(
-                        ctx.credentials.get("RUNPOD_MIN_MEMORY_GB"),
-                    ),
-                    runpod_min_vcpu_count: parse_optional_u32(
-                        ctx.credentials.get("RUNPOD_MIN_VCPU_COUNT"),
-                    ),
                     runpod_docker_image: ctx
                         .credentials
                         .get("RUNPOD_DOCKER_IMAGE")
@@ -486,14 +480,7 @@ pub async fn run(
                 "RUNPOD_CONTAINER_DISK_GB",
                 "Container disk in GB. Authoritative when set; 0/empty defers to the model-size heuristic",
             ),
-            hkask_mcp_server::CredentialRequirement::optional(
-                "RUNPOD_MIN_MEMORY_GB",
-                "Minimum pod memory in GB. Authoritative when set; 0/empty defers to the default (24)",
-            ),
-            hkask_mcp_server::CredentialRequirement::optional(
-                "RUNPOD_MIN_VCPU_COUNT",
-                "Minimum vCPU count. Authoritative when set; 0/empty defers to the default (8)",
-            ),
+
             hkask_mcp_server::CredentialRequirement::optional(
                 "RUNPOD_DOCKER_IMAGE",
                 "Docker image name. Authoritative when set; empty defers to the canonical Axolotl image",
@@ -514,11 +501,11 @@ pub async fn run(
 
 /// Parse an optional `u32` credential value.
 ///
-/// Used for the Runpod deployment settings (`RUNPOD_CONTAINER_DISK_GB`,
-/// `RUNPOD_MIN_MEMORY_GB`, `RUNPOD_MIN_VCPU_COUNT`) that flow through
-/// `ServerContext.credentials` as strings. Returns `0` for `None`, empty
-/// string, or unparseable input — `RunpodHost::submit` treats `0` as
-/// "operator did not set this" and falls back to the documented default.
+/// Used for the Runpod deployment settings (`RUNPOD_CONTAINER_DISK_GB`)
+/// that flow through `ServerContext.credentials` as strings. Returns `0`
+/// for `None`, empty string, or unparseable input — `RunpodHost::submit`
+/// treats `0` as "operator did not set this" and falls back to the
+/// documented default.
 ///
 /// post: returns 0 iff the input is absent, empty, or not a valid u32
 fn parse_optional_u32(value: Option<&String>) -> u32 {
