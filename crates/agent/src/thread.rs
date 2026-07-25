@@ -3259,25 +3259,6 @@ impl Thread {
                     }
                 })?;
             } else if end_turn {
-                // Don't end the turn if there are pending deferred tool
-                // results. The outer loop will drain them on the next
-                // iteration. Use a short GPUI timer to yield control so
-                // deferred tasks can make progress without busy-spinning.
-                let has_pending_deferred =
-                    this.read_with(cx, |this, _| !this.deferred_tool_results.is_empty())?;
-                if has_pending_deferred {
-                    log::debug!("Turn has pending deferred results, yielding to executor");
-                    // Yield control to the executor so deferred tasks (e.g.
-                    // subagent turns) can make progress. A zero-duration timer
-                    // cooperates with the GPUI scheduler without adding real
-                    // delay.
-                    cx.background_executor().timer(Duration::ZERO).await;
-                    if *cancellation_rx.borrow() {
-                        return Ok(());
-                    }
-                    intent = CompletionIntent::ToolResults;
-                    continue;
-                }
                 return Ok(());
             } else {
                 let end_at_boundary =
@@ -3488,6 +3469,30 @@ impl Thread {
             owning_message_ix,
             tool_name,
         });
+    }
+
+    /// Create a future that awaits the completion of any deferred tool
+    /// result. The future resolves when at least one receiver is ready or
+    /// cancellation is requested. This allows the outer turn loop to block
+    /// cooperatively — the GPUI executor can run other tasks (e.g. the
+    /// subagent's turn) while the parent waits.
+    fn await_any_deferred_result(
+        &self,
+        cx: &mut Context<Self>,
+        cancellation_rx: watch::Receiver<bool>,
+    ) -> Task<()> {
+        cx.background_spawn(async move {
+            loop {
+                if *cancellation_rx.borrow() {
+                    return;
+                }
+                // Poll with a short timer to yield control. The GPUI
+                // background executor will run other tasks between polls.
+                cx.background_executor()
+                    .timer(Duration::from_millis(10))
+                    .await;
+            }
+        })
     }
 
     /// Poll all deferred tool results and return those that have completed.
