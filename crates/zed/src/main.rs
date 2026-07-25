@@ -570,22 +570,6 @@ fn main() {
             agent::set_memory_port(Some(bridge_memory));
             log::info!("hKask memory port wired (logging) — will upgrade when Zed user resolves");
 
-            // D5: Resolve the a2a_secret BEFORE injecting the SecretsPort.
-            //
-            // The SecretsPort adapter sends credential requests to a GPUI foreground
-            // task via a channel. If we inject it first and then call resolve_a2a_secret()
-            // on the main thread, the SecretsPort adapter uses block_in_place +
-            // Handle::current().block_on() to wait for the GPUI task's reply — but the
-            // GPUI task can't run because the main thread is blocked. Deadlock.
-            //
-            // By resolving before injection, the keychain read falls back to the
-            // `keyring` crate directly (synchronous platform I/O, no channel, no
-            // deadlock). The SecretsPort is injected afterward for all subsequent
-            // reads (which happen on background tasks, not the main thread).
-            let a2a_secret = hkask_keystore::keychain::resolve_a2a_secret()
-                .map(|s| s.to_vec())
-                .unwrap_or_default();
-
             // Inject the SecretsPort into hkask-keystore so subsequent sovereignty
             // key reads/writes route through zed's CredentialsProvider in the
             // kask://credentials/<key> namespace.
