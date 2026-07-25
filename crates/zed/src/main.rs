@@ -532,6 +532,25 @@ fn main() {
             mcp_runtime.clone(),
         ));
 
+        // D5: Resolve the a2a_secret BEFORE injecting the SecretsPort.
+        //
+        // The SecretsPort adapter sends credential requests to a GPUI foreground
+        // task via a channel. If we inject it first and then call resolve_a2a_secret()
+        // on the main thread, the SecretsPort adapter uses block_in_place +
+        // Handle::current().block_on() to wait for the GPUI task's reply — but the
+        // GPUI task can't run because the main thread is blocked. Deadlock.
+        //
+        // By resolving before injection, the keychain read falls back to the
+        // `keyring` crate directly (synchronous platform I/O, no channel, no
+        // deadlock). The SecretsPort is injected afterward for all subsequent
+        // reads (which happen on background tasks, not the main thread).
+        //
+        // Hoisted out of the block below so it's in scope for the model-dependent
+        // wiring block after language_models::init().
+        let a2a_secret = hkask_keystore::keychain::resolve_a2a_secret()
+            .map(|s| s.to_vec())
+            .unwrap_or_default();
+
         {
             let async_cx = cx.to_async();
 
@@ -576,11 +595,6 @@ fn main() {
             secrets_task.detach();
             hkask_keystore::set_secrets_port(Some(std::sync::Arc::new(secrets_port)));
             log::info!("hKask SecretsPort injected — sovereignty keys via CredentialsProvider");
-
-            // Resolve the registry paths relative to the repo root (dev) or
-            // the app bundle's resources (production).
-            let registry_manifests_dir = std::path::PathBuf::from("kask/registry/manifests");
-            let registry_templates_dir = std::path::PathBuf::from("kask/registry/templates");
 
             // D3: McpRuntime is constructed above (before the block) so it's
             // available for both the manifest executor and the post-settings
