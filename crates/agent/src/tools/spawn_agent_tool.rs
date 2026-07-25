@@ -161,7 +161,7 @@ impl AgentTool for SpawnAgentTool {
                     session_info: None,
                 })?;
 
-            let (subagent, session_info) = cx.update(|cx| {
+            let (subagent, mut session_info) = cx.update(|cx| {
                 let subagent = if let Some(session_id) = input.session_id {
                     self.environment.resume_subagent(session_id, cx)
                 } else {

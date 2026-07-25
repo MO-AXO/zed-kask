@@ -6319,6 +6319,7 @@ pub struct ToolCallEventStream {
     /// The index in `Thread.messages` of the agent message containing the
     /// `ToolUse` block for this tool call. Used by `enqueue_deferred_result`
     /// to inject the deferred result into the correct message.
+    #[allow(dead_code)]
     owning_message_ix: usize,
     stream: ThreadEventStream,
     fs: Option<Arc<dyn Fs>>,
@@ -6345,6 +6346,7 @@ impl ToolCallEventStream {
     ///
     /// Returns `true` if the deferred result was successfully enqueued,
     /// `false` if the parent thread is no longer alive.
+    #[allow(dead_code)]
     pub(crate) fn enqueue_deferred_result(
         &self,
         tool_name: Arc<str>,
