@@ -137,18 +137,18 @@ hKask's architecture has four control planes (surfaces), each with distinct node
 - `CurationLoop` — the pure regulatory observer (sense/compute/act)
 - `MetacognitionLoop` — the persona/agent loop (template-driven metacognition)
 - `zed-kask thread-watcher` — the passive observer background task (replaces the deleted 7R7 Listener / Matrix rooms; zero authority)
-- `R7.3 SeamWatcher` — the in-process seam contract observer (watches D1–D10 integration seams; the deleted public API is no longer observed; zero authority)
 - `DefaultSpecCurator` — the spec drift detector (Conant-Ashby: model vs. reality)
 - `CuratorContext` — the capability-disciplined access point (OCAP-gated)
+
+> **2026-07-25 cleanup note:** `R7.3 SeamWatcher` was deleted in the 2026-07-25 cleanup. The in-process seam contract observation it provided is no longer a separate node; seam coverage is not a variety dimension in the current regulation system.
 
 **Edges:**
 - `CurationLoop → CuratorAgent` — `CuratorDirective` dispatch
 - `MetacognitionLoop → InferencePort` — template-driven diagnosis (KnowAct)
 - `CuratorAgent → CuratorThread` — in-process Curator thread (replaces the deleted `CuratorAgent → MatrixTransport` edge; the Curator posts to its in-process thread, not Matrix rooms)
 - `CuratorContext → RegulationLedger` — capability-disciplined Regulation access
-- `SeamWatcher → RegulationLedger` — seam coverage as variety dimension
 
-> **Deleted edges (v0.31.0, in-process pivot):** `CuratorAgent → A2ARuntime` (direct_bot) is removed from this plane — A2A is deferred (see Plane D). `CuratorAgent → MatrixTransport` is removed — Matrix is deleted. The 7R7 Listener is replaced by the zed-kask thread-watcher background task. The R7.3 SeamWatcher no longer observes a public API (deleted); it observes in-process seams instead.
+> **Deleted edges (v0.31.0, in-process pivot):** `CuratorAgent → A2ARuntime` (direct_bot) is removed from this plane — A2A is deferred (see Plane D). `CuratorAgent → MatrixTransport` is removed — Matrix is deleted. The 7R7 Listener is replaced by the zed-kask thread-watcher background task. The R7.3 SeamWatcher was deleted in the 2026-07-25 cleanup (no longer observes in-process seams as a separate node).
 
 **Interaction loops:**
 - **Two-level meta-loop:** Cybernetics regulates agents → Curation regulates Cybernetics → if Cybernetics unstable, Curation detects via metacognitive monitoring and intervenes
@@ -162,39 +162,37 @@ hKask's architecture has four control planes (surfaces), each with distinct node
 - Q5 (How quickly can we go and see?) = `MetacognitionLoop`'s `verify_impact()` — the Curator re-senses after intervening
 - The Coaching Kata's 5 questions = `MetacognitionLoop`'s 5-phase cycle (decompose → assess → ellipsis → calibrate → converge)
 
-### 2.4 Control Plane D — The Agent Pod Plane (Pattern D: Agent Creation + Sovereign Memory)
+### 2.4 Control Plane D — The Per-User Container Plane (Pattern D: Agent Creation + Sovereign Memory)
 
-**What it is:** The sovereign container infrastructure — each human user gets a userpod with its own identity, capabilities, memory, and consent boundaries. The userpod is the deployment unit that makes the human's agent-panel experience sovereign (P1). Agent pods (`hkask-pods`) are the runtime container; the human user is the principal.
+**What it is:** The sovereign container infrastructure — each human user gets a userpod (a user/curator data directory) with its own identity, capabilities, memory, and consent boundaries. The userpod is the deployment unit that makes the human's agent-panel experience sovereign (P1). The human user is the principal.
 
-**Kata correspondence:** The Agent Pod Plane is the **implementation surface** — the place where the Kata is practiced. The human user is the learner practicing the Kata; the userpod is the sovereign container that carries their identity and memory. The Curator is the coach.
+> **2026-07-25 cleanup note:** The `hkask-pods` pod abstraction (`PodDeployment`, `PodFactory`, `PodRegistry`, `ActivePods`, `PerPodRegulationLedger`, `PerPodStorage`, `AgentPod`, `A2ARuntime`, `CuratorSync`) was deleted in the 2026-07-25 cleanup. The equivalent boundary is now the per-user data directory isolation enforced by the in-process sovereignty checker and OCAP membranes. See `zed-host-architecture-plan.md` for the current module inventory.
+
+**Kata correspondence:** The Per-User Container Plane is the **implementation surface** — the place where the Kata is practiced. The human user is the learner practicing the Kata; the userpod (user/curator data directory) is the sovereign container that carries their identity and memory. The Curator is the coach.
 
 **Nodes:**
-- `PodDeployment` — the canonical pod type (per-pod SQLCipher, Regulation, MCP)
-- `PodFactory` — the stateless constructor
-- `PodRegistry` — filesystem-based discovery
-- `ActivePods` — the runtime registry
-- `PerPodRegulationLedger` — per-pod Regulation isolation (`reg.agent_pod.{pod_id}.*`)
-- `PerPodStorage` — per-pod SQLCipher boundary
-- `AgentPod` — identity, lifecycle, persona, capability token
-- `A2ARuntime` — agent-to-agent messaging (TemplateDispatch, TemplateResponse, MemoryArtifact) — **DEFERRED (v0.31.0):** A2A is not live; the type is retained for future inter-pod/inter-agent messaging but is not wired at the composition root
+- Per-user data directory — the canonical sovereign container (per-user SQLCipher, Regulation, MCP)
+- In-process sovereignty gate — per-user capability + sovereignty enforcement
+- Per-user Regulation ledger — per-user Regulation isolation (`reg.agent_pod.{user_id}.*`)
+- Per-user storage — per-user SQLCipher boundary
+- `A2ARuntime` — agent-to-agent messaging (TemplateDispatch, TemplateResponse, MemoryArtifact) — **DEFERRED (v0.31.0):** A2A is not live; the type is retained for future inter-user/inter-agent messaging but is not wired at the composition root
 
 **Edges:**
-- `PodFactory::deploy() → PodDeployment` — pod creation
-- `PodDeployment → PerPodRegulationLedger` — per-pod Regulation scoping
-- `PodDeployment → McpRuntime` — per-pod MCP bindings
+- User data directory → per-user Regulation ledger — per-user Regulation scoping
+- User data directory → McpRuntime — per-user MCP bindings
 - `A2ARuntime → A2AMessage` — inter-agent communication — **DEFERRED:** edge is not active in v0.31.0
-- `CuratorSync → SemanticIndex` — cross-pod semantic aggregation — **DEFERRED:** cross-pod aggregation requires A2A/multi-pod, which is deferred; in single-user in-process mode there is one userpod and no cross-pod sync
+- `CuratorSync → SemanticIndex` — cross-user semantic aggregation — **DEFERRED:** cross-user aggregation requires A2A/multi-user, which is deferred; in single-user in-process mode there is one userpod and no cross-user sync
 
 **Interaction loops:**
-- **Pod lifecycle loop:** Creation → Populated → Registered → Activated → Deactivated
+- **User container lifecycle loop:** Creation → Populated → Registered → Activated → Deactivated
 - **Dual memory encoding loop:** tool call → `record_experience()` → episodic (private) + semantic (public) → every 10 experiences → `generate_narrative()`
 - **Consent loop:** `ConsentManager` requires explicit affirmative consent for visibility transitions → sovereignty fails closed
-- **CuratorSync loop:** `store_semantic()` writes locally → `reg.semantic.published` → `CuratorSync` polling → `SemanticIndex` aggregation — **DEFERRED:** the cross-pod CuratorSync loop is not active in v0.31.0; local `store_semantic()` still emits `reg.semantic.published`, but no cross-pod aggregation runs
+- **CuratorSync loop:** `store_semantic()` writes locally → `reg.semantic.published` → `CuratorSync` polling → `SemanticIndex` aggregation — **DEFERRED:** the cross-user CuratorSync loop is not active in v0.31.0; local `store_semantic()` still emits `reg.semantic.published`, but no cross-user aggregation runs
 
 **Kata alignment:**
 - The learner (UserPod) practices the Kata on this plane
 - The coach (Curator) observes via Regulation spans emitted from this plane
-- Each pod's `PerPodRegulationLedger` is the learner's local sensorium — the coach cannot see inside the learner's head, only the behaviors the learner emits
+- Each user's per-user Regulation ledger is the learner's local sensorium — the coach cannot see inside the learner's head, only the behaviors the learner emits
 
 ---
 
