@@ -33,7 +33,6 @@ pub(crate) mod history;
 pub(crate) mod improvement;
 pub(crate) mod manifest;
 pub(crate) mod metrics;
-pub(crate) mod starter;
 pub(crate) mod state;
 
 pub use error::KataError;
@@ -286,86 +285,14 @@ impl KataEngine {
         Ok(manifest)
     }
 
-    /// Run a bundle manifest that orchestrates kata selection and execution.
-    ///
-    /// Bundle manifests (like kata-pattern.yaml) don't have a fixed kata_type.
-    /// Instead, they use a selector template to route to the appropriate kata
-    /// based on the agent's history, automaticity, and context.
-    ///
-    /// `[P5]` Motivating: Essentialism — service-layer orchestration earns its existence; no raw domain logic.
-    /// pre:  manifest must have at least one step for selector; learner_bot must be non-empty
-    /// post: returns KataResult from the selected kata execution; Err on selector failure or kata execution error
-    #[must_use = "result must be used"]
-    pub async fn run_bundle(
-        &self,
-        manifest: &KataManifest,
-        learner_bot: &str,
-        initial_context: HashMap<String, String>,
-    ) -> Result<KataResult, KataError> {
-        let manifests_dir = std::path::PathBuf::from("registry/manifests");
-
-        // Step 1: Select the appropriate kata type
-        let selector_output = if let Some(step) = manifest.steps.first() {
-            let state = KataState {
-                learner_bot: learner_bot.to_string(),
-                context: initial_context.clone(),
-                ..Default::default()
-            };
-
-            if manifest.ledger.emit_spans {
-                // P9: Regulation span
-                tracing::info!(
-                    target: "reg.kata",
-                    namespace = %manifest.ledger.span_namespace,
-                    kata_type = "bundle",
-                    bot = %learner_bot,
-                    "REG"
-                );
-            }
-
-            self.execute_step(manifest, step, &state).await?
-        } else {
-            return Err(KataError::NoSteps(manifest.manifest.id.clone()));
-        };
-
-        // Step 2: Route to the selected kata
-        let selected = selector_output
-            .get("selected_kata")
-            .and_then(|v| v.as_str())
-            .unwrap_or("starter");
-
-        let kata_manifest_name = match selected {
-            "improvement" => "kata-improvement.yaml",
-            "coaching" => "kata-coaching.yaml",
-            _ => "kata-improvement.yaml", // kata-starter folded into kata-improvement as beginner_mode
-        };
-
-        // P9: Regulation span
-        tracing::info!(
-            target: "reg.kata",
-            namespace = %manifest.ledger.span_namespace,
-            selected = %selected,
-            manifest = %kata_manifest_name,
-            bot = %learner_bot,
-            "REG"
-        );
-
-        // Load and execute the selected kata manifest
-        let kata_path = manifests_dir.join(kata_manifest_name);
-        let kata_manifest = Self::load_manifest(&kata_path)?;
-        self.execute(&kata_manifest, learner_bot, initial_context)
-            .await
-    }
-
     /// Execute a full kata cycle.
     ///
     /// Dispatches to the appropriate runner based on `manifest.manifest.kata_type`:
     /// - "improvement" → run improvement steps with before/after metrics
     /// - "coaching" → run coaching questions (requires optional IK state reference)
-    /// - "starter" → run practice routines with habit tracking
     ///
     /// `[P5]` Motivating: Essentialism — service-layer orchestration earns its existence; no raw domain logic.
-    /// pre:  manifest.manifest.kata_type must be "improvement", "coaching", or "starter"; learner_bot must be non-empty
+    /// pre:  manifest.manifest.kata_type must be "improvement" or "coaching"; learner_bot must be non-empty
     /// post: returns KataResult with steps_completed, gas_consumed, and kata-type-specific outputs; Err(UnknownType) on invalid kata_type
     #[must_use = "result must be used"]
     pub async fn execute(
@@ -451,69 +378,6 @@ impl KataEngine {
                         namespace = %manifest.ledger.span_namespace,
                         questions = result.steps_completed,
                         gas = result.gas_consumed,
-                        "REG"
-                    );
-                }
-                Ok(result)
-            }
-            "starter" => {
-                // Track automaticity before starting
-                let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-                let auto_before = self
-                    .history
-                    .as_ref()
-                    .map(|h| h.compute_automaticity(learner_bot, &today))
-                    .unwrap_or(0.0);
-
-                // P9: Regulation span
-                if manifest.ledger.emit_spans {
-                    tracing::info!(
-                        target: "reg.kata",
-                        namespace = %manifest.ledger.span_namespace,
-                        kata_type = "starter",
-                        bot = %learner_bot,
-                        automaticity_before = auto_before,
-                        "REG"
-                    );
-                }
-                let mut result = self.run_starter(manifest, &mut state).await?;
-                result.step_experiences = state.step_experiences.clone();
-
-                // Compute automaticity delta (history mutation happens in CLI layer)
-                let auto_after = self
-                    .history
-                    .as_ref()
-                    .map(|h| h.compute_automaticity(learner_bot, &today))
-                    .unwrap_or(0.0);
-                result.automaticity_delta = Some(auto_after - auto_before);
-
-                // Regulation automaticity measurement: track habit formation progress
-                if auto_after > 0.0 {
-                    self.increment_ledger_variety(
-                        &manifest.ledger.span_namespace,
-                        "kata.automaticity.score",
-                    )
-                    .await;
-                    if auto_after > 0.5 {
-                        self.increment_ledger_variety(
-                            &manifest.ledger.span_namespace,
-                            "kata.habit.formation",
-                        )
-                        .await;
-                    }
-                }
-
-                // Regulation algedonic check: is starter practice variety deficit exceeding threshold?
-                self.check_reg_alerts(manifest, "starter").await;
-
-                // P9: Regulation span
-                if manifest.ledger.emit_spans {
-                    tracing::info!(
-                        target: "reg.kata",
-                        namespace = %manifest.ledger.span_namespace,
-                        practices = result.steps_completed,
-                        automaticity_after = auto_after,
-                        automaticity_delta = result.automaticity_delta,
                         "REG"
                     );
                 }
