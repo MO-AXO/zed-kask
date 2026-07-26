@@ -367,8 +367,7 @@ const KNOWN_TERMS: &[&str] = &[
 /// expect: "The system validates template contracts against the lexicon"
 /// pre:  term may be any string
 /// post: returns true if term is in KNOWN_TERMS
-#[allow(dead_code)]
-pub(crate) fn is_known(term: &str) -> bool {
+pub fn is_known(term: &str) -> bool {
     KNOWN_TERMS.binary_search(&term).is_ok()
 }
 
@@ -421,8 +420,7 @@ pub(crate) fn validate_entry(entry: &RegistryEntry) -> Vec<String> {
 /// expect: "The system validates template contracts against the lexicon"
 /// pre:  term may be any string
 /// post: returns true if term matches ^[a-z][a-z0-9_]*$
-#[allow(dead_code)]
-pub(crate) fn is_well_formed(term: &str) -> bool {
+pub fn is_well_formed(term: &str) -> bool {
     let mut chars = term.chars();
     match chars.next() {
         Some(first) if first.is_ascii_lowercase() => {
