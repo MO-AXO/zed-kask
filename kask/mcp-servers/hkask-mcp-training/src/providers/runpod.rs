@@ -640,10 +640,12 @@ pub fn generate_install_script(
     script.push_str(
         "# ── Extract final training metrics from log ─────────────────────────────────\n",
     );
-    script.push_str("FINAL_LOSS=$(grep -oP \"'loss':\\s*\\K[0-9eE.+-]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
-    script.push_str("FINAL_GRAD_NORM=$(grep -oP \"'grad_norm':\\s*\\K[0-9eE.+-]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
-    script.push_str("FINAL_STEP=$(grep -oP \"'step':\\s*\\K[0-9]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
-    script.push_str("TOTAL_STEPS=$(grep -oP \"'total_steps':\\s*\\K[0-9]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
+    script.push_str("FINAL_LOSS=$(grep -oP \"'loss':\\\\s*\\\\K[0-9eE.+-]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
+    script.push_str("FINAL_GRAD_NORM=$(grep -oP \"'grad_norm':\\\\s*\\\\K[0-9eE.+-]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
+    // 'step' may appear as 'step': N in the per-step dict, or as 'global_step' in TrainerState.
+    script.push_str("FINAL_STEP=$(grep -oP \"'(step|global_step)':\\\\s*\\\\K[0-9]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
+    // 'total_steps' appears as 'max_steps' in HF Transformers TrainerState output.
+    script.push_str("TOTAL_STEPS=$(grep -oP \"'(total_steps|max_steps)':\\\\s*\\\\K[0-9]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
     script.push_str("# Format as JSON values (null if empty)\n");
     script.push_str(
         "FINAL_LOSS_JSON=$( [ -n \"$FINAL_LOSS\" ] && echo \"$FINAL_LOSS\" || echo \"null\" )\n",
@@ -1277,10 +1279,25 @@ mod tests {
         // Verify the install script includes metric-extraction lines for
         // loss, grad_norm, step, and total_steps — these feed the completion
         // manifest's runtime fields consumed by G-R1.
+        let mut params = TrainingParams {
+            num_epochs: 3,
+            batch_size: 1,
+            learning_rate: 1e-4,
+            ..TrainingParams::default()
+        };
+        params.lora.r = 32;
+        params.lora.alpha = 64;
+        params.lora.init_lora_weights = Some(crate::providers::types::LoraInit::Eva);
+        params.optimization.gradient_accumulation_steps = 16;
+        params.optimization.lr_scheduler = Some("cosine".to_string());
+        params.optimization.warmup_steps = Some(100);
+        params.sequence.sequence_len = Some(4096);
+        params.advanced.bf16 = true;
+        params.advanced.eval_split_ratio = Some(0.0012);
         let job = TrainingJob::new(
             std::path::PathBuf::from("/tmp/train_chat_full.jsonl"),
             "Qwen3:8b".to_string(),
-            TrainingParams::default(),
+            params,
             TrainingHostId::Runpod,
             TrainingHarnessId::Axolotl,
         );
