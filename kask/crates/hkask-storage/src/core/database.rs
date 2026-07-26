@@ -428,7 +428,7 @@ pub fn open_database(path: &str, passphrase: &str) -> Result<Database, DatabaseE
 ///
 /// Unlike SQLite's `Database::open`, there is no separate passphrase/salt flow —
 /// encryption at rest is the operator's responsibility (TLS to a remote Postgres
-/// + disk encryption). The `passphrase` parameter is accepted for API symmetry
+/// plus disk encryption). The `passphrase` parameter is accepted for API symmetry
 /// with `open_database` but is not used by the Postgres path.
 ///
 /// pre:  `url` is a valid PostgreSQL connection string (e.g. `postgres://user:pass@host/db`)
