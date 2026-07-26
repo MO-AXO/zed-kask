@@ -859,28 +859,26 @@ impl ManifestExecutor {
                 // the step's template_ref (e.g. "sankey-flow/sankey-classify" →
                 // "classify"). Only select steps emit feedback spans — loop,
                 // choice, abort, and escalate are control flow, not PDCA phases.
-                if step.action == "select" {
-                    if let Some(ref template_ref) = step.template_ref {
-                        if let Some(phase) = extract_feedback_phase(template_ref) {
-                            let span_target =
-                                format!("{}.{}", manifest.ledger.span_namespace, phase);
-                            // tracing's target: needs &'static str, but we have a
-                            // dynamic namespace. Use tracing::event! with the
-                            // target as a field instead, and emit under the
-                            // generic "reg.skill" target (which is registered).
-                            // The full namespace is carried in the `ns` field.
-                            info!(
-                                target: "reg.skill",
-                                ns = %span_target,
-                                skill_id = %manifest.id,
-                                phase = phase,
-                                step = step.ordinal,
-                                iteration = iteration,
-                                template_ref = %template_ref,
-                                "REG"
-                            );
-                        }
-                    }
+                if step.action == "select"
+                    && let Some(ref template_ref) = step.template_ref
+                    && let Some(phase) = extract_feedback_phase(template_ref)
+                {
+                    let span_target = format!("{}.{}", manifest.ledger.span_namespace, phase);
+                    // tracing's target: needs &'static str, but we have a
+                    // dynamic namespace. Use tracing::event! with the
+                    // target as a field instead, and emit under the
+                    // generic "reg.skill" target (which is registered).
+                    // The full namespace is carried in the `ns` field.
+                    info!(
+                        target: "reg.skill",
+                        ns = %span_target,
+                        skill_id = %manifest.id,
+                        phase = phase,
+                        step = step.ordinal,
+                        iteration = iteration,
+                        template_ref = %template_ref,
+                        "REG"
+                    );
                 }
 
                 step_idx += 1;
