@@ -1273,6 +1273,61 @@ mod tests {
     }
 
     #[test]
+    fn install_script_extracts_runtime_metrics_from_log() {
+        // Verify the install script includes metric-extraction lines for
+        // loss, grad_norm, step, and total_steps — these feed the completion
+        // manifest's runtime fields consumed by G-R1.
+        let job = TrainingJob::new(
+            std::path::PathBuf::from("/tmp/train_chat_full.jsonl"),
+            "Qwen3:8b".to_string(),
+            TrainingParams::default(),
+            TrainingHostId::Runpod,
+            TrainingHarnessId::Axolotl,
+        );
+        let mut job = job;
+        job.artifacts = Some(crate::huggingface::TrainingArtifacts {
+            dataset: crate::huggingface::TrainingArtifact {
+                repository: "test/dataset".to_string(),
+                revision: "main".to_string(),
+                path: "train.jsonl".to_string(),
+                sha256: String::new(),
+            },
+            model_repository: "test/model".to_string(),
+            completion_manifest_path: "/workspace/completion.json".to_string(),
+        });
+        let script = generate_install_script(&job, TrainingHarnessId::Axolotl)
+            .expect("generate install script");
+        assert!(
+            script.contains("FINAL_LOSS="),
+            "script must extract final loss"
+        );
+        assert!(
+            script.contains("FINAL_GRAD_NORM="),
+            "script must extract final grad_norm"
+        );
+        assert!(
+            script.contains("FINAL_STEP="),
+            "script must extract final step"
+        );
+        assert!(
+            script.contains("TOTAL_STEPS="),
+            "script must extract total steps"
+        );
+        assert!(
+            script.contains("\"grad_norm\""),
+            "manifest must include grad_norm field"
+        );
+        assert!(
+            script.contains("\"current_step\""),
+            "manifest must include current_step field"
+        );
+        assert!(
+            script.contains("\"alerts\""),
+            "manifest must include alerts field"
+        );
+    }
+
+    #[test]
     fn build_create_pod_body_shape() {
         let host = make_host("tpl-123");
         let body = host.build_create_pod_body(
