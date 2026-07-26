@@ -4,8 +4,9 @@
 //! self-improvement tools:
 //! - Improvement Kata: 4-step PDCA cycle with closed cybernetic loop
 //!   (Understand → Grasp → Target → Experiment → Check → Act)
+//!   Includes beginner_mode drills (folded from kata-starter): Five Questions,
+//!   PDCA Cycle, and Observation Drill for foundational habit-building.
 //! - Coaching Kata: 5-question dialogue grounded in active IK state
-//! - Starter Kata: Practice routines with habit tracking and automaticity scoring
 //!
 //! Every step feeds into the agent's episodic memory stream via structured
 //! experience events. Before/after metric capture computes improvement signals.
