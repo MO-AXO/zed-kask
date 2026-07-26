@@ -32,8 +32,10 @@ use gpui::{
 };
 use language::Buffer;
 use language_core::CodeLabel;
+use project::lsp_store::CompletionDocumentation;
 use project::{Completion, CompletionResponse, CompletionSource};
 use serde_json::Value;
+use text::ToOffset;
 use ui::prelude::*;
 use workspace::{
     Workspace,
@@ -1054,7 +1056,7 @@ impl CompletionProvider for KaskToolCompletionProvider {
         _trigger: editor::CompletionContext,
         _window: &mut Window,
         cx: &mut Context<Editor>,
-    ) -> Task<Result<Vec<CompletionResponse>>> {
+    ) -> Task<anyhow::Result<Vec<CompletionResponse>>> {
         let panel = self.panel.clone();
         let buffer = buffer.clone();
         let buffer_position = buffer_position;
@@ -1078,7 +1080,7 @@ impl CompletionProvider for KaskToolCompletionProvider {
             }
 
             // Find the `/` prefix range and build the replace_range anchor.
-            let replace_range = buffer.read_with(cx, |buffer, cx| {
+            let replace_range = buffer.read_with(cx, |buffer, _| {
                 let snapshot = buffer.text_snapshot();
                 let cursor_offset = buffer_position.to_offset(&snapshot);
                 let text = snapshot.text();
@@ -1095,7 +1097,7 @@ impl CompletionProvider for KaskToolCompletionProvider {
                     }
                 }
                 Some(buffer.anchor_before(slash_offset)..buffer_position)
-            })?;
+            });
             let Some(replace_range) = replace_range else {
                 return Ok(Vec::new());
             };
