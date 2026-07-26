@@ -302,6 +302,7 @@ impl ScenariosView {
                     .size(LabelSize::Small)
                     .color(Color::Default),
             )
+            .into_any_element()
     }
 
     fn render_pipeline_stages(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -344,8 +345,9 @@ impl ScenariosView {
                 Label::new("Scenario Pipeline (Schwartz → Tetlock → Chermack)")
                     .size(LabelSize::Small)
                     .color(Color::Muted),
-            ).into_any_element()
+            )
             .children(stages)
+            .into_any_element()
     }
 
     fn render_pipeline_overview(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -390,7 +392,11 @@ impl ScenariosView {
             })
             .collect();
 
-        h_flex().gap_2().flex_wrap().children(tile_elements)
+        h_flex()
+            .gap_2()
+            .flex_wrap()
+            .children(tile_elements)
+            .into_any_element()
     }
 
     fn render_calibration(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -450,6 +456,7 @@ impl ScenariosView {
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),
             )
+            .into_any_element()
     }
 
     fn render_event_matrix(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -544,7 +551,7 @@ impl ScenariosView {
 
         let joint_text = tree
             .joint_probability
-            .map(|j| format!("{j:.4f}"))
+            .map(|j| format!("{j:.4}"))
             .unwrap_or_else(|| "—".to_string());
 
         let nodes: Vec<AnyElement> = tree
@@ -633,6 +640,7 @@ impl ScenariosView {
                     ),
             )
             .children(nodes)
+            .into_any_element()
     }
 
     fn render_recent_forecasts(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -688,6 +696,7 @@ impl ScenariosView {
                     .color(Color::Muted),
             )
             .children(rows)
+            .into_any_element()
     }
 }
 
@@ -784,7 +793,7 @@ impl SerializableItem for ScenariosView {
 }
 
 impl Render for ScenariosView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Fetch status on first render if empty.
         if self.status.is_none() && !self.loading && self.error.is_none() {
             self.fetch_status(cx);
@@ -844,7 +853,6 @@ impl Render for ScenariosView {
             .child(self.render_event_tree(cx))
             // Recent forecasts
             .child(self.render_recent_forecasts(cx))
-            .into_any_element()
     }
 }
 
