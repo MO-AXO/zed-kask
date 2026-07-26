@@ -210,5 +210,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 concurrency:
-  group: kask-release-${{ github.ref }}
+  # Serialize all release runs (tag pushes, scheduled nightlies, manual
+  # dispatches) on a single group. The nightly path force-moves the
+  # `nightly` tag and writes to GitHub Releases — concurrent runs would
+  # race on both surfaces. A single group prevents that (BH-18).
+  group: kask-release
   cancel-in-progress: false

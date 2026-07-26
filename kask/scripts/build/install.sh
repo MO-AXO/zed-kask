@@ -35,7 +35,7 @@ source "$_HKASK_INSTALL_DIR/install-common.sh"
 # Configuration
 # ============================================================================
 
-HKASK_VERSION="${HKASK_VERSION:-0.31.0}"
+HKASK_VERSION="${HKASK_VERSION:-}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local}"
 BIN_DIR="${INSTALL_DIR}/bin"
 
@@ -70,6 +70,21 @@ clone_repo() {
         HKASK_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
         log "Detected repo from script location: $HKASK_SOURCE_DIR"
         return 0
+    fi
+
+    # Resolve the version to install: explicit HKASK_VERSION wins, otherwise
+    # derive from the local workspace Cargo.toml (single source of truth),
+    # falling back to the hardcoded default only if Cargo.toml is unreadable.
+    if [ -z "$HKASK_VERSION" ]; then
+        local local_root
+        local_root="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../../.." 2>/dev/null && pwd)"
+        if [ -n "$local_root" ] && [ -f "$local_root/Cargo.toml" ]; then
+            HKASK_VERSION="$(awk -F'"' '/^version *=* "/{print $2; exit}' "$local_root/Cargo.toml")"
+        fi
+        if [ -z "$HKASK_VERSION" ]; then
+            HKASK_VERSION="0.31.0"
+            log_warning "Could not derive version from Cargo.toml — using default $HKASK_VERSION"
+        fi
     fi
 
     local clone_dir="${XDG_CACHE_HOME:-$HOME/.cache}/hkask-build"
@@ -389,7 +404,8 @@ Options:
     --help              Show this help message
 
 Environment Variables:
-    HKASK_VERSION         Tag to install (default: 0.31.0)
+    HKASK_VERSION         Tag to install (default: derived from workspace
+                          Cargo.toml version, or 0.31.0 if unreadable)
     HKASK_BUILD_TYPE      release or debug (default: release)
     HKASK_SOURCE_DIR      Use existing source directory instead of cloning
     HKASK_REPO_URL        Git repository URL
@@ -425,6 +441,9 @@ main() {
     local action="install"
     local skip_deps=false
     local skip_rust=false
+    local saw_system=false
+    local saw_install_dir=false
+    local install_dir_arg=""
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -445,9 +464,8 @@ main() {
                 shift
                 ;;
             --system)
+                saw_system=true
                 HKASK_SYSTEM_INSTALL="true"
-                INSTALL_DIR="/usr/local/libexec/hkask"
-                BIN_DIR="${INSTALL_DIR}/bin"
                 shift
                 ;;
             --skip-deps)
@@ -463,8 +481,8 @@ main() {
                     log_error "--install-dir requires a directory argument"
                     exit 1
                 fi
-                INSTALL_DIR="$2"
-                BIN_DIR="${INSTALL_DIR}/bin"
+                saw_install_dir=true
+                install_dir_arg="$2"
                 shift 2
                 ;;
             --help)
@@ -479,9 +497,22 @@ main() {
         esac
     done
 
-    # --system takes precedence over --install-dir (fixed system paths).
-    if [ "${HKASK_SYSTEM_INSTALL:-false}" = "true" ]; then
+    # --system and --install-dir are mutually exclusive: --system installs to
+    # fixed system paths (/usr/local/libexec/hkask); --install-dir installs
+    # to a user-specified prefix. Combining them is a user error — reject it
+    # rather than silently discarding one (BH-19).
+    if [ "$saw_system" = true ] && [ "$saw_install_dir" = true ]; then
+        log_error "--system and --install-dir are mutually exclusive"
+        log_error "  --system installs to /usr/local/libexec/hkask (system PATH)"
+        log_error "  --install-dir installs to a custom prefix"
+        exit 1
+    fi
+
+    if [ "$saw_system" = true ]; then
         INSTALL_DIR="/usr/local/libexec/hkask"
+        BIN_DIR="${INSTALL_DIR}/bin"
+    elif [ "$saw_install_dir" = true ]; then
+        INSTALL_DIR="$install_dir_arg"
         BIN_DIR="${INSTALL_DIR}/bin"
     fi
 
