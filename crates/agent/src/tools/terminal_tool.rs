@@ -1156,6 +1156,13 @@ fn select_terminal_output_lines(output: &str, selection: TerminalOutputSelection
         }
         (Some(head_lines), Some(tail_lines)) => {
             let lines = output.lines().collect::<Vec<_>>();
+            // When head and tail overlap (or cover the whole output),
+            // returning both would duplicate the middle lines. Return the
+            // full output instead — the caller asked for more context than
+            // exists, so everything is relevant.
+            if head_lines + tail_lines >= lines.len() {
+                return lines.join("\n");
+            }
             let head = lines
                 .iter()
                 .take(head_lines)
