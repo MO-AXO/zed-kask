@@ -273,7 +273,7 @@ impl ScenariosView {
 
     // ── Render methods ────────────────────────────────────────────────────
 
-    fn render_scaffolding(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_scaffolding(&self, cx: &mut Context<Self>) -> AnyElement {
         let border_color = cx.theme().colors().border;
         let prompt = scaffolding_for_state(&self.status);
 
@@ -304,7 +304,7 @@ impl ScenariosView {
             )
     }
 
-    fn render_pipeline_stages(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_pipeline_stages(&self, cx: &mut Context<Self>) -> AnyElement {
         let border_color = cx.theme().colors().border;
         let stages: Vec<AnyElement> = PIPELINE_STAGES
             .iter()
@@ -344,11 +344,11 @@ impl ScenariosView {
                 Label::new("Scenario Pipeline (Schwartz → Tetlock → Chermack)")
                     .size(LabelSize::Small)
                     .color(Color::Muted),
-            )
+            ).into_any_element()
             .children(stages)
     }
 
-    fn render_pipeline_overview(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_pipeline_overview(&self, cx: &mut Context<Self>) -> AnyElement {
         let border_color = cx.theme().colors().border;
         let Some(status) = &self.status else {
             return div().into_any_element();
@@ -393,7 +393,7 @@ impl ScenariosView {
         h_flex().gap_2().flex_wrap().children(tile_elements)
     }
 
-    fn render_calibration(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_calibration(&self, cx: &mut Context<Self>) -> AnyElement {
         let border_color = cx.theme().colors().border;
         let Some(status) = &self.status else {
             return div().into_any_element();
@@ -452,7 +452,7 @@ impl ScenariosView {
             )
     }
 
-    fn render_event_matrix(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_event_matrix(&self, cx: &mut Context<Self>) -> AnyElement {
         let border_color = cx.theme().colors().border;
         let Some(status) = &self.status else {
             return div().into_any_element();
@@ -530,10 +530,10 @@ impl ScenariosView {
                     .size(LabelSize::XSmall)
                     .color(Color::Muted),
             )
-            .children(dots)
+            .children(dots).into_any_element()
     }
 
-    fn render_event_tree(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_event_tree(&self, cx: &mut Context<Self>) -> AnyElement {
         let border_color = cx.theme().colors().border;
         let Some(status) = &self.status else {
             return div().into_any_element();
@@ -635,7 +635,7 @@ impl ScenariosView {
             .children(nodes)
     }
 
-    fn render_recent_forecasts(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_recent_forecasts(&self, cx: &mut Context<Self>) -> AnyElement {
         let border_color = cx.theme().colors().border;
         let Some(status) = &self.status else {
             return div().into_any_element();
@@ -784,7 +784,7 @@ impl SerializableItem for ScenariosView {
 }
 
 impl Render for ScenariosView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         // Fetch status on first render if empty.
         if self.status.is_none() && !self.loading && self.error.is_none() {
             self.fetch_status(cx);
