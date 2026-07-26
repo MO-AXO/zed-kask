@@ -1163,15 +1163,15 @@ fn select_terminal_output_lines(output: &str, selection: TerminalOutputSelection
                 .collect::<Vec<_>>()
                 .join("\n");
             // Tail starts after the head to avoid duplicating overlapping
-            // lines when head + tail >= total lines. If tail_lines would
-            // start before the head ends, clamp it to the line after the head.
-            let tail_start = lines.len().saturating_sub(tail_lines).max(head_lines);
+            // lines when head + tail >= total lines. Clamp tail_start to
+            // at least head_lines so the tail begins where the head ends.
+            let tail_start = lines
+                .len()
+                .saturating_sub(tail_lines)
+                .max(head_lines)
+                .min(lines.len());
             let tail = lines[tail_start..].join("\n");
-            if tail.is_empty() {
-                head
-            } else {
-                format!("{head}\n\n{tail}")
-            }
+            format!("{head}\n\n{tail}")
         }
     }
 }
