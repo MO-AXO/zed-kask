@@ -166,7 +166,7 @@ impl KataEngine {
     ///
     /// `[P5]` Motivating: Essentialism — service-layer orchestration earns its existence; no raw domain logic.
     /// pre:  history must be a valid KataHistory
-    /// post: returns self with history set; starter kata uses it for automaticity computation
+    /// post: returns self with history set; improvement kata beginner_mode uses it for automaticity computation
     #[must_use]
     pub fn with_history(mut self, history: KataHistory) -> Self {
         self.history = Some(history);
@@ -419,9 +419,6 @@ fn default_llm_params() -> LLMParameters {
 //
 // ── Coaching Kata runner ────────────────────────────────────────────────────
 // Moved to coaching.rs.
-//
-// ── Starter Kata runner ─────────────────────────────────────────────────────
-// Moved to starter.rs.
 //
 // ── Step execution + templates ──────────────────────────────────────────────
 // Moved to execution.rs.
