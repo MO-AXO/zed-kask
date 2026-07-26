@@ -791,6 +791,10 @@ mod training_artifact_tests {
             harness: Some("axolotl".to_string()),
             training_duration_secs: Some(3600),
             loss: Some(0.123),
+            grad_norm: Some(1.5),
+            current_step: Some(500),
+            total_steps: Some(1000),
+            alerts: Vec::new(),
             output_dir: Some("/workspace/outputs/job-1".to_string()),
         };
         assert!(manifest.validate_for("job-1", "dataset-hash").is_ok());

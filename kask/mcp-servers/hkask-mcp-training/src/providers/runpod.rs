@@ -618,7 +618,10 @@ pub fn generate_install_script(
     // (loss, grad_norm, step) for the completion manifest. The log path
     // is /workspace/training.log — same convention as HF Transformers output.
     script.push_str("TRAINING_LOG=\"/workspace/training.log\"\n");
-    script.push_str(&format!("if {} 2>&1 | tee \"$TRAINING_LOG\"; then\n", train_command));
+    script.push_str(&format!(
+        "if {} 2>&1 | tee \"$TRAINING_LOG\"; then\n",
+        train_command
+    ));
     script.push_str("    TRAINING_END=$(date +%s)\n");
     script.push_str("    TRAINING_DURATION=$((TRAINING_END - TRAINING_START))\n");
     script.push_str("    echo \"=== Training completed in ${TRAINING_DURATION}s ===\"\n");
@@ -634,15 +637,21 @@ pub fn generate_install_script(
     // HF Transformers logs metrics as: {'loss': 0.5, 'grad_norm': 1.2, 'epoch': 0.1}
     // We extract the last occurrence of each metric. Best-effort — if the
     // log format differs or the metrics are absent, the manifest fields stay null.
-    script.push_str("# ── Extract final training metrics from log ─────────────────────────────────\n");
-    script.push_str("FINAL_LOSS=$(grep -oP \"'loss':\s*\K[0-9eE.+-]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
-    script.push_str("FINAL_GRAD_NORM=$(grep -oP \"'grad_norm':\s*\K[0-9eE.+-]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
-    script.push_str("FINAL_STEP=$(grep -oP \"'step':\s*\K[0-9]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
-    script.push_str("TOTAL_STEPS=$(grep -oP \"'total_steps':\s*\K[0-9]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
+    script.push_str(
+        "# ── Extract final training metrics from log ─────────────────────────────────\n",
+    );
+    script.push_str("FINAL_LOSS=$(grep -oP \"'loss':\\s*\\K[0-9eE.+-]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
+    script.push_str("FINAL_GRAD_NORM=$(grep -oP \"'grad_norm':\\s*\\K[0-9eE.+-]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
+    script.push_str("FINAL_STEP=$(grep -oP \"'step':\\s*\\K[0-9]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
+    script.push_str("TOTAL_STEPS=$(grep -oP \"'total_steps':\\s*\\K[0-9]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
     script.push_str("# Format as JSON values (null if empty)\n");
-    script.push_str("FINAL_LOSS_JSON=$( [ -n \"$FINAL_LOSS\" ] && echo \"$FINAL_LOSS\" || echo \"null\" )\n");
+    script.push_str(
+        "FINAL_LOSS_JSON=$( [ -n \"$FINAL_LOSS\" ] && echo \"$FINAL_LOSS\" || echo \"null\" )\n",
+    );
     script.push_str("FINAL_GRAD_NORM_JSON=$( [ -n \"$FINAL_GRAD_NORM\" ] && echo \"$FINAL_GRAD_NORM\" || echo \"null\" )\n");
-    script.push_str("FINAL_STEP_JSON=$( [ -n \"$FINAL_STEP\" ] && echo \"$FINAL_STEP\" || echo \"null\" )\n");
+    script.push_str(
+        "FINAL_STEP_JSON=$( [ -n \"$FINAL_STEP\" ] && echo \"$FINAL_STEP\" || echo \"null\" )\n",
+    );
     script.push_str("TOTAL_STEPS_JSON=$( [ -n \"$TOTAL_STEPS\" ] && echo \"$TOTAL_STEPS\" || echo \"null\" )\n\n");
 
     // Step 4: Upload adapter.
@@ -704,7 +713,7 @@ pub fn generate_install_script(
         "    \"harness\": \"{}\",\n",
         format!("{:?}", harness).to_lowercase()
     ));
-    script.push_str(&format!("    \"training_duration_secs\": ${TRAINING_DURATION},\n"));
+    script.push_str("    \"training_duration_secs\": ${TRAINING_DURATION},\n");
     script.push_str("    \"loss\": ${FINAL_LOSS_JSON},\n");
     script.push_str("    \"grad_norm\": ${FINAL_GRAD_NORM_JSON},\n");
     script.push_str("    \"current_step\": ${FINAL_STEP_JSON},\n");
