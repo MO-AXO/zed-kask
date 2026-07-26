@@ -646,11 +646,16 @@ pub fn generate_install_script(
     script.push_str("FINAL_STEP=$(grep -oP \"'(step|global_step)':\\\\s*\\\\K[0-9]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
     // 'total_steps' appears as 'max_steps' in HF Transformers TrainerState output.
     script.push_str("TOTAL_STEPS=$(grep -oP \"'(total_steps|max_steps)':\\\\s*\\\\K[0-9]+\" \"$TRAINING_LOG\" 2>/dev/null | tail -1 || echo \"\")\n");
-    script.push_str("# Format as JSON values (null if empty)\n");
+    // Sanitize: empty, nan, inf, -inf → null (these are invalid JSON numbers).
+    // Python's float('nan') and float('inf') print as 'nan'/'inf' in str(),
+    // which would make the manifest JSON invalid and break parse_completion_manifest.
+    script.push_str("# Format as JSON values (null if empty or non-finite)\n");
     script.push_str(
-        "FINAL_LOSS_JSON=$( [ -n \"$FINAL_LOSS\" ] && echo \"$FINAL_LOSS\" || echo \"null\" )\n",
+        "FINAL_LOSS_JSON=$( case \"$FINAL_LOSS\" in ''|*'nan'*|*'inf'*) echo \"null\" ;; *) echo \"$FINAL_LOSS\" ;; esac )\n",
     );
-    script.push_str("FINAL_GRAD_NORM_JSON=$( [ -n \"$FINAL_GRAD_NORM\" ] && echo \"$FINAL_GRAD_NORM\" || echo \"null\" )\n");
+    script.push_str(
+        "FINAL_GRAD_NORM_JSON=$( case \"$FINAL_GRAD_NORM\" in ''|*'nan'*|*'inf'*) echo \"null\" ;; *) echo \"$FINAL_GRAD_NORM\" ;; esac )\n",
+    );
     script.push_str(
         "FINAL_STEP_JSON=$( [ -n \"$FINAL_STEP\" ] && echo \"$FINAL_STEP\" || echo \"null\" )\n",
     );

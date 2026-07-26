@@ -386,7 +386,7 @@ pub struct CompletionManifest {
     /// G-R1 finding with `evidence_kind: runtime_measurement`. Mirrors the
     /// HF trackio alert pattern.
     #[serde(default)]
-    pub alerts: Vec<crate::lora_validation::RuntimeAlert>,
+    pub alerts: Vec<crate::lora_validation::TrainingAlert>,
     /// Output directory on the pod where the adapter was saved.
     #[serde(default)]
     pub output_dir: Option<String>,
