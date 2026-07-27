@@ -4705,42 +4705,26 @@ impl Thread {
         if let Some(router) = crate::tool_router() {
             let built_in_names: std::collections::HashSet<&str> =
                 crate::tools::ALL_TOOL_NAMES.iter().copied().collect();
-            let candidates: Vec<crate::tool_router::ToolCandidate> = tools
-                .iter()
-                .filter(|(name, _)| !built_in_names.contains(name.as_ref()))
-                .map(|(name, tool)| crate::tool_router::ToolCandidate {
-                    name: name.clone(),
-                    description: tool.description(),
+            let open_file_paths: Vec<String> = self
+                .project
+                .read(cx)
+                .opened_buffers(cx)
+                .into_iter()
+                .filter_map(|buffer| {
+                    buffer.read(cx).file().and_then(|file| {
+                        file.as_local()
+                            .map(|local| local.abs_path(cx).to_string_lossy().into_owned())
+                    })
                 })
                 .collect();
-            // If there are no MCP candidates to filter, skip the router
-            // entirely — no point scoring when the built-in set is the whole
-            // map.
-            if !candidates.is_empty() {
-                let open_file_paths: Vec<String> = self
-                    .project
-                    .read(cx)
-                    .opened_buffers(cx)
-                    .into_iter()
-                    .filter_map(|buffer| {
-                        buffer.read(cx).file().and_then(|file| {
-                            file.as_local()
-                                .map(|local| local.abs_path(cx).to_string_lossy().into_owned())
-                        })
-                    })
-                    .collect();
-                let context = crate::tool_router::ToolSelectionContext {
-                    user_message: self.last_user_message_text(),
-                    open_file_paths,
-                    candidates,
-                };
-                let selected = router.select_tools(&context);
-                if let Some(selected) = selected {
-                    tools.retain(|name, _| {
-                        built_in_names.contains(name.as_ref()) || selected.contains(name)
-                    });
-                }
-            }
+            let retained = crate::tool_router::apply_router_bypassing_built_ins(
+                router.as_ref(),
+                &tools,
+                self.last_user_message_text().as_deref(),
+                open_file_paths,
+                &built_in_names,
+            );
+            tools.retain(|name, _| retained.contains(name));
         }
 
         tools

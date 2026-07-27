@@ -108,6 +108,7 @@ impl RealMemoryPort {
     /// and initializes an embedding router for prompt embedding.
     ///
     /// Returns `Err` if the database cannot be opened.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         db_path: &str,
         passphrase: &str,

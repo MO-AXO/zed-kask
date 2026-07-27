@@ -56,6 +56,73 @@ pub trait ToolRouter: Send + Sync {
     fn select_tools(&self, context: &ToolSelectionContext) -> Option<Vec<SharedString>>;
 }
 
+/// Apply the tool router to a set of tools, bypassing built-in zed tools.
+///
+/// zed-kask: the router only filters context-server (MCP) tools. Built-in
+/// zed tools (those in `built_in_names`) always pass through — the router
+/// was introduced to tame MCP tool floods, not to second-guess the
+/// agent-profile allowlist for core tools.
+///
+/// Returns the set of tool names to retain. Built-in tools are always in
+/// the returned set. MCP tools are retained only if the router includes
+/// them (or if the router returns `None` / fails open).
+///
+/// This is a free function so it can be unit-tested without the
+/// process-global `TOOL_ROUTER` `OnceLock`.
+pub fn apply_router_bypassing_built_ins(
+    router: &dyn ToolRouter,
+    tools: &BTreeMap<SharedString, Arc<dyn crate::AnyAgentTool>>,
+    user_message: Option<&str>,
+    open_file_paths: Vec<String>,
+    built_in_names: &std::collections::HashSet<&str>,
+) -> std::collections::HashSet<SharedString> {
+    // Start with all built-in tools — they bypass the router.
+    let mut retained: std::collections::HashSet<SharedString> = tools
+        .keys()
+        .filter(|name| built_in_names.contains(name.as_ref()))
+        .cloned()
+        .collect();
+
+    // Build candidates from MCP tools only.
+    let candidates: Vec<ToolCandidate> = tools
+        .iter()
+        .filter(|(name, _)| !built_in_names.contains(name.as_ref()))
+        .map(|(name, tool)| ToolCandidate {
+            name: name.clone(),
+            description: tool.description(),
+        })
+        .collect();
+
+    // If there are no MCP candidates, skip the router entirely.
+    if candidates.is_empty() {
+        return retained;
+    }
+
+    let context = ToolSelectionContext {
+        user_message: user_message.map(|s| s.to_string()),
+        open_file_paths,
+        candidates,
+    };
+    let selected = router.select_tools(&context);
+    if let Some(selected) = selected {
+        // Retain MCP tools that the router selected.
+        for name in selected {
+            if tools.contains_key(&name) {
+                retained.insert(name);
+            }
+        }
+    } else {
+        // Router returned None (fail-open) — retain all MCP tools.
+        for name in tools.keys() {
+            if !built_in_names.contains(name.as_ref()) {
+                retained.insert(name.clone());
+            }
+        }
+    }
+
+    retained
+}
+
 /// Lazy keyword-overlap tool router. Only activates when the request is
 /// complex or explicitly tool-directed. For simple messages, returns `None`
 /// (fail-open).
