@@ -1252,7 +1252,7 @@ pub(crate) fn render_curator_email_page(
         .button_tab_index(0)
         .on_click({
             let provider = provider.clone();
-            let url = smtp_password_url.clone();
+            let url = smtp_password_url;
             move |_, _, cx| {
                 delete_credential(&provider, &url, cx).detach();
             }
@@ -1260,7 +1260,7 @@ pub(crate) fn render_curator_email_page(
         .into_any_element()
     } else {
         let provider = provider.clone();
-        let url = smtp_password_url.clone();
+        let url = smtp_password_url;
         v_flex()
             .gap_2()
             .child(
