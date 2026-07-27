@@ -648,7 +648,8 @@ fn main() {
         // doesn't need hkask-pods. It reads directly from RegulationLedger.
         //
         // A clone of the ledger is hoisted for the kask panel's regulation
-        // status bar (wired later in the `if let Some(configured)` block).
+        // status bar (wired later in the deferred task's model-dependent
+        // wiring block).
         let panel_regulation_ledger = regulation_ledger.clone();
         // The alert sink forwards critical alerts to a GPUI foreground task
         // that dispatches them as toasts, so the user is notified even when
@@ -685,8 +686,9 @@ fn main() {
         // D5: a2a_secret for OCAP delegation token minting.
         // Resolved via the `keyring` crate (synchronous OS keychain I/O).
         //
-        // Hoisted out of the block below so it's in scope for the model-dependent
-        // wiring block after language_models::init().
+        // Hoisted out of the deferred task's model-dependent wiring block so
+        // it's in scope for both the early logging-memory wiring and the
+        // deferred model-dependent wiring.
         //
         // When the secret cannot be resolved (no env var, no keychain entry),
         // `unwrap_or_default()` produces an empty Vec. Downstream OCAP token
@@ -715,9 +717,9 @@ fn main() {
             // after AppState::set_global). `set_memory_port` uses a Mutex (not
             // OnceLock), so the upgrade is a simple second call.
             //
-            // This is hoisted out of the `if let Some(configured)` block below so
-            // it is always installed, even when no default LanguageModel is
-            // configured yet.
+            // This is hoisted out of the model-dependent wiring block (now in
+            // the deferred task) so it is always installed, even when no default
+            // LanguageModel is configured yet.
             let logging_memory: std::sync::Arc<dyn hkask_types::MemoryPort> =
                 std::sync::Arc::new(kask_bridge::LoggingMemoryPort::new());
             let bridge_memory = std::sync::Arc::new(kask_bridge::BridgeMemoryPort::new(logging_memory));
@@ -1107,7 +1109,7 @@ fn main() {
                 // rest is synchronous GPUI mutation and runs inside cx.update.
                 let kask_settings = cx.update(|cx| kask_bridge::KaskSettings::get_global(cx).clone());
                 let fusion_config = kask_settings.fusion.to_fusion_config();
-                let async_cx = cx.clone();
+                let async_cx_for_fusion = cx.clone();
 
                 // Fusion auto-discovery (async, outside cx.update).
                 let mut discovered_favorites: Vec<kask_bridge::FavoriteModel> = Vec::new();
@@ -1167,7 +1169,7 @@ fn main() {
                         if fc.judge.to_lowercase() != "algo" {
                             names.push(fc.judge.clone());
                         }
-                        let async_cx_for_closure = async_cx.clone();
+                        let async_cx_for_closure = async_cx_for_fusion.clone();
                         cx.update(|cx| {
                             let model_registry = language_model::LanguageModelRegistry::read_global(cx);
                             let resolved = kask_bridge::resolve_fusion_models(

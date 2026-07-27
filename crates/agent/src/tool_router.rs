@@ -616,4 +616,90 @@ mod tests {
         assert!(!is_code_file("README.md"));
         assert!(!is_code_file("config.json"));
     }
+
+    // zed-kask: `Thread::enabled_tools` filters built-in tool names out of
+    // the candidates list before calling `select_tools`, so the router only
+    // ever sees MCP/context-server tools. This contract must hold — if a
+    // future change passes built-in tool names to the router, the agent
+    // silently loses access to `fetch`, `diagnostics`, `list_directory`,
+    // etc. on ordinary coding requests. See the `.rules` entry
+    // "LazyToolRouter filters MCP tools only".
+    #[test]
+    fn test_router_only_sees_mcp_candidates_when_built_ins_filtered() {
+        // Simulate what `enabled_tools` now does: filter out built-in tool
+        // names before constructing the candidates list. The router should
+        // only filter MCP tools, and built-in tools (never passed in) are
+        // unaffected by definition.
+        let built_in_names: std::collections::HashSet<&str> =
+            crate::tools::ALL_TOOL_NAMES.iter().copied().collect();
+
+        // All tools the thread has registered.
+        let all_tools = [
+            candidate("grep", "Search file contents using a regular expression"),
+            candidate("fetch", "Fetches a URL and returns content as Markdown"),
+            candidate("diagnostics", "Get errors and warnings for the project"),
+            candidate(
+                "list_directory",
+                "List files and directories in a given path",
+            ),
+            candidate("spawn_agent", "Spawn a sub-agent for a task"),
+            // MCP tools (not in ALL_TOOL_NAMES):
+            candidate(
+                "corpus_search",
+                "Search the embedded document corpus for relevant passages",
+            ),
+            candidate(
+                "lora_train",
+                "Configure and launch a LoRA training run on the GPU",
+            ),
+        ];
+
+        // Filter out built-in tools, as `enabled_tools` does.
+        let mcp_candidates: Vec<_> = all_tools
+            .iter()
+            .filter(|c| !built_in_names.contains(c.name.as_ref()))
+            .cloned()
+            .collect();
+
+        // Only the MCP tools should remain as candidates.
+        assert_eq!(mcp_candidates.len(), 2);
+        assert!(mcp_candidates.iter().any(|c| c.name == "corpus_search"));
+        assert!(mcp_candidates.iter().any(|c| c.name == "lora_train"));
+
+        // The router activates and filters MCP tools by keyword overlap.
+        let context = ToolSelectionContext {
+            user_message: Some(
+                "use grep to search the corpus for investment strategies".to_string(),
+            ),
+            open_file_paths: vec![],
+            candidates: mcp_candidates,
+        };
+        let router = LazyToolRouter::new();
+        let selected = router
+            .select_tools(&context)
+            .expect("router should activate for tool-directed message");
+
+        // corpus_search matches via 'search' keyword overlap; lora_train does not.
+        assert!(
+            selected.contains(&"corpus_search".into()),
+            "corpus_search should match via 'search' keyword overlap"
+        );
+        assert!(
+            !selected.contains(&"lora_train".into()),
+            "lora_train should be filtered — no keyword overlap"
+        );
+
+        // Built-in tools are never in `selected` because they were never
+        // passed as candidates. `enabled_tools` retains them unconditionally
+        // via the `built_in_names.contains(name) || selected.contains(name)`
+        // check. This is the contract: built-in tools bypass the router.
+        assert!(!selected.contains(&"grep".into()));
+        assert!(!selected.contains(&"fetch".into()));
+        assert!(!selected.contains(&"diagnostics".into()));
+        assert!(!selected.contains(&"list_directory".into()));
+        // spawn_agent is always_on in the router, but it was never passed as
+        // a candidate, so it's not in `selected` either. `enabled_tools`
+        // retains it via the built-in bypass.
+        assert!(!selected.contains(&"spawn_agent".into()));
+    }
 }
