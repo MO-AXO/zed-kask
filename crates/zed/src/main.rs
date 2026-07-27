@@ -1019,6 +1019,7 @@ fn main() {
                 let kask_settings = cx.update(|cx| kask_bridge::KaskSettings::get_global(cx).clone());
                 let embedding_model = std::env::var("HKASK_EMBEDDING_MODEL")
                     .unwrap_or_else(|_| kask_settings.corpus.embedding_model.clone());
+                let embedding_dim = kask_settings.corpus.embedding_dim as usize;
                 let username_for_provision = username.clone();
 
                 let provision_result = cx.background_spawn(async move {
@@ -1033,6 +1034,7 @@ fn main() {
                             &passphrase,
                             user_webid,
                             embedding_model,
+                            embedding_dim,
                             kask_settings.memory.consolidation_cadence_secs,
                             kask_settings.memory.confidence_floor,
                             gpui_tokio::Tokio::handle_async(&*cx),
