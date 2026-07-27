@@ -286,12 +286,28 @@ install_desktop_entry() {
     fi
     icon_dir="$data_root/icons/hicolor/512x512/apps"
     mkdir -p "$icon_dir"
-    local src_icon="$workspace_root/crates/zed/resources/app-icon.png"
+    # Icon filename follows the release channel: app-icon.png for stable,
+    # app-icon-<channel>.png otherwise (matches script/bundle-linux logic).
+    local channel
+    if [ -f "$workspace_root/crates/zed/RELEASE_CHANNEL" ]; then
+        channel="$(< "$workspace_root/crates/zed/RELEASE_CHANNEL")"
+    else
+        channel="${RELEASE_CHANNEL:-dev}"
+    fi
+    local icon_suffix=""
+    if [ "$channel" != "stable" ]; then
+        icon_suffix="-$channel"
+    fi
+    local src_icon="$workspace_root/crates/zed/resources/app-icon${icon_suffix}.png"
+    if [ ! -f "$src_icon" ]; then
+        # Fall back to the stable icon if the channel-specific one is missing.
+        src_icon="$workspace_root/crates/zed/resources/app-icon.png"
+    fi
     if [ -f "$src_icon" ]; then
         cp "$src_icon" "$icon_dir/$app_icon.png"
-        log "Installed icon: $icon_dir/$app_icon.png"
+        log "Installed icon: $icon_dir/$app_icon.png (from $(basename "$src_icon"))"
     else
-        log_warning "Source icon not found ($src_icon) — desktop entry will lack an icon"
+        log_warning "No source icon found — desktop entry will lack an icon"
     fi
 
     # Render the template. envsubst is part of gettext-utils; fall back to sed
