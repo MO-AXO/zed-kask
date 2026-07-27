@@ -1,7 +1,7 @@
 use agent_client_protocol::schema::v1 as acp;
 use agent_skills::Skill;
 use anyhow::Result;
-use gpui::{App, AsyncApp, SharedString, Task};
+use gpui::{App, SharedString, Task};
 use language_model::LanguageModelToolResultContent;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -31,18 +31,17 @@ fn neutralize_envelope_tags(input: &str) -> String {
         .replace("</skill_content", "&lt;/skill_content")
 }
 
-/// Render a skill's body wrapped in the `<skill_content>` envelope.
+/// Render skill content wrapped in the `<skill_content>` envelope.
 ///
 /// Used by both model-driven activation (the `skill` tool) and user-driven
 /// activation (slash commands), so the model sees the same shape regardless
 /// of who initiated the load. Every interpolated value is XML-escaped so a
-/// hostile skill body cannot break out of the wrapper by embedding closing
+/// hostile skill output cannot break out of the wrapper by embedding closing
 /// tags.
 ///
-/// `body` is the SKILL.md body (read on demand via
-/// `agent_skills::read_skill_body`). It's accepted as a parameter rather
-/// than stored on `Skill` so that loading N skills costs O(total
-/// frontmatter), not O(total file size).
+/// In zed-kask, `body` is the output of the kask manifest cascade (not the
+/// SKILL.md file body). SKILL.md files are reference-only and are never
+/// injected into prompts.
 pub fn render_skill_envelope(skill: &Skill, body: &str) -> String {
     let source = match &skill.source {
         agent_skills::SkillSource::BuiltIn => "built-in",
@@ -114,15 +113,12 @@ impl From<SkillToolOutput> for LanguageModelToolResultContent {
 /// thread-build time), so the model can invoke skills that were added to
 /// the project after the thread was created.
 pub type SkillsResolver = Arc<dyn Fn(&App) -> Arc<Vec<Skill>> + Send + Sync>;
-pub type SkillBodyResolver =
-    Arc<dyn Fn(Skill, &mut AsyncApp) -> Task<Result<String>> + Send + Sync>;
 
 pub struct SkillTool {
     skills: SkillsResolver,
-    body_resolver: SkillBodyResolver,
-    /// Optional hKask ManifestExecutor for cascade-based skill execution (D1).
-    /// When present, skill activation runs the manifest cascade instead of
-    /// injecting the SKILL.md body. When absent, falls back to body injection.
+    /// hKask ManifestExecutor for cascade-based skill execution.
+    /// In zed-kask, this is always set (wired in main.rs). When None
+    /// (tests only), skill invocation returns a no-op envelope.
     manifest_executor: Option<Arc<dyn SkillManifestExecutor>>,
 }
 
@@ -159,36 +155,33 @@ pub trait SkillManifestExecutor: Send + Sync {
 }
 
 impl SkillTool {
-    pub fn with_body_resolver<F, R>(skills: F, body_resolver: R) -> Self
+    /// Construct a SkillTool without a manifest executor (tests only).
+    /// In production, use `with_manifest_executor`.
+    pub fn new<F>(skills: F) -> Self
     where
         F: Fn(&App) -> Arc<Vec<Skill>> + Send + Sync + 'static,
-        R: Fn(Skill, &mut AsyncApp) -> Task<Result<String>> + Send + Sync + 'static,
     {
         Self {
             skills: Arc::new(skills),
-            body_resolver: Arc::new(body_resolver),
             manifest_executor: None,
         }
     }
 
-    /// Construct with an hKask ManifestExecutor for cascade-based skill execution (D1).
+    /// Construct with an hKask ManifestExecutor for cascade-based skill execution.
     ///
     /// When a manifest executor is present, skill activation runs the hKask
     /// cascade (KnowAct/FlowDef/RenderAct + PDCA + gas/rjoule + OCAP) instead
     /// of injecting the SKILL.md body. The `SKILL.md` frontmatter stays the
     /// discovery-only catalog entry.
-    pub fn with_manifest_executor<F, R>(
+    pub fn with_manifest_executor<F>(
         skills: F,
-        body_resolver: R,
         manifest_executor: Arc<dyn SkillManifestExecutor>,
     ) -> Self
     where
         F: Fn(&App) -> Arc<Vec<Skill>> + Send + Sync + 'static,
-        R: Fn(Skill, &mut AsyncApp) -> Task<Result<String>> + Send + Sync + 'static,
     {
         Self {
             skills: Arc::new(skills),
-            body_resolver: Arc::new(body_resolver),
             manifest_executor: Some(manifest_executor),
         }
     }
@@ -327,14 +320,12 @@ impl AgentTool for SkillTool {
 mod tests {
     use super::*;
     use agent_skills::{SkillScopeId, SkillSource, parse_skill_frontmatter};
-    use anyhow::Context as _;
     use fs::FakeFs;
     use gpui::TestAppContext;
     use project::Project;
     use serde_json::json;
     use settings::{Settings, SettingsStore};
-    use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -361,9 +352,7 @@ mod tests {
     }
 
     /// Build a `Skill` and return it alongside its body. These tests
-    /// exercise the tool's rendering and authorization behavior, not how
-    /// bodies are fetched, so the body is served back through a stub
-    /// resolver (see `stub_body_resolver`) instead of any filesystem.
+    /// exercise the tool's rendering and authorization behavior.
     fn create_test_skill(name: &str, description: &str, body: &str) -> (Skill, String) {
         let skill_file_path = format!("/skills/{name}/SKILL.md");
         let content = format!("---\nname: {name}\ndescription: {description}\n---\n\n{body}");
@@ -371,26 +360,6 @@ mod tests {
             parse_skill_frontmatter(Path::new(&skill_file_path), &content, SkillSource::Global)
                 .unwrap();
         (skill, body.to_string())
-    }
-
-    /// An in-memory body resolver keyed by `skill_file_path`. This stands
-    /// in for the production resolver (which reads project skills through
-    /// project buffers and global/built-in skills from disk); these tests
-    /// only need a body to render, not a real fetch.
-    fn stub_body_resolver(
-        bodies: Vec<(PathBuf, String)>,
-    ) -> impl Fn(Skill, &mut AsyncApp) -> Task<Result<String>> + Send + Sync + 'static {
-        let bodies: HashMap<PathBuf, String> = bodies.into_iter().collect();
-        move |skill, _cx| {
-            Task::ready(
-                bodies
-                    .get(&skill.skill_file_path)
-                    .cloned()
-                    .with_context(|| {
-                        format!("no stub body for {}", skill.skill_file_path.display())
-                    }),
-            )
-        }
     }
 
     #[gpui::test]
@@ -405,10 +374,7 @@ mod tests {
         let bodies = vec![(skill.skill_file_path.clone(), body)];
         let skills = Arc::new(vec![skill]);
 
-        let tool = Arc::new(SkillTool::with_body_resolver(
-            move |_cx| skills.clone(),
-            stub_body_resolver(bodies),
-        ));
+        let tool = Arc::new(SkillTool::new(move |_cx| skills.clone()));
 
         let (mut sender, input) = ToolInput::<SkillToolInput>::test();
         sender.send_full(json!({
@@ -442,10 +408,7 @@ mod tests {
         let bodies = vec![(skill.skill_file_path.clone(), body)];
         let skills = Arc::new(vec![skill]);
 
-        let tool = Arc::new(SkillTool::with_body_resolver(
-            move |_cx| skills.clone(),
-            stub_body_resolver(bodies),
-        ));
+        let tool = Arc::new(SkillTool::new(move |_cx| skills.clone()));
 
         let (mut sender, input) = ToolInput::<SkillToolInput>::test();
         sender.send_full(json!({ "name": "my-skill" }));
@@ -486,10 +449,7 @@ mod tests {
         let bodies = vec![(skill.skill_file_path.clone(), body)];
         let skills = Arc::new(vec![skill]);
 
-        let tool = Arc::new(SkillTool::with_body_resolver(
-            move |_cx| skills.clone(),
-            stub_body_resolver(bodies),
-        ));
+        let tool = Arc::new(SkillTool::new(move |_cx| skills.clone()));
 
         let (mut sender, input) = ToolInput::<SkillToolInput>::test();
         sender.send_full(json!({ "name": "safe-skill" }));
@@ -539,10 +499,7 @@ mod tests {
         let bodies = vec![(skill.skill_file_path.clone(), body)];
         let skills = Arc::new(vec![skill]);
 
-        let tool = Arc::new(SkillTool::with_body_resolver(
-            move |_cx| skills.clone(),
-            stub_body_resolver(bodies),
-        ));
+        let tool = Arc::new(SkillTool::new(move |_cx| skills.clone()));
 
         let (mut sender, input) = ToolInput::<SkillToolInput>::test();
         sender.send_full(json!({ "name": "html-skill" }));
@@ -641,10 +598,7 @@ mod tests {
         ];
         let skills = Arc::new(vec![global_skill, project_skill]);
 
-        let tool = Arc::new(SkillTool::with_body_resolver(
-            move |_cx| skills.clone(),
-            stub_body_resolver(bodies),
-        ));
+        let tool = Arc::new(SkillTool::new(move |_cx| skills.clone()));
 
         // Test global skill
         let (mut sender, input) = ToolInput::<SkillToolInput>::test();
@@ -683,10 +637,7 @@ mod tests {
         let bodies = vec![(skill.skill_file_path.clone(), body)];
         let skills = Arc::new(vec![skill]);
 
-        let tool = Arc::new(SkillTool::with_body_resolver(
-            move |_cx| skills.clone(),
-            stub_body_resolver(bodies),
-        ));
+        let tool = Arc::new(SkillTool::new(move |_cx| skills.clone()));
 
         let (mut sender, input) = ToolInput::<SkillToolInput>::test();
         sender.send_full(json!({"name": "nonexistent-skill"}));
@@ -719,10 +670,7 @@ mod tests {
         ];
         let skills = Arc::new(vec![hidden, visible]);
 
-        let tool = Arc::new(SkillTool::with_body_resolver(
-            move |_cx| skills.clone(),
-            stub_body_resolver(bodies),
-        ));
+        let tool = Arc::new(SkillTool::new(move |_cx| skills.clone()));
 
         let (mut sender, input) = ToolInput::<SkillToolInput>::test();
         sender.send_full(json!({ "name": "deploy" }));
@@ -770,10 +718,7 @@ mod tests {
         let (skill, body) = create_test_skill("my-skill", "A test skill", "# Body");
         let bodies = vec![(skill.skill_file_path.clone(), body)];
         let skills = Arc::new(vec![skill]);
-        let tool = Arc::new(SkillTool::with_body_resolver(
-            move |_cx| skills.clone(),
-            stub_body_resolver(bodies),
-        ));
+        let tool = Arc::new(SkillTool::new(move |_cx| skills.clone()));
 
         let (mut sender, input) = ToolInput::<SkillToolInput>::test();
         sender.send_full(json!({ "name": "my-skill" }));
@@ -826,10 +771,7 @@ mod tests {
         let expected_path = skill.skill_file_path.to_string_lossy().into_owned();
         let bodies = vec![(skill.skill_file_path.clone(), body)];
         let skills = Arc::new(vec![skill]);
-        let tool = Arc::new(SkillTool::with_body_resolver(
-            move |_cx| skills.clone(),
-            stub_body_resolver(bodies),
-        ));
+        let tool = Arc::new(SkillTool::new(move |_cx| skills.clone()));
 
         let (mut sender, input) = ToolInput::<SkillToolInput>::test();
         sender.send_full(json!({ "name": "my-skill" }));
@@ -883,10 +825,7 @@ mod tests {
         let (skill, body) = create_test_skill("my-skill", "A test skill", "# Body");
         let bodies = vec![(skill.skill_file_path.clone(), body)];
         let skills = Arc::new(vec![skill]);
-        let tool = Arc::new(SkillTool::with_body_resolver(
-            move |_cx| skills.clone(),
-            stub_body_resolver(bodies),
-        ));
+        let tool = Arc::new(SkillTool::new(move |_cx| skills.clone()));
 
         let (mut sender, input) = ToolInput::<SkillToolInput>::test();
         sender.send_full(json!({ "name": "my-skill" }));
