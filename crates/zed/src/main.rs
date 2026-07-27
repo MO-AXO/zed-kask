@@ -546,7 +546,7 @@ fn main() {
         // The runtime is owned by GlobalTokio (registered below) for the
         // lifetime of the app. Dropping GlobalTokio on app shutdown will
         // shutdown_background the runtime.
-        gpui_tokio::init_from_handle(cx, kask_runtime_handle);
+        gpui_tokio::init_from_handle(cx, kask_runtime_handle.clone());
         std::mem::forget(kask_tokio_runtime);
 
         // D1 composition root: wire the hKask manifest executor into the SkillTool.
