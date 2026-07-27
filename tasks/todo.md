@@ -37,14 +37,14 @@
   - 30 symbols cited; 6 sections (merged to pass essentialist ≤7)
 - [x] **T-08: hkask-regulation Explanation** — state diagram of homeostatic loop
   - 5-phase loop (sense→compare→compute→act→verify) verified against runtime.rs
-- [ ] **T-09: hkask-inference Reference** — class diagram of config + provider routing
-- [ ] **T-10: hkask-inference How-to** — configuring a new provider
-- [ ] **T-11: hkask-templates Reference** — ERD/class of skill manifest schema
-- [ ] **T-12: hkask-templates Explanation** — sequence of ManifestExecutor invocation
-- [ ] **T-13: hkask-condenser Reference** — class diagram of condensation algorithms
-- [ ] **T-14: hkask-condenser Explanation** — state diagram of 2-phase condensation
-- [ ] **T-15: hkask-mcp-server Reference** — class diagram of MCP server framework
-- [ ] **T-16: hkask-mcp-server Explanation** — sequence of MCP server launch
+- [x] **T-09: hkask-inference Reference** — class diagram of config + provider routing
+- [x] **T-10: hkask-inference How-to** — configuring a new provider
+- [x] **T-11: hkask-templates Reference** — ERD/class of skill manifest schema
+- [x] **T-12: hkask-templates Explanation** — sequence of ManifestExecutor invocation
+- [x] **T-13: hkask-condenser Reference** — class diagram of condensation algorithms
+- [x] **T-14: hkask-condenser Explanation** — state diagram of 2-phase condensation
+- [x] **T-15: hkask-mcp-server Reference** — class diagram of MCP server framework
+- [x] **T-16: hkask-mcp-server Explanation** — sequence of MCP server launch
 
 **Checkpoint 2:** all core subsystem reference + explanation artifacts pass gates.
 
