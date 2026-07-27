@@ -244,6 +244,7 @@ install_binaries() {
 
 fallback_to_source_build() {
     local tag="$1"
+    shift  # remaining args are forwarded to install.sh
 
     if [ "${HKASK_NO_FALLBACK:-false}" = "true" ]; then
         log_error "No prebuilt binary available and HKASK_NO_FALLBACK=true"
@@ -253,30 +254,36 @@ fallback_to_source_build() {
     log_warning "No prebuilt binary for this platform. Falling back to source build..."
     log "This will clone the repo at tag ${tag} and build with cargo (requires Rust toolchain)."
 
-    # Fetch the installer pinned to the same tag, not from a mutable branch.
+    # Fetch the installer + its sourced helpers pinned to the same tag, not
+    # from a mutable branch. install.sh sources install-common.sh and reads
+    # mcp-servers.txt from ${BASH_SOURCE[0]}'s directory at runtime, so all
+    # three must be co-located in the temp dir.
     # For nightly, the tag is force-moved so this is still mutable — but it's
     # the same trust boundary as the binary archive the user just tried to
     # download from the same tag.
-    local installer_url="https://github.com/${HKASK_REPO}/releases/download/${tag}/install.sh"
-    local sums_url="https://github.com/${HKASK_REPO}/releases/download/${tag}/SHA256SUMS"
+    local base_url="https://github.com/${HKASK_REPO}/releases/download/${tag}"
+    local sums_url="${base_url}/SHA256SUMS"
 
     local temp_dir
     temp_dir="$(mktemp -d)"
     trap 'rm -rf "$temp_dir"' EXIT
 
-    local installer_path="$temp_dir/install.sh"
-    if ! http_download "$installer_url" "$installer_path" 2>/dev/null; then
-        log_error "Could not download pinned installer from ${installer_url}"
-        log_error "Please download and inspect kask/scripts/build/install.sh from the repo manually:"
-        log_error "  https://github.com/${HKASK_REPO}/blob/${tag}/kask/scripts/build/install.sh"
-        exit 1
-    fi
+    local file
+    for file in install.sh install-common.sh mcp-servers.txt; do
+        if ! http_download "${base_url}/${file}" "$temp_dir/${file}" 2>/dev/null; then
+            log_error "Could not download pinned installer file: ${file}"
+            log_error "  URL: ${base_url}/${file}"
+            log_error "Please download and inspect kask/scripts/build/ from the repo manually:"
+            log_error "  https://github.com/${HKASK_REPO}/blob/${tag}/kask/scripts/build/"
+            exit 1
+        fi
+    done
 
-    # Verify the installer against SHA256SUMS if published.
+    # Verify the installer files against SHA256SUMS if published.
     local sums_path="$temp_dir/SHA256SUMS"
     if http_download "$sums_url" "$sums_path" 2>/dev/null; then
-        log "Verifying installer checksum..."
-        ( cd "$temp_dir" && grep -F "install.sh" SHA256SUMS | sha256sum -c - ) || {
+        log "Verifying installer checksums..."
+        ( cd "$temp_dir" && sha256sum -c SHA256SUMS --ignore-missing ) || {
             log_error "Installer checksum verification failed"
             exit 1
         }
@@ -288,7 +295,7 @@ fallback_to_source_build() {
         exit 1
     fi
 
-    exec bash "$installer_path" "$@"
+    exec bash "$temp_dir/install.sh" "$@"
 }
 
 # ============================================================================

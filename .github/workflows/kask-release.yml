@@ -158,7 +158,15 @@ jobs:
           # Flatten: artifacts/<archive-name>/<archive-file> → release-artifacts/
           find ./artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \) \
             -exec cp {} release-artifacts/ \;
-          # Generate checksums
+          # Ship the source-build installer scripts as release assets too, so
+          # install-binary.sh's fallback can fetch them pinned to the tag
+          # (with checksum verification) instead of pulling from a mutable
+          # branch. mcp-servers.txt is required because install-common.sh
+          # loads it at runtime from the same directory.
+          cp kask/scripts/build/install.sh release-artifacts/
+          cp kask/scripts/build/install-common.sh release-artifacts/
+          cp kask/scripts/build/mcp-servers.txt release-artifacts/
+          # Generate checksums over every asset (archives + scripts).
           cd release-artifacts
           sha256sum * > SHA256SUMS
           ls -lR .
