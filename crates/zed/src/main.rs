@@ -1205,10 +1205,11 @@ fn main() {
                             }
                         }
                         Ok(None) => {
-                            log::info!(
+                            log::warn!(
                                 "hKask SMTP password not found in keychain — alert emails \
                                  will fail to send until the password is configured in \
-                                 Settings → Kask → Curator Email"
+                                 Settings → Kask → Curator Email (smtp_username is set, \
+                                 indicating email was intended to be configured)"
                             );
                         }
                         Err(e) => {
