@@ -47,7 +47,21 @@ if [ "${#MCP_SERVERS[@]}" -eq 0 ]; then
 fi
 
 # System bin path for optional symlink.
+# On Linux/macOS this is /usr/local/bin (already in PATH). On Windows
+# (Git Bash / MSYS2) there is no equivalent — skip the symlink strategy.
 SYSTEM_BIN="/usr/local/bin"
+
+# detect_os — returns "linux", "macos", "windows", or "unknown".
+# Used to gate platform-specific install steps (system deps, desktop entry,
+# config dir paths). Bash 3-safe (no associative arrays).
+detect_os() {
+    case "$(uname -s)" in
+        Linux)   echo "linux" ;;
+        Darwin)  echo "macos" ;;
+        MINGW*|MSYS*|CYGWIN*) echo "windows" ;;
+        *)       echo "unknown" ;;
+    esac
+}
 
 # add_to_path — make BIN_DIR reachable from the user's shell.
 #
@@ -65,22 +79,28 @@ add_to_path() {
         return 1
     fi
 
-    # Strategy 1: symlink into /usr/local/bin.
+    local os
+    os="$(detect_os)"
+
+    # Strategy 1: symlink into /usr/local/bin (Linux/macOS only — Windows
+    # has no /usr/local/bin in Git Bash / MSYS2).
     local made_symlink=false
-    if [ "${HKASK_SYSTEM_INSTALL:-false}" = "true" ] || [ -w "$SYSTEM_BIN" ]; then
-        if ln -sf "$BIN_DIR/zed-kask" "$SYSTEM_BIN/zed-kask" 2>/dev/null; then
-            log_success "zed-kask linked into $SYSTEM_BIN (system PATH)"
-            made_symlink=true
+    if [ "$os" != "windows" ]; then
+        if [ "${HKASK_SYSTEM_INSTALL:-false}" = "true" ] || [ -w "$SYSTEM_BIN" ]; then
+            if ln -sf "$BIN_DIR/zed-kask" "$SYSTEM_BIN/zed-kask" 2>/dev/null; then
+                log_success "zed-kask linked into $SYSTEM_BIN (system PATH)"
+                made_symlink=true
+            fi
         fi
-    fi
-    if [ "$made_symlink" = false ] && command -v sudo >/dev/null 2>&1; then
-        if sudo ln -sf "$BIN_DIR/zed-kask" "$SYSTEM_BIN/zed-kask" 2>/dev/null; then
-            log_success "zed-kask linked into $SYSTEM_BIN (system PATH, via sudo)"
-            made_symlink=true
+        if [ "$made_symlink" = false ] && command -v sudo >/dev/null 2>&1; then
+            if sudo ln -sf "$BIN_DIR/zed-kask" "$SYSTEM_BIN/zed-kask" 2>/dev/null; then
+                log_success "zed-kask linked into $SYSTEM_BIN (system PATH, via sudo)"
+                made_symlink=true
+            fi
         fi
-    fi
-    if [ "$made_symlink" = false ]; then
-        log "No write access to $SYSTEM_BIN — configuring PATH in shell config"
+        if [ "$made_symlink" = false ]; then
+            log "No write access to $SYSTEM_BIN — configuring PATH in shell config"
+        fi
     fi
 
     # Strategy 2: add BIN_DIR to PATH via shell config files.

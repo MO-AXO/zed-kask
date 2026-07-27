@@ -119,15 +119,14 @@ clone_repo() {
 }
 
 # ============================================================================
-# System dependencies — delegate to the canonical ./script/linux
+# System dependencies — platform-specific
 # ============================================================================
 #
-# install.sh does NOT maintain its own dependency list. The canonical list
-# lives in script/linux (shared with CI via .github/workflows/kask-ci.yml).
-# A second list here would drift, as it did before this rewrite — the prior
-# inline list omitted libasound2-dev, libfontconfig-dev, libxkbcommon-x11-dev,
-# libvulkan1, libwayland-dev, and other libs required to build zed/GPUI,
-# causing fresh-system source builds to fail.
+# install.sh does NOT maintain its own dependency list. On Linux, the
+# canonical list lives in script/linux (shared with CI). On macOS and Windows,
+# the build deps are different and the user is expected to have the toolchain
+# (Xcode CLT / Visual Studio Build Tools) already installed — the script
+# prints guidance for what's needed rather than trying to install it.
 #
 # script/linux handles: Debian/Ubuntu, Fedora/RHEL, openSUSE, Arch, Void,
 # Gentoo. It is idempotent (apt-get install is a no-op for already-installed
@@ -135,13 +134,49 @@ clone_repo() {
 
 install_system_dependencies() {
     local workspace_root="$1"
-    if [ ! -x "$workspace_root/script/linux" ]; then
-        log_error "script/linux not found or not executable: $workspace_root/script/linux"
-        return 1
-    fi
-    log "Installing system dependencies via script/linux (canonical)..."
-    (cd "$workspace_root" && ./script/linux)
-    log_success "System dependencies installed"
+    local os
+    os="$(detect_os)"
+
+    case "$os" in
+        linux)
+            if [ ! -x "$workspace_root/script/linux" ]; then
+                log_error "script/linux not found or not executable: $workspace_root"
+                return 1
+            fi
+            log "Installing system dependencies via script/linux (canonical)..."
+            (cd "$workspace_root" && ./script/linux)
+            log_success "System dependencies installed"
+            ;;
+        macos)
+            log "macOS detected — checking for Xcode Command Line Tools..."
+            if ! xcode-select -p >/dev/null 2>&1; then
+                log_warning "Xcode Command Line Tools not found."
+                log "  Install with:  xcode-select --install"
+                log "  Or install Xcode from the App Store, then run:"
+                log "    sudo xcode-select --install"
+                log "The build will fail without them. Re-run this installer after installing."
+                return 1
+            fi
+            log_success "Xcode Command Line Tools present"
+            # Most of zed's C deps (fontconfig, freetype, etc.) are vendored or
+            # provided by the SDK. If a build fails on a missing lib, brew is
+            # the usual fix — but we don't auto-install brew deps here to avoid
+            # surprising the user's environment.
+            ;;
+        windows)
+            log "Windows detected — assuming Visual Studio Build Tools are installed."
+            log "The build requires:"
+            log "  - Visual Studio 2022 (or Build Tools) with the 'Desktop development with C++' workload"
+            log "  - Windows 10/11 SDK"
+            log "  - Git for Windows (or Git Bash, to run this script)"
+            log "If the build fails with linker errors, install the above and re-run."
+            log "See: https://learn.microsoft.com/visualstudio/install/build-tools-for-visual-studio"
+            ;;
+        *)
+            log_error "Unknown OS for dependency installation: $os"
+            return 1
+            ;;
+    esac
 }
 
 # ============================================================================
@@ -260,7 +295,19 @@ install_binary() {
 # routes zed-kask:// URLs to the zed-kask binary. Without this, the
 # x-scheme-handler/zed-kask MIME type declared in the template never reaches
 # the user's applications directory and OS-level deep links won't open.
+#
+# Linux-only. macOS uses .app bundles and Windows uses registry URI handler
+# registration — neither is handled here (the source-build installer just
+# drops binaries in BIN_DIR; users who want desktop integration on those
+# platforms can build a .app / .msi separately).
 install_desktop_entry() {
+    local os
+    os="$(detect_os)"
+    if [ "$os" != "linux" ]; then
+        log "Skipping desktop entry (not applicable on $os)"
+        return 0
+    fi
+
     local workspace_root="$HKASK_SOURCE_DIR"
     local template="$workspace_root/crates/zed/resources/zed.desktop.in"
 
@@ -354,15 +401,36 @@ setup_environment() {
     # Also export for this script's process.
     export PATH="$BIN_DIR:$PATH"
 
-    # Create config directory
-    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hkask"
+    # Create config and data directories using platform-appropriate paths.
+    # Linux: XDG_CONFIG_HOME / XDG_DATA_HOME (default ~/.config, ~/.local/share).
+    # macOS: ~/Library/Application Support and ~/Library/Preferences.
+    # Windows: %APPDATA% and %LOCALAPPDATA% (via $APPDATA / $LOCALAPPDATA).
+    local os config_dir data_dir
+    os="$(detect_os)"
+    case "$os" in
+        linux)
+            config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hkask"
+            data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/hkask"
+            ;;
+        macos)
+            config_dir="$HOME/Library/Preferences/hkask"
+            data_dir="$HOME/Library/Application Support/hkask"
+            ;;
+        windows)
+            config_dir="${APPDATA:-$HOME/AppData/Roaming}/hkask"
+            data_dir="${LOCALAPPDATA:-$HOME/AppData/Local}/hkask"
+            ;;
+        *)
+            # Fallback — use the Linux paths; better than nothing.
+            config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hkask"
+            data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/hkask"
+            ;;
+    esac
+
     if [ ! -d "$config_dir" ]; then
         mkdir -p "$config_dir"
         log "Created config directory: $config_dir"
     fi
-
-    # Create data directory
-    local data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/hkask"
     if [ ! -d "$data_dir" ]; then
         mkdir -p "$data_dir"
         log "Created data directory: $data_dir"
@@ -385,8 +453,13 @@ verify_installation() {
 
     # zed-kask is the Zed editor binary — it has no --version flag, so we
     # report the file size as a sanity check that the binary is non-empty.
+    # `stat -c%s` is Linux; `stat -f%z` is macOS/BSD; Windows (Git Bash) has
+    # neither, so fall back to wc -c.
     local binary_size
-    binary_size=$(stat -c%s "$BIN_DIR/zed-kask" 2>/dev/null || echo "unknown")
+    binary_size=$(stat -c%s "$BIN_DIR/zed-kask" 2>/dev/null \
+        || stat -f%z "$BIN_DIR/zed-kask" 2>/dev/null \
+        || wc -c < "$BIN_DIR/zed-kask" 2>/dev/null \
+        || echo "unknown")
     log "CLI: $BIN_DIR/zed-kask (${binary_size} bytes)"
 
     # Check MCP server binaries
@@ -632,7 +705,7 @@ main() {
 
     case "$action" in
         install)
-            log "Starting hKask installation..."
+            log "Starting zed-kask installation..."
 
             # Resolve the source dir early so install_system_dependencies can
             # find script/linux (which lives at the repo root).

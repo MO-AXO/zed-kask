@@ -51,8 +51,9 @@ jobs:
       matrix:
         include:
           # Linux x86_64 is the only target with prebuilt binaries. Users on
-          # other platforms fall back to the source-build installer
-          # (kask/scripts/build/install.sh) via install-binary.sh.
+          # macOS and Windows (and Linux ARM) use the source-build installer
+          # (kask/scripts/build/install.sh) — install-binary.sh routes them
+          # there automatically.
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
             archive: zed-kask-x86_64-unknown-linux-gnu.tar.gz
