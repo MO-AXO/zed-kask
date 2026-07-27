@@ -304,7 +304,7 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
         .ok()
         .and_then(|h| TrainingHostId::from_str(&h))
         .unwrap_or_else(|| {
-            if std::env::var("DI_API_KEY").is_ok() {
+            if std::env::var("DEEPINFRA_API_KEY").is_ok() {
                 TrainingHostId::DeepInfra
             } else if std::env::var("NEBIUS_PROJECT_ID").is_ok() {
                 TrainingHostId::Nebius
@@ -454,7 +454,7 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
                 "RunPod API key (required only when using RunPod host)",
             ),
             hkask_mcp_server::CredentialRequirement::optional(
-                "DI_API_KEY",
+                "DEEPINFRA_API_KEY",
                 "DeepInfra API key (required when using DeepInfra host)",
             ),
             hkask_mcp_server::CredentialRequirement::optional(

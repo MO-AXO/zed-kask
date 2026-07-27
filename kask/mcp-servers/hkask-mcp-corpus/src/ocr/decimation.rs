@@ -253,7 +253,7 @@ pub(crate) async fn preprocess_via_fal(image: &mut DynamicImage) {
         return;
     }
 
-    let api_key = std::env::var("FA_API_KEY").unwrap_or_default();
+    let api_key = std::env::var("FALAI_API_KEY").unwrap_or_default();
 
     if api_key.is_empty() {
         tracing::warn!(target: "reg.pipeline.ocr", "HKASK_USE_FAL_DOCRES set but no API key found");
@@ -563,7 +563,7 @@ mod tests {
             .join(".env");
         dotenvy::from_filename(&env_path).ok();
 
-        let api_key = std::env::var("FA_API_KEY").unwrap_or_default();
+        let api_key = std::env::var("FALAI_API_KEY").unwrap_or_default();
 
         if api_key.is_empty() {
             eprintln!("SKIP: no fal.ai API key found");
