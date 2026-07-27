@@ -29,10 +29,14 @@
 
 ## Phase 2 — Core subsystems
 
-- [ ] **T-05: hkask-storage Reference** — ERD of SQLCipher schema
-- [ ] **T-06: hkask-storage How-to** — adding a new migration
-- [ ] **T-07: hkask-regulation Reference** — class diagram of Regulation ledger/loop/wallet
-- [ ] **T-08: hkask-regulation Explanation** — state diagram of homeostatic loop
+- [x] **T-05: hkask-storage Reference** — ERD of SQLCipher schema
+  - 25 tables cited to schema.sql:line or inline init_schema; ERD with Crow's Foot
+- [x] **T-06: hkask-storage How-to** — adding a new migration
+  - Procedural flowchart citing init_schema pattern + store_macros contract
+- [x] **T-07: hkask-regulation Reference** — class diagram of Regulation ledger/loop/wallet
+  - 30 symbols cited; 6 sections (merged to pass essentialist ≤7)
+- [x] **T-08: hkask-regulation Explanation** — state diagram of homeostatic loop
+  - 5-phase loop (sense→compare→compute→act→verify) verified against runtime.rs
 - [ ] **T-09: hkask-inference Reference** — class diagram of config + provider routing
 - [ ] **T-10: hkask-inference How-to** — configuring a new provider
 - [ ] **T-11: hkask-templates Reference** — ERD/class of skill manifest schema
