@@ -1,10 +1,12 @@
 #!/bin/bash
-# zed-kask Installation Script for Linux
+# zed-kask Installation Script (source build) — Linux, macOS, Windows
 #
 # Builds zed-kask and the kask MCP servers from source and installs them to
-# $HOME/.local/bin (or a custom dir). System dependencies are installed via
-# the canonical ./script/linux (shared with CI); Rust toolchain pinning is
-# delegated to rust-toolchain.toml.
+# $HOME/.local/bin (or a custom dir). On Linux, system dependencies are
+# installed via the canonical ./script/linux (shared with CI); on macOS and
+# Windows, the script checks for the required toolchain (Xcode CLT / VS Build
+# Tools) and prints guidance if missing. Rust toolchain pinning is delegated
+# to rust-toolchain.toml.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/mdz-axo/zed-kask/main/kask/scripts/build/install.sh | bash
@@ -520,24 +522,29 @@ uninstall_hkask() {
     log "Removed MCP server binaries"
 
     # Remove the desktop entry and icon so the OS stops routing zed-kask://
-    # to a binary that no longer exists.
-    local app_id="dev.zed-kask.Zed-Kask"
-    local app_icon="zed-kask"
-    local data_root
-    for data_root in "${XDG_DATA_HOME:-$HOME/.local/share}" "/usr/local/share"; do
-        local desktop_file="$data_root/applications/$app_id.desktop"
-        local icon_file="$data_root/icons/hicolor/512x512/apps/$app_icon.png"
-        if [ -f "$desktop_file" ]; then
-            rm -f "$desktop_file"
-            log "Removed desktop entry: $desktop_file"
+    # to a binary that no longer exists. Linux-only — macOS and Windows
+    # don't install a desktop entry via this script.
+    local os
+    os="$(detect_os)"
+    if [ "$os" = "linux" ]; then
+        local app_id="dev.zed-kask.Zed-Kask"
+        local app_icon="zed-kask"
+        local data_root
+        for data_root in "${XDG_DATA_HOME:-$HOME/.local/share}" "/usr/local/share"; do
+            local desktop_file="$data_root/applications/$app_id.desktop"
+            local icon_file="$data_root/icons/hicolor/512x512/apps/$app_icon.png"
+            if [ -f "$desktop_file" ]; then
+                rm -f "$desktop_file"
+                log "Removed desktop entry: $desktop_file"
+            fi
+            if [ -f "$icon_file" ]; then
+                rm -f "$icon_file"
+                log "Removed icon: $icon_file"
+            fi
+        done
+        if command -v update-desktop-database >/dev/null 2>&1; then
+            update-desktop-database "${XDG_DATA_HOME:-$HOME/.local/share}/applications" 2>/dev/null || true
         fi
-        if [ -f "$icon_file" ]; then
-            rm -f "$icon_file"
-            log "Removed icon: $icon_file"
-        fi
-    done
-    if command -v update-desktop-database >/dev/null 2>&1; then
-        update-desktop-database "${XDG_DATA_HOME:-$HOME/.local/share}/applications" 2>/dev/null || true
     fi
 
     # Remove PATH entries from shell configs. Match both the current
@@ -551,13 +558,31 @@ uninstall_hkask() {
         fi
     done
 
-    # Remove config (optional)
+    # Remove config (optional). Uses the same platform-aware paths as
+    # setup_environment so uninstall cleans up what install created.
     if [ "${HKASK_REMOVE_CONFIG:-false}" = "true" ]; then
-        local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hkask"
+        local config_dir data_dir
+        case "$os" in
+            linux)
+                config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hkask"
+                data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/hkask"
+                ;;
+            macos)
+                config_dir="$HOME/Library/Preferences/hkask"
+                data_dir="$HOME/Library/Application Support/hkask"
+                ;;
+            windows)
+                config_dir="${APPDATA:-$HOME/AppData/Roaming}/hkask"
+                data_dir="${LOCALAPPDATA:-$HOME/AppData/Local}/hkask"
+                ;;
+            *)
+                config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/hkask"
+                data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/hkask"
+                ;;
+        esac
         rm -rf "$config_dir"
         log "Removed config directory: $config_dir"
 
-        local data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/hkask"
         rm -rf "$data_dir"
         log "Removed data directory: $data_dir"
     fi
