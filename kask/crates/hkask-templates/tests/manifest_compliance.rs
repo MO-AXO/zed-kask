@@ -52,7 +52,7 @@ fn all_manifests_are_executor_compliant() {
             }
             let manifest = match load_manifest_from_yaml(&yaml) {
                 Ok(m) => m,
-                Err(e) => {
+                Err(_e) => {
                     // Load failures are caught by all_manifests_load_successfully.
                     // Don't double-report here.
                     continue;
@@ -62,12 +62,12 @@ fn all_manifests_are_executor_compliant() {
             let fname = path.file_name().unwrap().to_string_lossy();
 
             // 1. Category validity
-            if let Some(ref cat) = manifest.category {
-                if !valid_categories.contains(cat.as_str()) {
-                    errors.push(format!(
-                        "{fname}: manifest.category='{cat}' is not valid (must be one of {VALID_CATEGORIES:?})"
-                    ));
-                }
+            if let Some(ref cat) = manifest.category
+                && !valid_categories.contains(cat.as_str())
+            {
+                errors.push(format!(
+                    "{fname}: manifest.category='{cat}' is not valid (must be one of {VALID_CATEGORIES:?})"
+                ));
             }
 
             // 2. Action compliance
@@ -123,12 +123,13 @@ fn all_manifests_are_executor_compliant() {
         "Checked {checked} manifests — {} compliance errors",
         errors.len()
     );
-    for e in &errors {
-        eprintln!("  ERR: {e}");
+    for err in &errors {
+        eprintln!("  ERR: {err}");
     }
     assert!(
         errors.is_empty(),
-        "{errors} compliance errors found:\n{}",
+        "{} compliance errors found:\n{}",
+        errors.len(),
         errors.join("\n")
     );
 }
