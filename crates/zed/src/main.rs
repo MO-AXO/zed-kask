@@ -977,10 +977,10 @@ fn main() {
             // "Process-global hooks set at runtime need a startup-failure
             // signal" trap in .rules — these OnceLock-based hooks must be
             // wired from the deferred task, not from startup.
-            let tool_port_for_deferred = tool_port.clone();
-            let a2a_secret_for_deferred = a2a_secret.clone();
-            let cybernetics_loop_for_panel_deferred = cybernetics_loop_for_panel.clone();
-            let panel_regulation_ledger_deferred = panel_regulation_ledger.clone();
+            let tool_port_for_deferred = tool_port;
+            let a2a_secret_for_deferred = a2a_secret;
+            let cybernetics_loop_for_panel_deferred = cybernetics_loop_for_panel;
+            let panel_regulation_ledger_deferred = panel_regulation_ledger;
             let app_state_for_deferred = app_state.clone();
             cx.spawn(async move |cx| {
                 let mut current_user = user_store.read_with(cx, |store, _| store.watch_current_user());
