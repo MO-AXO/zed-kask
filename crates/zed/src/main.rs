@@ -1414,6 +1414,12 @@ fn main() {
                         // It's stored in a detached task — the socket is cleaned
                         // up on drop, but we don't drop it until process exit.
                         std::mem::forget(ipc_server);
+                        // Re-sync MCP servers so the inference socket path is
+                        // included in the env passed to context server processes.
+                        // The KaskMcpDescriptor::command() resolves env at call
+                        // time, so this notification triggers maintain_servers
+                        // to restart servers with the updated env.
+                        sync_kask_mcp_servers(cx);
                     }
                     Err(e) => {
                         log::warn!(
@@ -1818,11 +1824,12 @@ impl project::context_server_store::registry::ContextServerDescriptor for KaskMc
 /// current kask MCP settings.
 ///
 /// Registers descriptors for all enabled servers and unregisters descriptors
-/// for servers that are no longer enabled. Called once at startup and again
-/// whenever `SettingsStore` changes (via `cx.observe_global::<SettingsStore>`).
+/// for servers that are no longer enabled. Called once at startup, whenever
+/// `SettingsStore` changes (via `cx.observe_global::<SettingsStore>`), and
+/// after the inference IPC socket is set (so servers get the socket path).
 ///
-/// The `ContextServerStore` (per-project) subscribes to the registry and will
-/// start/stop the actual server processes to match.
+/// The `ContextServerStore` (per-project) observes the registry and will
+/// start/stop/restart the actual server processes to match.
 fn sync_kask_mcp_servers(cx: &mut gpui::App) {
     let settings = kask_bridge::KaskSettings::get_global(cx).clone();
     let registry =
@@ -1858,6 +1865,13 @@ fn sync_kask_mcp_servers(cx: &mut gpui::App) {
                 );
             }
         }
+        // Always notify so the ContextServerStore re-runs maintain_servers.
+        // This is needed because the KaskMcpDescriptor::command() resolves env
+        // vars (credentials, inference socket) at call time — if the socket
+        // wasn't available when maintain_servers last ran, the running server
+        // processes have stale env. Notifying forces maintain_servers to
+        // re-evaluate and restart servers whose configuration changed.
+        cx.notify();
     });
 }
 
