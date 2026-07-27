@@ -1387,6 +1387,15 @@ pub(crate) fn render_curator_email_page(
             .child(input)
     };
 
+    // Compute the test email recipient up front, before the strings are
+    // moved into `make_text_input` calls.
+    let test_email_recipient = if !alert_email.is_empty() {
+        alert_email.clone()
+    } else {
+        smtp_username.clone()
+    };
+    let test_email_enabled = !test_email_recipient.is_empty();
+
     let mxroute_input = make_text_input(
         "kask-curator-email-mxroute-server",
         "MXroute Server",
@@ -1398,7 +1407,7 @@ pub(crate) fn render_curator_email_page(
         "kask-curator-email-smtp-username",
         "SMTP Username",
         "Full email address used for SMTP auth and the From header. Or set HKASK_SMTP_USERNAME.",
-        smtp_username.clone(),
+        smtp_username,
         "curator@example.com",
     );
     let curator_email_input = make_text_input(
@@ -1412,27 +1421,27 @@ pub(crate) fn render_curator_email_page(
         "kask-curator-email-alert-email",
         "Alert Recipient",
         "Where algedonic alert emails are sent (defaults to SMTP Username when empty). Or set HKASK_ALERT_EMAIL.",
-        alert_email.clone(),
+        alert_email,
         "ops@example.com",
     );
     let authorized_input = make_text_input(
         "kask-curator-email-authorized-emails",
         "Authorized Senders",
-        "Comma-separated allowlist of senders who may reply with curator commands (P12). Or set HKASK_AUTHORIZED_EMAILS.",
+        "Comma-separated allowlist of senders who may reply with curator commands (P12). Empty means inbound replies are rejected. Or set HKASK_AUTHORIZED_EMAILS.",
         authorized_emails,
         "ops@example.com, alice@example.com",
     );
     let inbox_poll_input = make_text_input(
         "kask-curator-email-inbox-poll-interval",
         "Inbox Poll Interval (secs)",
-        "Reserved for a future inbound IMAP path. 0 = disabled. Or set HKASK_INBOX_POLL_INTERVAL_SECS.",
+        "IMAP inbox poll interval for inbound command replies. 0 = disabled. Default 60. Or set HKASK_INBOX_POLL_INTERVAL_SECS.",
         inbox_poll_interval,
         "0",
     );
     let digest_input = make_text_input(
         "kask-curator-email-digest-interval",
         "Digest Interval (secs)",
-        "Reserved for a future periodic digest sender. 0 = disabled. Or set HKASK_DIGEST_INTERVAL_SECS.",
+        "Periodic escalation digest email interval. 0 = disabled. Default 86400 (daily). Or set HKASK_DIGEST_INTERVAL_SECS.",
         digest_interval,
         "0",
     );
@@ -1441,12 +1450,6 @@ pub(crate) fn render_curator_email_page(
     // MXroute credentials. Uses the alert recipient (or SMTP username) as the
     // destination. The send runs on the kask tokio runtime via
     // `kask_bridge::spawn_test_email`; success/failure surfaces in the logs.
-    let test_email_recipient = if !alert_email.is_empty() {
-        alert_email.clone()
-    } else {
-        smtp_username.clone()
-    };
-    let test_email_enabled = !test_email_recipient.is_empty();
     let test_email_button = Button::new("kask-curator-email-test", "Send Test Email")
         .style(ButtonStyle::Outlined)
         .label_size(LabelSize::Small)
