@@ -4130,9 +4130,7 @@ mod internal_tests {
     use super::*;
     use acp_thread::{AgentConnection, AgentModelGroupName, AgentModelInfo, MentionUri};
     use agent_settings::COMPACTION_PROMPT;
-    use agent_skills::{
-        MAX_SKILL_DESCRIPTIONS_SIZE, MAX_SKILL_FILE_SIZE
-    };
+    use agent_skills::{MAX_SKILL_DESCRIPTIONS_SIZE, MAX_SKILL_FILE_SIZE};
     use fs::FakeFs;
     use gpui::TestAppContext;
     use indoc::formatdoc;
