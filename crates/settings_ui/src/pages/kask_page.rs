@@ -1303,15 +1303,36 @@ pub(crate) fn render_curator_email_page(
             .confirm_on_focus_out()
             .on_confirm(move |value, _window, cx| {
                 if let Some(text) = value {
-                    // Parse numeric fields up front so we don't move `text`
-                    // into the string-field branches before the numeric
-                    // branches can read it.
-                    let inbox_poll = if id == "kask-curator-email-inbox-poll-interval" {
+                    // Compute the final field value up front so the
+                    // `update_settings_file` closure only needs to move
+                    // already-owned values into place (it requires `'static`).
+                    //
+                    // For string fields: `None` when empty, else `Some(text)`.
+                    // For numeric fields: parsed `Option<u64>`.
+                    // For authorized-emails: split + trimmed `Vec<String>`.
+                    let string_value: Option<String> = if text.is_empty() {
+                        None
+                    } else {
+                        Some(text.clone())
+                    };
+                    let authorized_emails: Option<Vec<String>> =
+                        if id == "kask-curator-email-authorized-emails" && !text.is_empty() {
+                            Some(
+                                text.split(',')
+                                    .map(|p| p.trim().to_string())
+                                    .filter(|p| !p.is_empty())
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        };
+                    let inbox_poll: Option<u64> = if id == "kask-curator-email-inbox-poll-interval"
+                    {
                         text.parse::<u64>().ok()
                     } else {
                         None
                     };
-                    let digest = if id == "kask-curator-email-digest-interval" {
+                    let digest: Option<u64> = if id == "kask-curator-email-digest-interval" {
                         text.parse::<u64>().ok()
                     } else {
                         None
@@ -1329,44 +1350,19 @@ pub(crate) fn render_curator_email_page(
                             // Dispatch on `id` to set the right field.
                             match id {
                                 "kask-curator-email-mxroute-server" => {
-                                    email.mxroute_server = if text.is_empty() {
-                                        None
-                                    } else {
-                                        Some(text.clone())
-                                    };
+                                    email.mxroute_server = string_value;
                                 }
                                 "kask-curator-email-smtp-username" => {
-                                    email.smtp_username = if text.is_empty() {
-                                        None
-                                    } else {
-                                        Some(text.clone())
-                                    };
+                                    email.smtp_username = string_value;
                                 }
                                 "kask-curator-email-curator-email" => {
-                                    email.curator_email = if text.is_empty() {
-                                        None
-                                    } else {
-                                        Some(text.clone())
-                                    };
+                                    email.curator_email = string_value;
                                 }
                                 "kask-curator-email-alert-email" => {
-                                    email.alert_email = if text.is_empty() {
-                                        None
-                                    } else {
-                                        Some(text.clone())
-                                    };
+                                    email.alert_email = string_value;
                                 }
                                 "kask-curator-email-authorized-emails" => {
-                                    email.authorized_emails = if text.is_empty() {
-                                        None
-                                    } else {
-                                        Some(
-                                            text.split(',')
-                                                .map(|p| p.trim().to_string())
-                                                .filter(|p| !p.is_empty())
-                                                .collect(),
-                                        )
-                                    };
+                                    email.authorized_emails = authorized_emails;
                                 }
                                 "kask-curator-email-inbox-poll-interval" => {
                                     email.inbox_poll_interval_secs = inbox_poll;
