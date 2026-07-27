@@ -4717,9 +4717,16 @@ impl Thread {
                     })
                 })
                 .collect();
+            // Collect (name, description) pairs for the router. The router
+            // only needs descriptions for scoring — the full AnyAgentTool
+            // objects stay in `tools`.
+            let tool_descriptions: Vec<(SharedString, SharedString)> = tools
+                .iter()
+                .map(|(name, tool)| (name.clone(), tool.description()))
+                .collect();
             let retained = crate::tool_router::apply_router_bypassing_built_ins(
                 router.as_ref(),
-                &tools,
+                tool_descriptions.iter().map(|(n, d)| (n, d)),
                 self.last_user_message_text().as_deref(),
                 open_file_paths,
                 &built_in_names,

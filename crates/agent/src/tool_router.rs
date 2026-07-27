@@ -63,33 +63,42 @@ pub trait ToolRouter: Send + Sync {
 /// was introduced to tame MCP tool floods, not to second-guess the
 /// agent-profile allowlist for core tools.
 ///
-/// Returns the set of tool names to retain. Built-in tools are always in
+/// `tools` is an iterator of `(name, description)` pairs for all tools
+/// currently enabled (after profile/feature-flag filtering). The function
+/// returns the set of tool names to retain. Built-in tools are always in
 /// the returned set. MCP tools are retained only if the router includes
 /// them (or if the router returns `None` / fails open).
 ///
 /// This is a free function so it can be unit-tested without the
 /// process-global `TOOL_ROUTER` `OnceLock`.
-pub fn apply_router_bypassing_built_ins(
+pub fn apply_router_bypassing_built_ins<'a, I>(
     router: &dyn ToolRouter,
-    tools: &BTreeMap<SharedString, Arc<dyn crate::AnyAgentTool>>,
+    tools: I,
     user_message: Option<&str>,
     open_file_paths: Vec<String>,
     built_in_names: &std::collections::HashSet<&str>,
-) -> std::collections::HashSet<SharedString> {
+) -> std::collections::HashSet<SharedString>
+where
+    I: IntoIterator<Item = (&'a SharedString, &'a SharedString)>,
+{
+    // Collect into a map for lookup.
+    let tool_map: std::collections::HashMap<&SharedString, &SharedString> =
+        tools.into_iter().collect();
+
     // Start with all built-in tools — they bypass the router.
-    let mut retained: std::collections::HashSet<SharedString> = tools
+    let mut retained: std::collections::HashSet<SharedString> = tool_map
         .keys()
         .filter(|name| built_in_names.contains(name.as_ref()))
-        .cloned()
+        .map(|name| (*name).clone())
         .collect();
 
     // Build candidates from MCP tools only.
-    let candidates: Vec<ToolCandidate> = tools
+    let candidates: Vec<ToolCandidate> = tool_map
         .iter()
         .filter(|(name, _)| !built_in_names.contains(name.as_ref()))
-        .map(|(name, tool)| ToolCandidate {
-            name: name.clone(),
-            description: tool.description(),
+        .map(|(name, description)| ToolCandidate {
+            name: (*name).clone(),
+            description: (*description).clone(),
         })
         .collect();
 
@@ -107,15 +116,15 @@ pub fn apply_router_bypassing_built_ins(
     if let Some(selected) = selected {
         // Retain MCP tools that the router selected.
         for name in selected {
-            if tools.contains_key(&name) {
+            if tool_map.contains_key(&name) {
                 retained.insert(name);
             }
         }
     } else {
         // Router returned None (fail-open) — retain all MCP tools.
-        for name in tools.keys() {
+        for name in tool_map.keys() {
             if !built_in_names.contains(name.as_ref()) {
-                retained.insert(name.clone());
+                retained.insert((*name).clone());
             }
         }
     }
@@ -768,5 +777,112 @@ mod tests {
         // a candidate, so it's not in `selected` either. `enabled_tools`
         // retains it via the built-in bypass.
         assert!(!selected.contains(&"spawn_agent".into()));
+    }
+
+    /// Stub router that returns a fixed selection, for testing
+    /// `apply_router_bypassing_built_ins` without the `LazyToolRouter`'s
+    /// keyword-scoring logic.
+    struct StubRouter {
+        selected: Option<Vec<SharedString>>,
+    }
+
+    impl ToolRouter for StubRouter {
+        fn select_tools(&self, _context: &ToolSelectionContext) -> Option<Vec<SharedString>> {
+            self.selected.clone()
+        }
+    }
+
+    #[test]
+    fn test_apply_router_retains_all_built_ins_unconditionally() {
+        let built_in_names: std::collections::HashSet<&str> =
+            ["grep", "fetch", "read_file"].into_iter().collect();
+
+        // Tools: 3 built-in + 2 MCP.
+        let tools: Vec<(SharedString, SharedString)> = vec![
+            ("grep".into(), "Search file contents".into()),
+            ("fetch".into(), "Fetch a URL".into()),
+            ("read_file".into(), "Read a file".into()),
+            ("corpus_search".into(), "Search the corpus".into()),
+            ("lora_train".into(), "Train a LoRA".into()),
+        ];
+
+        // Router selects only corpus_search — lora_train is filtered out.
+        let router = StubRouter {
+            selected: Some(vec!["corpus_search".into()]),
+        };
+
+        let retained = apply_router_bypassing_built_ins(
+            &router,
+            tools.iter().map(|(n, d)| (n, d)),
+            Some("search the corpus"),
+            vec![],
+            &built_in_names,
+        );
+
+        // All built-in tools are retained, regardless of router selection.
+        assert!(retained.contains("grep"));
+        assert!(retained.contains("fetch"));
+        assert!(retained.contains("read_file"));
+        // MCP tools: corpus_search is retained (router selected it),
+        // lora_train is filtered out.
+        assert!(retained.contains("corpus_search"));
+        assert!(!retained.contains("lora_train"));
+    }
+
+    #[test]
+    fn test_apply_router_fail_open_retains_all_mcp() {
+        let built_in_names: std::collections::HashSet<&str> = ["grep"].into_iter().collect();
+
+        let tools: Vec<(SharedString, SharedString)> = vec![
+            ("grep".into(), "Search file contents".into()),
+            ("corpus_search".into(), "Search the corpus".into()),
+            ("lora_train".into(), "Train a LoRA".into()),
+        ];
+
+        // Router returns None (fail-open — did not activate).
+        let router = StubRouter { selected: None };
+
+        let retained = apply_router_bypassing_built_ins(
+            &router,
+            tools.iter().map(|(n, d)| (n, d)),
+            Some("hello"),
+            vec![],
+            &built_in_names,
+        );
+
+        // Fail-open: all tools retained (built-in + MCP).
+        assert!(retained.contains("grep"));
+        assert!(retained.contains("corpus_search"));
+        assert!(retained.contains("lora_train"));
+    }
+
+    #[test]
+    fn test_apply_router_no_mcp_tools_skips_router() {
+        let built_in_names: std::collections::HashSet<&str> =
+            ["grep", "fetch"].into_iter().collect();
+
+        // Only built-in tools, no MCP tools.
+        let tools: Vec<(SharedString, SharedString)> = vec![
+            ("grep".into(), "Search file contents".into()),
+            ("fetch".into(), "Fetch a URL".into()),
+        ];
+
+        // Router would filter everything if called, but it shouldn't be
+        // called at all when there are no MCP candidates.
+        let router = StubRouter {
+            selected: Some(vec![]), // empty selection = filter everything
+        };
+
+        let retained = apply_router_bypassing_built_ins(
+            &router,
+            tools.iter().map(|(n, d)| (n, d)),
+            Some("use grep to search"),
+            vec![],
+            &built_in_names,
+        );
+
+        // All built-in tools retained — router was skipped.
+        assert!(retained.contains("grep"));
+        assert!(retained.contains("fetch"));
     }
 }

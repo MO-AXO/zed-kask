@@ -280,3 +280,26 @@ inference socket) at call time. After `INFERENCE_SOCKET_PATH` is set (in a
 deferred task post-login), `sync_kask_mcp_servers` must be called again so
 the registry notifies `ContextServerStore` to restart servers with the
 updated env.
+
+## Model-dependent kask wiring must run in the deferred task
+
+The `set_manifest_executor`, `set_tool_invoker`, `set_scoped_inference`,
+`set_regulation_status`, and `set_thread_condenser` hooks are `OnceLock`-based
+and depend on `LanguageModelRegistry::default_model()` being populated. At
+startup (before user auth), `default_model()` returns `None`. Wiring these
+hooks synchronously at startup leaves them unwired for the entire session when
+no model is configured at startup — the "Process-global hooks set at runtime
+need a startup-failure signal" trap. They must be wired from the deferred task
+that runs after the Zed user resolves.
+
+## LazyToolRouter filters MCP tools only
+
+The `LazyToolRouter` in `crates/agent/src/tool_router.rs` was introduced to
+tame MCP tool floods, not to filter built-in zed tools.
+`Thread::enabled_tools` must skip built-in tools (those in
+`crate::tools::ALL_TOOL_NAMES`) when applying the router — filtering them
+caused the agent to lose access to `fetch`, `diagnostics`, `list_directory`,
+etc. on ordinary coding requests, with the model discovering the loss only via
+"tool not found" errors mid-turn. The filtering logic is extracted into
+`tool_router::apply_router_bypassing_built_ins` for testability without the
+process-global `TOOL_ROUTER` `OnceLock`.
