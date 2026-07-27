@@ -14,13 +14,16 @@
   - Every cited struct/trait has a `grep` hit (13/13 verified)
   - Class diagram renders with `DIAGRAM_ALIGNMENT` block
   - Gates passed: pragmatic-semantics (no OUGHT), pragmatic-cybernetics (9/9 implementors exist), essentialist (6 sections), brand-voice (0 taboo), grill-me Mechanism+Rationale
-- [ ] **T-02: hkask-types Explanation** — sequence diagram of port mediation
+- [x] **T-02: hkask-types Explanation** — sequence diagram of port mediation
   - Artifact exists; OUGHT claims only in design-rationale section
   - Feedback loop closes (each port has a real implementor cited)
-- [ ] **T-03: hkask-capability Reference** — class diagram of OCAP tokens
-  - Artifact exists; every symbol cited; diagram renders with `DIAGRAM_ALIGNMENT`
-- [ ] **T-04: hkask-capability Explanation** — state diagram of verification outcomes
+  - Gates passed: pragmatic-semantics, pragmatic-cybernetics, essentialist (7 sections), brand-voice
+- [x] **T-03: hkask-capability Reference** — class diagram of OCAP tokens
+  - Artifact exists; every symbol cited (20/20); diagram renders with `DIAGRAM_ALIGNMENT`
+  - Gates passed: pragmatic-semantics (no OUGHT), essentialist (6 sections), brand-voice
+- [x] **T-04: hkask-capability Explanation** — state diagram of verification outcomes
   - Artifact exists; OUGHT claims scoped to sovereignty rationale; loop closes
+  - Gates passed: pragmatic-semantics (OUGHT in rationale), essentialist (6 sections), brand-voice
 
 **Checkpoint 1:** `kask/docs/diataxis/` tree exists, INDEX.md seeded, 4 foundation artifacts pass all gates.
 
