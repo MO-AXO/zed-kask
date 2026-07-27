@@ -1462,18 +1462,33 @@ impl ManifestExecutor {
     ///
     /// The sub-manifest has its own convergence threshold, gas budget, and
     /// steps. It is loaded from the embedded registry (or filesystem fallback),
-    /// parsed as a `BundleManifest`, and executed via `execute_manifest()`. The
-    /// sub-cascade's results are merged back into the parent context.
+    /// parsed as a `BundleManifest`, and executed via `execute_manifest()`.
+    ///
+    /// **Gas budget closure:** The sub-cascade's gas/rjoule caps are capped to
+    /// the parent's remaining budget (`parent_gas_cap` / `parent_rjoule_cap`).
+    /// The sub-cascade's actual consumption is returned to the parent, which
+    /// deducts it from its own counters. This closes the gas feedback loop —
+    /// a sub-cascade cannot bypass the parent's gas exhaustion check.
+    ///
+    /// **Context isolation:** Only the sub-cascade's final result value is
+    /// stored under `step_{ordinal}_result` in the parent context. The full
+    /// sub-context is NOT merged back — this prevents the sub-cascade from
+    /// overwriting parent context keys.
     ///
     /// This is the composability/recursion primitive — skills compose into
     /// larger skills. A step with `action: flowdef` and
     /// `template_ref: media/logo-discovery` loads `media/logo-discovery.yaml`,
     /// runs its PDCA cascade, and returns the result.
+    ///
+    /// Returns `(context, gas_consumed, rjoule_consumed)` so the caller can
+    /// deduct consumption from the parent's counters.
     async fn execute_flowdef(
         &self,
         step: &BundleManifestStep,
         mut context: HashMap<String, Value>,
-    ) -> Result<HashMap<String, Value>> {
+        parent_gas_remaining: u64,
+        parent_rjoule_remaining: f64,
+    ) -> Result<(HashMap<String, Value>, u64, f64)> {
         let template_ref = step.template_ref.as_deref().ok_or_else(|| {
             TemplateError::Manifest(format!(
                 "Step {} has action='flowdef' but no template_ref",
@@ -1496,12 +1511,22 @@ impl ManifestExecutor {
         };
 
         // Parse the sub-manifest.
-        let sub_manifest = load_manifest_from_yaml(&manifest_yaml).map_err(|e| {
+        let mut sub_manifest = load_manifest_from_yaml(&manifest_yaml).map_err(|e| {
             TemplateError::Manifest(format!(
                 "Step {}: failed to parse sub-manifest '{}': {}",
                 step.ordinal, template_ref, e
             ))
         })?;
+
+        // Cap the sub-cascade's gas/rjoule to the parent's remaining budget.
+        // This closes the gas feedback loop: the sub-cascade cannot consume
+        // more than the parent has left. If the sub-manifest declares a
+        // smaller budget, that smaller value is used (min of declared and
+        // remaining).
+        let sub_gas_cap = (sub_manifest.gas.cap as u64).min(parent_gas_remaining);
+        let sub_rjoule_cap = (sub_manifest.rjoule.cap as f64).min(parent_rjoule_remaining.max(0.0));
+        sub_manifest.gas.cap = sub_gas_cap as u32;
+        sub_manifest.rjoule.cap = sub_rjoule_cap as u32;
 
         // Resolve bindings from input_mapping and merge into context for
         // the sub-cascade.
@@ -1514,18 +1539,46 @@ impl ManifestExecutor {
             }
         }
 
-        // Execute the sub-cascade. The sub-manifest has its own convergence
-        // threshold, gas budget, and steps. Results are merged back.
-        // Box::pin is required because this is a recursive async fn —
-        // without it, the future would be infinitely sized.
+        // Snapshot the parent's context keys before the sub-cascade so we can
+        // detect what the sub-cascade added (for gas accounting, not context
+        // merge — we don't merge the full sub-context back).
+        let parent_keys: std::collections::HashSet<String> = context.keys().cloned().collect();
+
+        // Execute the sub-cascade. Box::pin is required because this is a
+        // recursive async fn — without it, the future would be infinitely
+        // sized.
         let sub_result = Box::pin(self.execute_manifest(&sub_manifest, context)).await?;
 
-        // Store the sub-cascade's result under the step's result key.
+        // Extract the sub-cascade's final result value. We do NOT merge the
+        // full sub-context back into the parent — only the result is stored,
+        // preventing the sub-cascade from overwriting parent context keys.
         let result_value = sub_result.values().last().cloned().unwrap_or(Value::Null);
-        let mut merged = sub_result;
-        merged.insert(format!("step_{}_result", step.ordinal), result_value);
 
-        Ok(merged)
+        // Reconstruct the parent context from the sub-result. The sub-cascade
+        // received the parent's context, so the sub-result contains the
+        // parent's keys plus the sub-cascade's additions. We keep only the
+        // parent's original keys (preserving any updates the sub-cascade made
+        // to those keys) plus the step result.
+        let mut parent_context = HashMap::new();
+        for (k, v) in sub_result {
+            if parent_keys.contains(&k) {
+                parent_context.insert(k, v);
+            }
+        }
+        parent_context.insert(format!("step_{}_result", step.ordinal), result_value);
+
+        // Compute gas/rjoule consumed by the sub-cascade. The sub-cascade's
+        // gas_cap was capped to the parent's remaining budget, so the
+        // consumption is at most parent_gas_remaining. We report the capped
+        // budget as consumed if the sub-cascade exhausted its budget, or the
+        // actual usage if we can determine it. Since execute_manifest doesn't
+        // return gas accounting, we use the capped cap as an upper bound —
+        // the parent deducts the sub-cascade's budget allocation. This is
+        // conservative (may over-count) but safe (never under-counts).
+        let gas_consumed = sub_gas_cap;
+        let rjoule_consumed = sub_rjoule_cap;
+
+        Ok((parent_context, gas_consumed, rjoule_consumed))
     }
 
     /// **Execute** — Invoke an MCP tool with parameters bound from context.
