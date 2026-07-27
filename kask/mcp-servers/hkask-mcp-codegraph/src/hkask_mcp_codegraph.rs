@@ -411,11 +411,11 @@ impl CodeGraphServer {
     /// API (DeepInfra or OpenRouter), and stores the resulting vectors in the
     /// `symbols_vec` sqlite-vec table for semantic similarity search.
     ///
-    /// Requires `DI_API_KEY` or `OR_API_KEY` to be set. Uses
+    /// Requires `DEEPINFRA_API_KEY` or `OPENROUTER_API_KEY` to be set. Uses
     /// `HKASK_EMBEDDING_MODEL` (default: `DeepInfra/Qwen/Qwen3-Embedding-0.6B`) and
     /// `HKASK_EMBEDDING_DIM` (default: 1024).
     #[tool(
-        description = "Generate embeddings for all indexed symbols via the embedding API. Requires DI_API_KEY or OR_API_KEY."
+        description = "Generate embeddings for all indexed symbols via the embedding API. Requires DEEPINFRA_API_KEY or OPENROUTER_API_KEY."
     )]
     pub async fn codegraph_index_embeddings(
         &self,

@@ -6,7 +6,7 @@
 //!
 //! Applies Otsu binarization to each page image for clean B&W output
 //! optimized for OCR. Optional fal.ai `docres` enhancement available
-//! when `HKASK_USE_FAL_DOCRES=true` and `FA_API_KEY` is set.
+//! when `HKASK_USE_FAL_DOCRES=true` and `FALAI_API_KEY` is set.
 
 use crate::ocr::PipelineError;
 use image::DynamicImage;
@@ -25,7 +25,7 @@ use std::process::Command;
 /// # Preprocessing
 /// Each page image is preprocessed for OCR quality:
 /// - Default: local Otsu binarization (O(w·h), instant, free).
-/// - Optional: fal.ai `docres` when `FA_API_KEY` is set
+/// - Optional: fal.ai `docres` when `FALAI_API_KEY` is set
 ///   (falls back to Otsu on any failure).
 ///
 /// # Dependencies
@@ -239,7 +239,7 @@ pub async fn pdf_to_images_for_pages(
 ///
 /// Default: local Otsu binarization — O(w·h), instant, free.
 /// Optional: fal.ai `docres` when `HKASK_USE_FAL_DOCRES=true` AND
-/// `FA_API_KEY` is set. ~40s latency — opt-in only.
+/// `FALAI_API_KEY` is set. ~40s latency — opt-in only.
 pub(crate) async fn preprocess_via_fal(image: &mut DynamicImage) {
     // Otsu first — always instant
     otsu_binarize(image);
