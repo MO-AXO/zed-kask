@@ -11079,6 +11079,7 @@ dependencies = [
  "gpui_tokio",
  "hkask-capability",
  "hkask-condenser",
+ "hkask-email",
  "hkask-inference",
  "hkask-keystore",
  "hkask-mcp",
