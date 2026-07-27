@@ -1923,8 +1923,8 @@ struct KaskCriticalAlertToast;
 #[derive(Debug)]
 struct LogAlertEmailSink;
 
-impl hkask_regulation::algedonic::AlertEmailSink for LogAlertEmailSink {
-    fn send_alert_email(&self, alert: &hkask_regulation::algedonic::RuntimeAlert) {
+impl hkask_regulation::AlertEmailSink for LogAlertEmailSink {
+    fn send_alert_email(&self, alert: &hkask_regulation::RuntimeAlert) {
         tracing::error!(
             target: "reg.alert",
             domain = %alert.domain,

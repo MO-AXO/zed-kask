@@ -77,6 +77,51 @@ pub const BUILT_IN_MCP_SERVERS: &[BuiltinMcpServer] = &[
     },
 ];
 
+/// Just the server IDs, as a static slice of `&str`.
+/// Convenience for consumers that only need the ID list (e.g. `kask_panel`).
+pub const BUILT_IN_MCP_SERVERS_IDS: &[&str] = &[
+    "codegraph",
+    "companies",
+    "condenser",
+    "corpus",
+    "curator",
+    "kata-kanban",
+    "media",
+    "research",
+    "scenarios",
+    "training",
+];
+
+/// The server list as `(id, description)` pairs.
+/// Convenience for the settings UI which renders `(id, description)` rows.
+pub const BUILT_IN_MCP_SERVERS_PAIRS: &[(&str, &str)] = &[
+    (
+        "codegraph",
+        "Codegraph — code structure query and traversal",
+    ),
+    ("companies", "Companies — company research and filings"),
+    (
+        "condenser",
+        "Condenser — context condensation and summarization",
+    ),
+    ("corpus", "Corpus — document corpus and QA generation"),
+    (
+        "curator",
+        "Curator — regulation cascade and algedonic signals",
+    ),
+    ("kata-kanban", "Kata Kanban — improvement kata board"),
+    ("media", "Media — image generation and media workflows"),
+    ("research", "Research — web research and paper search"),
+    (
+        "scenarios",
+        "Scenarios — scenario planning and Wardley mapping",
+    ),
+    (
+        "training",
+        "Training — LoRA training configuration and audit",
+    ),
+];
+
 /// Look up a server by ID.
 #[must_use]
 pub fn find_server(id: &str) -> Option<&'static BuiltinMcpServer> {
