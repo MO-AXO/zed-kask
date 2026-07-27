@@ -114,4 +114,10 @@ Cycle detection uses `_convergence.iterations_completed` (supplied by the execut
 - `sequential-inquiry-delegate-diagnose.j2`: Public.
 - `sequential-inquiry-delegate-falsifiability.j2`: Public.
 - `sequential-inquiry-convergence-check.j2`: Public.
+- Per-delegate incorporation criteria (8a–8e) are weighted at −0.024 each (total −0.12, preserving the original single-criterion weight).
+- Dead-letter detection: if all delegates return `invoked: false`, do not subtract 8a–8e; add `delegation_dead_letter` blocker.
+- Materiality guard: force `convergence_metric = 0.0` when iteration ≥ 3, delta < 0.02, no new delegation requests.
+- Cycle-conditional criteria (8, 9) use `_convergence.iterations_completed` to skip on cycle 1.
+- Engine handles dead-letter by shifting to `skill_match_queries` instead of re-emitting failed delegation requests.
+- Skill-router dispatch (step 7) is gated on `step_1_result.skill_match_queries` being non-empty.
 - Registry is authoritative — when this SKILL.md disagrees with registry templates, the registry wins.
