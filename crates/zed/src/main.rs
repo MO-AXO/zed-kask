@@ -595,7 +595,7 @@ fn main() {
         let event_sink: std::sync::Arc<dyn hkask_types::RegulationSink> =
             std::sync::Arc::new(hkask_regulation::LedgerSink::new(
                 regulation_ledger.clone(),
-                kask_runtime_handle.clone(),
+                kask_runtime_handle,
             ));
 
         let cybernetics_loop = std::sync::Arc::new(tokio::sync::RwLock::new(
