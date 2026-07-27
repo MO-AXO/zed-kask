@@ -683,9 +683,25 @@ fn main() {
         //
         // Hoisted out of the block below so it's in scope for the model-dependent
         // wiring block after language_models::init().
+        //
+        // When the secret cannot be resolved (no env var, no keychain entry),
+        // `unwrap_or_default()` produces an empty Vec. Downstream OCAP token
+        // minting then falls back to a zeroed Ed25519 key (warned per-invocation
+        // in `PanelToolInvoker::invoke_tool`), which means every tool
+        // invocation's signature is publicly predictable. Surface this at
+        // startup so the operator can set `HKASK_A2A_SECRET` before relying on
+        // governed tool invocation — the per-invocation warning is too late.
         let a2a_secret = hkask_keystore::keychain::resolve_a2a_secret()
             .map(|s| s.to_vec())
-            .unwrap_or_default();
+            .unwrap_or_else(|e| {
+                log::warn!(
+                    "hKask a2a_secret not resolved ({}). OCAP delegation tokens will be \
+                     signed with a zeroed key — set HKASK_A2A_SECRET or store the secret \
+                     in the OS keychain before relying on governed tool invocation.",
+                    e
+                );
+                Vec::new()
+            });
 
         {
             // D6 (early): Install a logging memory port now so the global hook

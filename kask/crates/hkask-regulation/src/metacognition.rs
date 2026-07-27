@@ -59,6 +59,10 @@ pub struct HealthSnapshot {
     pub variety_deficit: u64,
     pub critical_alerts: usize,
     pub regulation_effectiveness: f64,
+    /// Number of escalation alerts produced by the most recent `compare`
+    /// phase. Zero means no threshold was breached; a positive count means
+    /// the Curator should self-calibrate or surface the breach to the user.
+    pub escalation_count: usize,
 }
 
 /// Escalation alert emitted when a threshold is breached.
@@ -176,17 +180,20 @@ impl MetacognitionLoop {
         let regulation_health = ledger.regulation_health().await;
         drop(ledger); // release the read lock before acting
 
-        let snapshot = HealthSnapshot {
+        let mut snapshot = HealthSnapshot {
             timestamp: chrono::Utc::now(),
             variety_deficit: ledger_health.overall_deficit,
             critical_alerts: ledger_health.critical_count,
             regulation_effectiveness: regulation_health.effectiveness(),
             ledger_health,
             regulation_health,
+            // Filled in after `compare` produces the alerts below.
+            escalation_count: 0,
         };
 
         // ── Compare + Compute ──────────────────────────────────────────
         let alerts = self.compare(&snapshot);
+        snapshot.escalation_count = alerts.len();
 
         // ── Act ────────────────────────────────────────────────────────
         self.act(&snapshot, &alerts).await;
@@ -330,5 +337,72 @@ impl MetacognitionLoop {
     /// until the lock is available. Safe to call from a sync context.
     pub fn last_snapshot_blocking(&self) -> Option<HealthSnapshot> {
         self.last_snapshot.read().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// `tick` must populate `escalation_count` from the number of alerts
+    /// produced by `compare`. With a low `variety_deficit_threshold` and a
+    /// ledger that reports a deficit, the snapshot's `escalation_count` must
+    /// be non-zero. This pins the wiring that `CuratorStatusTool` reads —
+    /// if the field stays at its initial 0, the tool would report "not
+    /// available" for a real escalation.
+    #[tokio::test]
+    async fn tick_populates_escalation_count_from_compare_alerts() {
+        let ledger = Arc::new(RwLock::new(RegulationLedger::with_threshold(100)));
+        // Force a variety deficit by incrementing variety beyond the
+        // (low) threshold, so `compare` produces at least one alert.
+        ledger
+            .write()
+            .await
+            .increment_variety("test-domain", "state-a")
+            .await;
+        let loop_ = MetacognitionLoop::with_config(
+            ledger.clone(),
+            MetacognitionConfig {
+                variety_deficit_threshold: 0,
+                ..MetacognitionConfig::default()
+            },
+        );
+
+        loop_.tick().await;
+
+        let snapshot = loop_.last_snapshot().await.expect("tick stores a snapshot");
+        assert!(
+            snapshot.escalation_count > 0,
+            "escalation_count should reflect the alerts produced by compare, got {}",
+            snapshot.escalation_count,
+        );
+    }
+
+    /// When no threshold is breached, `escalation_count` must be zero —
+    /// `CuratorStatusTool` reports `0`, not "not available". This pins
+    /// the healthy-path contract so a regression that drops the field
+    /// or leaves it at a sentinel is caught.
+    #[tokio::test]
+    async fn tick_sets_zero_escalation_count_when_no_threshold_breached() {
+        let ledger = Arc::new(RwLock::new(RegulationLedger::with_threshold(100)));
+        let loop_ = MetacognitionLoop::with_config(
+            ledger.clone(),
+            MetacognitionConfig {
+                variety_deficit_threshold: u64::MAX,
+                critical_alert_threshold: usize::MAX,
+                effectiveness_floor: 0.0,
+                ..MetacognitionConfig::default()
+            },
+        );
+
+        loop_.tick().await;
+
+        let snapshot = loop_.last_snapshot().await.expect("tick stores a snapshot");
+        assert_eq!(
+            snapshot.escalation_count, 0,
+            "escalation_count should be zero when no threshold is breached",
+        );
     }
 }
