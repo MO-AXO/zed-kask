@@ -1404,7 +1404,12 @@ fn main() {
                 kask_panel::set_regulation_status(Some(panel_status));
                 log::info!("Kask panel tool invoker + scoped inference + regulation status wired");
             } else {
-                log::warn!("No default LanguageModel configured — hKask manifest executor not wired; skills will use body injection");
+                // Body injection is disabled in zed-kask: with no manifest
+                // executor wired, the `skill` tool returns the no-op envelope
+                // ("Skill manifest executor not configured..."). The log
+                // message must match the actual fallback so operators reading
+                // it are not misled.
+                log::warn!("No default LanguageModel configured — hKask manifest executor not wired; skill invocations will return the no-op envelope");
             }
         }
 
