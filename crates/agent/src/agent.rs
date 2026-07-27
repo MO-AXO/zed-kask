@@ -534,6 +534,7 @@ static SKILLS_PREFIX: LazyLock<Option<Arc<RelPath>>> = LazyLock::new(|| {
 struct ProjectSkillFile {
     relative_path: Arc<RelPath>,
     display_path: PathBuf,
+    #[allow(dead_code)]
     size: u64,
 }
 
@@ -4130,7 +4131,7 @@ mod internal_tests {
     use acp_thread::{AgentConnection, AgentModelGroupName, AgentModelInfo, MentionUri};
     use agent_settings::COMPACTION_PROMPT;
     use agent_skills::{
-        MAX_SKILL_DESCRIPTIONS_SIZE, MAX_SKILL_FILE_SIZE, read_skill_body_from_content,
+        MAX_SKILL_DESCRIPTIONS_SIZE, MAX_SKILL_FILE_SIZE
     };
     use fs::FakeFs;
     use gpui::TestAppContext;
