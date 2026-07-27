@@ -50,12 +50,12 @@
 
 ## Phase 3 — Zed integration layer
 
-- [ ] **T-17: kask_bridge Reference** — class diagram of KaskSettings + bridges
-- [ ] **T-18: kask_bridge Explanation** — sequence of composition root (D1–D10)
-- [ ] **T-19: kask_panel Reference** — class diagram of panel view + curator variant
-- [ ] **T-20: kask_panel How-to** — adding a new panel action
-- [ ] **T-21: kask_bridge How-to** — wiring a new kask hook (set_* OnceLock pattern)
-- [ ] **T-22: kask_bridge Tutorial** — "Your first kask hook"
+- [x] **T-17: kask_bridge Reference** — class diagram of KaskSettings + bridges
+- [x] **T-18: kask_bridge Explanation** — sequence of composition root (D1–D10)
+- [x] **T-19: kask_panel Reference** — class diagram of panel view + curator variant
+- [x] **T-20: kask_panel How-to** — adding a new panel action
+- [x] **T-21: kask_bridge How-to** — wiring a new kask hook (set_* OnceLock pattern)
+- [x] **T-22: kask_bridge Tutorial** — "Your first kask hook"
 
 **Checkpoint 3:** zed-side integration artifacts pass gates; `// zed-kask:` deviations documented.
 
