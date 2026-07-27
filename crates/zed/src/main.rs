@@ -774,13 +774,13 @@ fn main() {
         .detach();
 
         let servers_to_start: Vec<String> = if kask_settings_for_mcp.mcp.load_default {
-            kask_bridge::enabled_server_ids(
-                kask_settings_for_mcp.mcp.load_default,
-                &kask_settings_for_mcp.mcp.overrides,
-            )
-            .into_iter()
-            .map(String::from)
-            .collect()
+            kask_bridge::BUILT_IN_MCP_SERVERS
+                .iter()
+                .filter(|s| {
+                    *kask_settings_for_mcp.mcp.overrides.get(s.id).unwrap_or(&true)
+                })
+                .map(|s| s.id.to_string())
+                .collect()
         } else {
             Vec::new()
         };
@@ -1075,23 +1075,18 @@ fn main() {
                     }
                 }
 
-                // Launch MCP servers.
+                // Launch MCP servers via McpRuntime for app-global governed
+                // dispatch (OCAP/gas/regulation). These instances serve the
+                // skill cascade (FlowDef) and kask panel.
+                //
+                // Zed's ContextServerStore (per-project) launches separate
+                // instances for the agent tool picker — registered via
+                // sync_kask_mcp_servers. The two systems serve different
+                // consumers with different governance requirements; the
+                // parallel instances are by design, not a bug.
                 if !servers_to_start_clone.is_empty() {
-                    // Build the MCP env, including API keys resolved from zed's
-                    // keychain. This bridges the two keychain namespaces: the
-                    // kask keystore (hkask_keystore::keychain) and zed's
-                    // CredentialsProvider.
-                    //
-                    // McpRuntime uses tokio::sync::RwLock internally, and
-                    // start_server_with_env uses tokio::process::Command.
-                    // Both require a tokio reactor. We're inside a cx.spawn
-                    // (GPUI foreground executor), so enter the tokio runtime
-                    // context for the MCP server launches.
                     let tokio_handle = gpui_tokio::Tokio::handle_async(&*cx);
                     let _tokio_guard = tokio_handle.enter();
-                    // kask settings UI writes keys via zed's CredentialsProvider
-                    // (under `kask://credentials/<key>`), while MCP servers read
-                    // env vars / hKask's Keychain (service "hkask").
                     let credential_urls = cx.update(|cx| {
                         let settings = kask_bridge::KaskSettings::get_global(cx);
                         kask_bridge::credential_urls_for_mcp(&settings)
@@ -1104,8 +1099,6 @@ fn main() {
                             cx,
                         )
                         .await;
-                    // Pass the inference IPC socket path so MCP servers can
-                    // route inference through zed's LanguageModelRegistry.
                     if let Some(socket_path) = INFERENCE_SOCKET_PATH.get() {
                         mcp_env.insert(
                             hkask_types::inference_ipc::INFERENCE_SOCKET_ENV.to_string(),
@@ -1125,7 +1118,7 @@ fn main() {
                             .start_server_with_env(server_id, &binary, mcp_env.clone())
                             .await
                         {
-                            Ok(()) => log::info!("Kask MCP server '{server_id}' started"),
+                            Ok(()) => log::info!("Kask MCP server '{server_id}' started (McpRuntime)"),
                             Err(e) => log::warn!(
                                 "Kask MCP server '{server_id}' failed to start: {e} \
                                  — set HKASK_MCP_{}_BIN to the binary path",
@@ -1321,7 +1314,31 @@ fn main() {
                     };
 
                 let inference_model: Arc<dyn language_model::LanguageModel> =
-                    fusion_model.clone().unwrap_or_else(|| configured.model.clone());
+                    fusion_model.clone().unwrap_or_else(|| {
+                        // When fusion is disabled, check if kask.models.default_model
+                        // overrides zed's default model. If set, resolve it from the
+                        // registry; otherwise fall back to zed's configured default.
+                        let kask_default = kask_settings.models.effective_default_model();
+                        if kask_default != kask_bridge::KaskModelsSettings::DEFAULT_INFERENCE_MODEL {
+                            if let Some(model) = kask_bridge::resolve_fusion_models(
+                                model_registry,
+                                &[kask_default.to_string()],
+                                cx,
+                            ).into_values().next() {
+                                log::info!(
+                                    "hKask inference using kask.models.default_model: {}",
+                                    kask_default
+                                );
+                                return model;
+                            }
+                            log::warn!(
+                                "kask.models.default_model '{}' could not be resolved \
+                                 from LanguageModelRegistry — falling back to zed default",
+                                kask_default
+                            );
+                        }
+                        configured.model.clone()
+                    });
 
                 // Register the fusion provider so it appears in the agent
                 // panel's model picker. When fusion is disabled, the provider
