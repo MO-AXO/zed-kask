@@ -76,7 +76,7 @@ steps:
 
   # ── Step 3: Establish the Target Condition ──
   - ordinal: 3
-    action: validate
+    action: select
     description: >
       Validate the generated workflow JSON. Check: has input/run/display
       nodes, correct $references, valid model IDs, correct sync/queue
