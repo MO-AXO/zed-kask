@@ -589,10 +589,14 @@ fn main() {
 
         // The event sink must be constructed before the CyberneticsLoop so
         // both the loop and the MCP runtime share one sink. `LedgerSink::new`
-        // captures the current tokio handle — this runs inside the
-        // gpui_tokio runtime registered above, so `Handle::current` succeeds.
+        // takes the tokio handle explicitly — the GPUI foreground thread is
+        // NOT inside a tokio reactor context, so `Handle::current()` would
+        // panic here. We pass the kask tokio handle captured above instead.
         let event_sink: std::sync::Arc<dyn hkask_types::RegulationSink> =
-            std::sync::Arc::new(hkask_regulation::LedgerSink::new(regulation_ledger.clone()));
+            std::sync::Arc::new(hkask_regulation::LedgerSink::new(
+                regulation_ledger.clone(),
+                kask_runtime_handle.clone(),
+            ));
 
         let cybernetics_loop = std::sync::Arc::new(tokio::sync::RwLock::new(
             hkask_regulation::CyberneticsLoop::new(regulation_ledger.clone())
