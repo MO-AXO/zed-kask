@@ -350,21 +350,166 @@ impl ServiceConfig {
     ///
     /// pre:  when `db_provider == Postgres`, `HKASK_DATABASE_URL` must be set.
     /// post: returns a connected driver with schema initialized.
-    pub fn open_driver(&self) -> Result<std::sync::Arc<dyn hkask_storage::DatabaseDriver>, String> {
+    pub fn open_driver(
+        &self,
+    ) -> Result<std::sync::Arc<dyn hkask_storage::DatabaseDriver>, ServiceError> {
         match self.db_provider {
             DbProvider::Sqlite => {
-                let db = hkask_storage::open_database(&self.db_path, &self.db_passphrase)
-                    .map_err(|e| e.to_string())?;
-                let pool = db.sqlite_pool().map_err(|e| e.to_string())?;
+                let db = hkask_storage::open_database(&self.db_path, &self.db_passphrase).map_err(
+                    |e| ServiceError::Domain {
+                        kind: ErrorKind::ServiceUnavailable,
+                        domain: DomainKind::Storage,
+                        message: e.to_string(),
+                        source: Some(Box::new(e)),
+                    },
+                )?;
+                let pool = db.sqlite_pool().map_err(|e| ServiceError::Domain {
+                    kind: ErrorKind::ServiceUnavailable,
+                    domain: DomainKind::Storage,
+                    message: e.to_string(),
+                    source: Some(Box::new(e)),
+                })?;
                 Ok(std::sync::Arc::new(
                     hkask_storage::database::sqlite::SqliteDriver::new(pool),
                 ))
             }
             DbProvider::Postgres => {
-                let url = std::env::var("HKASK_DATABASE_URL").map_err(|_| {
-                    "HKASK_DB_PROVIDER=postgres requires HKASK_DATABASE_URL to be set".to_string()
-                })?;
-                hkask_storage::open_postgres(&url).map_err(|e| e.to_string())
+                let url =
+                    std::env::var("HKASK_DATABASE_URL").map_err(|_| ServiceError::Domain {
+                        kind: ErrorKind::BadRequest,
+                        domain: DomainKind::Storage,
+                        message: "HKASK_DB_PROVIDER=postgres requires HKASK_DATABASE_URL to be set"
+                            .to_string(),
+                        source: None,
+                    })?;
+                hkask_storage::open_postgres(&url).map_err(|e| ServiceError::Domain {
+                    kind: ErrorKind::ServiceUnavailable,
+                    domain: DomainKind::Storage,
+                    message: e.to_string(),
+                    source: Some(Box::new(e)),
+                })
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::{DomainKind, ErrorKind, ServiceError};
+
+    fn sqlite_config(path: &str) -> ServiceConfig {
+        let mut config = ServiceConfig::from_secrets(
+            "test-a2a-secret".to_string(),
+            "test-db-passphrase".to_string(),
+            TEST_USER_NAME.to_string(),
+        );
+        config.db_path = path.to_string();
+        config.db_provider = DbProvider::Sqlite;
+        config
+    }
+
+    fn postgres_config() -> ServiceConfig {
+        let mut config = ServiceConfig::from_secrets(
+            "test-a2a-secret".to_string(),
+            "test-db-passphrase".to_string(),
+            TEST_USER_NAME.to_string(),
+        );
+        config.db_provider = DbProvider::Postgres;
+        config
+    }
+
+    /// Sqlite open failure must surface as `ServiceError::Domain` over
+    /// `DomainKind::Storage`, preserving the `DatabaseError` source chain
+    /// so callers can inspect the specific failure mode.
+    #[test]
+    fn open_driver_sqlite_error_is_typed_storage_domain() {
+        // A path under a non-existent directory fails at open time.
+        let config = sqlite_config("/nonexistent-dir/should-fail.db");
+        let err = match config.open_driver() {
+            Ok(_) => panic!("expected open_driver to fail on a non-existent path"),
+            Err(e) => e,
+        };
+
+        match err {
+            ServiceError::Domain {
+                kind,
+                domain,
+                source,
+                ..
+            } => {
+                assert_eq!(domain, DomainKind::Storage);
+                assert_eq!(kind, ErrorKind::ServiceUnavailable);
+                // The source chain must carry the underlying DatabaseError.
+                let source = source.expect("source chain must preserve DatabaseError");
+                let db_err = source
+                    .downcast_ref::<hkask_storage::DatabaseError>()
+                    .expect("source must be a DatabaseError");
+                assert!(
+                    !db_err.to_string().is_empty(),
+                    "source DatabaseError must carry a message, got: {db_err}"
+                );
+            }
+            other => panic!("expected ServiceError::Domain, got {other:?}"),
+        }
+    }
+
+    /// Postgres without `HKASK_DATABASE_URL` must surface as a typed
+    /// `BadRequest` over `DomainKind::Storage` (config error, not transient).
+    #[test]
+    fn open_driver_postgres_missing_url_is_bad_request() {
+        // Ensure the env var is unset for this test's duration.
+        let guard = EnvGuard::new("HKASK_DATABASE_URL");
+        let config = postgres_config();
+        let err = match config.open_driver() {
+            Ok(_) => panic!("expected open_driver to fail without HKASK_DATABASE_URL"),
+            Err(e) => e,
+        };
+
+        match err {
+            ServiceError::Domain {
+                kind,
+                domain,
+                source,
+                message,
+            } => {
+                assert_eq!(domain, DomainKind::Storage);
+                assert_eq!(kind, ErrorKind::BadRequest);
+                assert!(source.is_none(), "missing-env error has no source");
+                assert!(message.contains("HKASK_DATABASE_URL"));
+            }
+            other => panic!("expected ServiceError::Domain, got {other:?}"),
+        }
+        drop(guard);
+    }
+
+    /// RAII guard that removes an env var on construction and restores the
+    /// original value (if any) on drop, so tests don't leak env state.
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn new(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            // SAFETY: tests are single-threaded within this module; the env
+            // var mutation is scoped to this guard's lifetime and restored on
+            // drop. `set_var`/`remove_var` are unsafe in edition 2024 because
+            // they can race with concurrent reads, which doesn't apply here.
+            unsafe { std::env::remove_var(key) };
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `EnvGuard::new` — scoped, single-threaded mutation.
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
             }
         }
     }
