@@ -36,6 +36,7 @@ use project::lsp_store::CompletionDocumentation;
 use project::{Completion, CompletionResponse, CompletionSource};
 use serde_json::Value;
 use text::ToOffset;
+use ui::WithScrollbar;
 use ui::prelude::*;
 use workspace::{
     Workspace,
@@ -828,7 +829,7 @@ impl KaskPanel {
                             .style(ButtonStyle::Filled)
                             .icon_color(Color::Accent)
                             .disabled(self.busy)
-                            .tooltip(move |_window, cx| ui::Tooltip::text("Send")(cx))
+                            .tooltip(move |window, cx| ui::Tooltip::text("Send")(window, cx))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.submit_input(window, cx);
                             })),

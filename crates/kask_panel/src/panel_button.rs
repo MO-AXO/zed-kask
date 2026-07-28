@@ -48,7 +48,7 @@ impl Render for KaskPanelButton {
                 if let Some(focus_handle) = &focus_handle {
                     Tooltip::for_action_in("Toggle Kask Panel", &Toggle, focus_handle, window, cx)
                 } else {
-                    Tooltip::for_action("Toggle Kask Panel", &Toggle, window, cx)
+                    Tooltip::for_action("Toggle Kask Panel", &Toggle, cx)
                 }
             })
             .on_click(|_, window, cx| {

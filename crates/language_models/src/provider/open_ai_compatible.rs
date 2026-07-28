@@ -200,7 +200,7 @@ impl OpenAiCompatibleLanguageModelProvider {
                 &state,
                 move |this: &mut DiscoveryState, observed_state, cx| {
                     this.restart_fetch_models_task(
-                        observed_state.clone(),
+                        observed_state,
                         observe_http.clone(),
                         observe_name.clone(),
                         cx,

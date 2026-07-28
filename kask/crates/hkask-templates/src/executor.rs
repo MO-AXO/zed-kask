@@ -47,7 +47,7 @@ use crate::bundle::BundleManifest;
 use crate::bundle::BundleManifestStep;
 use crate::load_manifest_from_yaml;
 use crate::ports::{Result, TemplateError};
-use crate::template_renderer::{TemplateRenderer, render_minijinja, safe_template_join};
+use crate::template_renderer::{TemplateRenderer, render_minijinja};
 use hkask_capability::{DelegationAction, DelegationResource, DelegationToken};
 use hkask_capability::{ToolPort, ToolPortError};
 use hkask_guard::{SpotlightMode, Spotlighter};
