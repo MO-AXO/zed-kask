@@ -291,69 +291,14 @@ impl ManifestExecutor {
     /// install location. The filesystem fallback exists for dev workflows
     /// where a template has been edited but not yet rebuilt.
     ///
-    /// Resolution order: embedded `.j2` → embedded `.yaml` → filesystem
-    /// `.j2` → filesystem `.yaml`. This covers all four Pattern A template
-    /// types: WordAct/KnowAct (`.j2`), FlowDef sub-manifests (`.yaml`),
-    /// and RenderAct (either `.j2` or `.yaml`).
+    /// Delegates to `TemplateRenderer` — the resolution ladder lives there.
     fn load_template(
         &self,
         template_ref: &str,
         context: &HashMap<String, Value>,
     ) -> Result<String> {
-        let template_content = if let Some(content) = crate::template_file(template_ref) {
-            content.to_string()
-        } else if let Some(content) = crate::template_yaml_file(template_ref) {
-            content.to_string()
-        } else {
-            let template_path = safe_template_join(&self.template_base_path, template_ref)
-                .ok_or_else(|| {
-                    TemplateError::PathTraversal(format!(
-                        "template_ref '{template_ref}' escapes base path '{}'",
-                        self.template_base_path.display()
-                    ))
-                })?;
-            // Try the ref as-is, then with .j2 appended, then with .yaml appended.
-            // Many manifests omit the extension; the file could be either format.
-            std::fs::read_to_string(&template_path)
-                .or_else(|_| {
-                    if !template_ref.ends_with(".j2") {
-                        let j2_ref = format!("{template_ref}.j2");
-                        if let Some(j2_path) = safe_template_join(&self.template_base_path, &j2_ref)
-                        {
-                            return std::fs::read_to_string(&j2_path);
-                        }
-                    }
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!("template not found at {}", template_path.display()),
-                    ))
-                })
-                .or_else(|_| {
-                    if !template_ref.ends_with(".yaml") {
-                        let yaml_ref = format!("{template_ref}.yaml");
-                        if let Some(yaml_path) =
-                            safe_template_join(&self.template_base_path, &yaml_ref)
-                        {
-                            return std::fs::read_to_string(&yaml_path);
-                        }
-                    }
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!("template not found at {}", template_path.display()),
-                    ))
-                })
-                .map_err(|e| {
-                    TemplateError::NotFound(NotFound {
-                        entity_type: "template".to_string(),
-                        id: format!(
-                            "Template not found at {} (also tried .j2 and .yaml extensions): {}",
-                            template_path.display(),
-                            e
-                        ),
-                    })
-                })?
-        };
-        let prompt = render_minijinja(&template_content, context, &self.template_base_path)?;
+        let template_content = self.template_renderer.load(template_ref, 0)?;
+        let prompt = self.template_renderer.render(&template_content, context)?;
         Ok(prompt)
     }
 
