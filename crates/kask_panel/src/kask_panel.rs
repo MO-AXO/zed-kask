@@ -387,7 +387,39 @@ impl KaskPanel {
         self.selected_server = index;
         // Invalidate the tool cache — it's per-server.
         self.cached_tools = None;
+        // Scroll to the bottom of the (possibly different) conversation so
+        // the latest message is visible after the switch.
+        self.scroll_messages_to_bottom(cx);
         cx.notify();
+    }
+
+    /// Scroll the messages container to the bottom so the latest message is
+    /// visible. Called after every message push and on server switch.
+    fn scroll_messages_to_bottom(&self, _cx: &mut Context<Self>) {
+        self.messages_scroll_handle.scroll_to_bottom();
+    }
+
+    /// Lazily fetch the selected server's tool list in the background and
+    /// cache it. Used by `run_scoped_inference` so the next inference call
+    /// has a complete system prompt. Fire-and-forget — does not push any
+    /// messages to the conversation.
+    fn fetch_tools_background(&mut self, cx: &mut Context<Self>) {
+        let Some(invoker) = tool_invoker() else {
+            return;
+        };
+        let server = self.selected_server_name().to_string();
+        let index = self.selected_server;
+        let task = invoker.list_tools(&server);
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            this.update(cx, |this, cx| {
+                if let Ok(tools) = result {
+                    this.cached_tools = Some((index, tools));
+                    cx.notify();
+                }
+            })
+        })
+        .detach();
     }
 
     fn submit_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -433,6 +465,7 @@ impl KaskPanel {
                     role: KaskMessageRole::System,
                     content: "Commands:\n  /help              — show this help\n  /clear             — clear the conversation\n  /tools             — list this server's tools\n  /tool_name args    — direct tool invocation (bypasses LLM)\n  <natural language> — scoped inference (LLM calls the server's tools)".to_string(),
                 });
+                self.scroll_messages_to_bottom(cx);
                 cx.notify();
             }
             "clear" => {
@@ -444,6 +477,7 @@ impl KaskPanel {
                         content: format!("Cleared. {server} conversation reset."),
                     }],
                 );
+                self.scroll_messages_to_bottom(cx);
                 cx.notify();
             }
             "tools" => {
@@ -475,6 +509,7 @@ impl KaskPanel {
                 role: KaskMessageRole::System,
                 content,
             });
+            self.scroll_messages_to_bottom(cx);
             cx.notify();
             return;
         }
@@ -484,6 +519,7 @@ impl KaskPanel {
                 role: KaskMessageRole::System,
                 content: format!("Fetching tools from {server}…"),
             });
+            self.scroll_messages_to_bottom(cx);
             cx.notify();
 
             let task = invoker.list_tools(&server);
@@ -519,6 +555,7 @@ impl KaskPanel {
                             });
                         }
                     }
+                    this.scroll_messages_to_bottom(cx);
                     cx.notify();
                 })
             })
@@ -528,6 +565,7 @@ impl KaskPanel {
                 role: KaskMessageRole::System,
                 content: "Tool invoker not wired — set_tool_invoker() not called.".to_string(),
             });
+            self.scroll_messages_to_bottom(cx);
             cx.notify();
         }
     }
@@ -647,7 +685,7 @@ impl KaskPanel {
                     .to_string(),
             });
             self.busy = false;
-            this.scroll_messages_to_bottom(cx);
+            self.scroll_messages_to_bottom(cx);
             cx.notify();
         }
     }

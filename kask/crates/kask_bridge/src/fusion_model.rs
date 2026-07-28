@@ -495,6 +495,7 @@ fn resolve_model(
             // Iterate all providers and compare case-insensitively.
             registry
                 .providers()
+                .into_iter()
                 .find(|p| p.id().0.as_ref().eq_ignore_ascii_case(provider_id_str))
         });
 

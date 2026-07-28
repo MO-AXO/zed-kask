@@ -512,7 +512,7 @@ impl ManifestExecutor {
                 // by evaluate_step_condition (supports ==, !=, <, <=, >, >=, AND/OR/NOT).
                 if let Some(ref cond) = step.condition {
                     let resolved_cond = if cond.contains("{{") {
-                        match render_minijinja(cond, &context, &self.template_base_path) {
+                        match self.template_renderer.render(cond, &context) {
                             Ok(rendered) => rendered.trim().to_string(),
                             Err(e) => {
                                 info!(
@@ -641,7 +641,8 @@ impl ManifestExecutor {
                             .and_then(|m| m.get("loop_target"))
                             .and_then(|v| v.as_str())
                             .and_then(|s| {
-                                render_minijinja(s, &context, &self.template_base_path)
+                                self.template_renderer
+                                    .render(s, &context)
                                     .ok()
                                     .and_then(|rendered| rendered.trim().parse::<u32>().ok())
                             })
@@ -716,8 +717,11 @@ impl ManifestExecutor {
                                 if k == "loop_target" {
                                     continue;
                                 }
-                                let bound =
-                                    resolve_mapping_value(v, &context, &self.template_base_path);
+                                let bound = resolve_mapping_value(
+                                    v,
+                                    &context,
+                                    self.template_renderer.base_path(),
+                                );
                                 context.insert(k.clone(), bound);
                             }
                         }
@@ -1230,7 +1234,7 @@ impl ManifestExecutor {
             && let Value::Object(map) = mapping
         {
             for (k, v) in map {
-                let bound = resolve_mapping_value(v, &context, &self.template_base_path);
+                let bound = resolve_mapping_value(v, &context, self.template_renderer.base_path());
                 context.insert(k.clone(), bound);
             }
         }
@@ -1407,7 +1411,7 @@ impl ManifestExecutor {
             && let Value::Object(map) = mapping
         {
             for (k, v) in map {
-                let bound = resolve_mapping_value(v, &context, &self.template_base_path);
+                let bound = resolve_mapping_value(v, &context, self.template_renderer.base_path());
                 context.insert(k.clone(), bound);
             }
         }
@@ -1461,7 +1465,7 @@ impl ManifestExecutor {
         })?;
 
         // Resolve {{key}} references from context before loading.
-        let template_ref = render_inline_template(template_ref, &context);
+        let template_ref = TemplateRenderer::render_inline(template_ref, &context);
 
         // Load the sub-manifest YAML. Try embedded .yaml first, then embedded
         // .j2 (shouldn't happen for flowdef, but handle gracefully), then
@@ -1471,7 +1475,8 @@ impl ManifestExecutor {
         } else if let Some(content) = crate::template_file(&template_ref) {
             content.to_string()
         } else {
-            self.load_template_from_disk(&template_ref, step.ordinal)?
+            self.template_renderer
+                .load_from_disk(&template_ref, step.ordinal)?
         };
 
         // Parse the sub-manifest.
@@ -1498,7 +1503,7 @@ impl ManifestExecutor {
             && let Value::Object(map) = mapping
         {
             for (k, v) in map {
-                let bound = resolve_mapping_value(v, &context, &self.template_base_path);
+                let bound = resolve_mapping_value(v, &context, self.template_renderer.base_path());
                 context.insert(k.clone(), bound);
             }
         }
@@ -1562,7 +1567,7 @@ impl ManifestExecutor {
         })?;
 
         // Resolve ${variable} references in the MCP reference against context
-        let mcp_ref = render_inline_template(mcp_ref_raw, &context);
+        let mcp_ref = TemplateRenderer::render_inline(mcp_ref_raw, &context);
 
         let input: Value = step
             .input_mapping
