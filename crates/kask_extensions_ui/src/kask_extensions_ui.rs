@@ -866,7 +866,39 @@ impl KaskExtensionsPage {
             return;
         };
         let sha256 = skill.manifest.tarball_sha256.clone();
+        let dependencies = skill.manifest.dependencies.clone();
         let skill_id_str = skill_id.to_string();
+
+        // zed-kask: Check if the skill's dependencies are installed. If not,
+        // log a warning so the user knows they need to install them too.
+        // We don't block the install — the user may want to install deps
+        // separately. But we notify them so they're not surprised when the
+        // skill fails at runtime.
+        if !dependencies.is_empty() {
+            let installed_names: std::collections::HashSet<String> = cx
+                .try_global::<agent_skills::SkillIndex>()
+                .map(|idx| idx.global_skills.iter().map(|s| s.name.clone()).collect())
+                .unwrap_or_default();
+            let missing: Vec<&str> = dependencies
+                .iter()
+                .filter(|dep| !installed_names.contains(*dep))
+                .map(|s| s.as_str())
+                .collect();
+            if !missing.is_empty() {
+                log::warn!(
+                    "kask-extensions: skill '{}' depends on {} that are not installed: {}. \
+                     The skill will be installed but will fail at runtime until its dependencies are installed. \
+                     Install them via the Kask Extensions panel.",
+                    skill_id,
+                    if missing.len() == 1 {
+                        "a skill"
+                    } else {
+                        "skills"
+                    },
+                    missing.join(", "),
+                );
+            }
+        }
 
         self.outstanding_operations
             .insert(skill_id.clone(), KaskSkillStatus::Installing);
