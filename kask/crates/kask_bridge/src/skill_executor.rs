@@ -264,3 +264,68 @@ fn extract_final_step_result(result: &std::collections::HashMap<String, Value>) 
         None => serde_json::to_string(result).unwrap_or_default(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Regression for the non-deterministic `values().last()` extraction bug.
+    /// HashMap iteration order is randomized per-process; the extractor must
+    /// deterministically pick the highest-ordinal `step_N_result`, not an
+    /// arbitrary value.
+    #[test]
+    fn extract_final_step_result_picks_highest_ordinal() {
+        let mut map: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        map.insert("step_1_result".to_string(), json!("first"));
+        map.insert("step_3_result".to_string(), json!("third"));
+        map.insert("step_2_result".to_string(), json!("second"));
+        map.insert("_convergence".to_string(), json!({"status": "converged"}));
+
+        let out = extract_final_step_result(&map);
+        assert_eq!(
+            out, "\"third\"",
+            "must return step_3_result (highest ordinal)"
+        );
+    }
+
+    #[test]
+    fn extract_final_step_result_ignores_non_result_keys() {
+        let mut map: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        map.insert("step_1_populated".to_string(), json!("populated"));
+        map.insert("step_1_result".to_string(), json!({"answer": 42}));
+        map.insert("task".to_string(), json!("user request"));
+
+        let out = extract_final_step_result(&map);
+        assert_eq!(
+            out, "{\"answer\":42}",
+            "must pick step_N_result, not _populated or other keys"
+        );
+    }
+
+    #[test]
+    fn extract_final_step_result_falls_back_to_full_context_when_no_step_results() {
+        let mut map: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        map.insert("task".to_string(), json!("user request"));
+        map.insert("_convergence".to_string(), json!({"status": "running"}));
+
+        let out = extract_final_step_result(&map);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).expect("fallback must be valid JSON");
+        assert_eq!(parsed["task"], json!("user request"));
+        assert_eq!(parsed["_convergence"]["status"], json!("running"));
+    }
+
+    #[test]
+    fn extract_final_step_result_handles_single_step() {
+        let mut map: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+        map.insert(
+            "step_1_result".to_string(),
+            json!({"convergence_metric": 0.05}),
+        );
+
+        let out = extract_final_step_result(&map);
+        assert!(out.contains("convergence_metric"));
+        assert!(out.contains("0.05"));
+    }
+}

@@ -88,6 +88,15 @@ pub fn render_skill_envelope(skill: &Skill, body: &str) -> String {
 pub struct SkillToolInput {
     /// The name of the skill to retrieve
     pub name: String,
+    /// The user's task for the skill to act on. This is the natural-language
+    /// request that triggered the skill activation — it is injected into the
+    /// manifest cascade context as `task` so templates can reference `{{ task }}`
+    /// instead of running blind. When the model invokes the skill tool, this
+    /// field carries the user's intent; when a slash command activates the
+    /// skill, the trailing text after the command is used. Defaults to empty
+    /// for backward compatibility with callers that only pass `name`.
+    #[serde(default)]
+    pub task: String,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +283,9 @@ impl AgentTool for SkillTool {
             // cascade is executed instead of body injection. The SKILL.md
             // frontmatter stays the discovery-only catalog entry.
             let _skill_name = input.name.clone();
+            // Clone the task before `input` is moved into `initial_title`
+            // below, so we can inject it into the manifest cascade context.
+            let task = input.task.clone();
             let is_builtin = skill.source == agent_skills::SkillSource::BuiltIn;
             if !is_builtin {
                 let authorize = cx.update(|cx| {
@@ -293,7 +305,15 @@ impl AgentTool for SkillTool {
                 // envelope (body injection is disabled in zed-kask).
                 let skill_name = skill.name.as_ref();
                 if executor.has_manifest(skill_name) {
-                    let context = std::collections::HashMap::new();
+                    // Inject the user's task into the cascade context so templates
+                    // can reference `{{ task }}`. Without this, the cascade runs
+                    // blind — templates get model defaults but never the actual
+                    // request the user wants the skill to act on.
+                    let mut context = std::collections::HashMap::new();
+                    context.insert(
+                        "task".to_string(),
+                        serde_json::Value::String(task.clone()),
+                    );
                     match executor.execute_skill(skill_name, context).await {
                         Ok(result_text) => render_skill_envelope(&skill, &result_text),
                         Err(e) => {
@@ -960,6 +980,89 @@ mod tests {
         assert!(
             !rendered.contains("# Body"),
             "SKILL.md body must not be injected when a manifest executor is wired: {rendered}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_skill_tool_manifest_executor_injects_task_into_context(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (skill, _body) =
+            create_test_skill("task-skill", "A skill that consumes {{ task }}", "# Body");
+        let skills = Arc::new(vec![skill]);
+
+        let executor = Arc::new(StubManifestExecutor::new(
+            ["task-skill"],
+            "Cascade ran with task context.",
+        ));
+        let executor_for_assert: Arc<StubManifestExecutor> = executor.clone();
+        let tool = Arc::new(SkillTool::with_manifest_executor(
+            move |_cx| skills.clone(),
+            executor,
+        ));
+
+        let (mut sender, input) = ToolInput::<SkillToolInput>::test();
+        sender.send_full(json!({
+            "name": "task-skill",
+            "task": "audit the 42 registered skills"
+        }));
+        let (event_stream, _rx) = ToolCallEventStream::test();
+        let task = cx.update(|cx| tool.run(input, event_stream, cx));
+        let output = task.await.unwrap();
+
+        let SkillToolOutput::Found { rendered } = output else {
+            panic!("expected Found, got: {output:?}");
+        };
+        assert!(
+            rendered.contains("Cascade ran with task context."),
+            "cascade output must appear: {rendered}"
+        );
+
+        let ctx = executor_for_assert
+            .last_context()
+            .expect("execute_skill was not called");
+        let task_value = ctx
+            .get("task")
+            .expect("`task` must be injected into the cascade context");
+        assert_eq!(
+            task_value,
+            &serde_json::Value::String("audit the 42 registered skills".to_string()),
+            "the user's task must be passed through to the cascade as `task`"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_skill_tool_manifest_executor_defaults_task_to_empty(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        // Callers that omit `task` (e.g. legacy model invocations) must still
+        // work — `task` defaults to empty string via #[serde(default)].
+        let (skill, _body) = create_test_skill("default-task-skill", "A skill", "# Body");
+        let skills = Arc::new(vec![skill]);
+
+        let executor = Arc::new(StubManifestExecutor::new(["default-task-skill"], "ok"));
+        let executor_for_assert: Arc<StubManifestExecutor> = executor.clone();
+        let tool = Arc::new(SkillTool::with_manifest_executor(
+            move |_cx| skills.clone(),
+            executor,
+        ));
+
+        let (mut sender, input) = ToolInput::<SkillToolInput>::test();
+        sender.send_full(json!({ "name": "default-task-skill" }));
+        let (event_stream, _rx) = ToolCallEventStream::test();
+        let task = cx.update(|cx| tool.run(input, event_stream, cx));
+        let _output = task.await.unwrap();
+
+        let ctx = executor_for_assert
+            .last_context()
+            .expect("execute_skill was not called");
+        let task_value = ctx
+            .get("task")
+            .expect("`task` key must be present even when omitted by the caller");
+        assert_eq!(
+            task_value,
+            &serde_json::Value::String(String::new()),
+            "omitted `task` must default to an empty string, not be absent"
         );
     }
 
