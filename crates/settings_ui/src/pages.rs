@@ -9,6 +9,7 @@ mod mcp_servers_page;
 mod sandbox_settings;
 mod skill_creator;
 mod skills_setup;
+mod skills_visibility;
 mod tool_permissions_setup;
 
 pub(crate) use audio_input_output_setup::{
@@ -35,6 +36,9 @@ pub(crate) use skill_creator::{
 #[cfg(test)]
 pub(crate) use skills_setup::displayed_skills;
 pub(crate) use skills_setup::render_skills_setup_page;
+pub(crate) use skills_visibility::{
+    SkillVisibilityQueue, handle_visibility_toggle, spawn_drain, update_skill_visibility_in_index,
+};
 pub(crate) use tool_permissions_setup::render_tool_permissions_setup_page;
 
 pub use tool_permissions_setup::{
