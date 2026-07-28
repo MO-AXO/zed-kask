@@ -509,6 +509,7 @@ mod tests {
                 load_warnings: Vec::new(),
                 disable_model_invocation: false,
                 visibility: SkillVisibility::Private,
+                dependencies: Vec::new(),
                 embedded_body: None,
             });
             cx.set_global(index);
@@ -545,6 +546,7 @@ mod tests {
                 load_warnings: Vec::new(),
                 disable_model_invocation: false,
                 visibility: SkillVisibility::Private,
+                dependencies: Vec::new(),
                 embedded_body: None,
             });
             cx.set_global(index);
