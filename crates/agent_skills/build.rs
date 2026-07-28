@@ -92,7 +92,7 @@ fn main() {
         let abs = path.to_str().expect("UTF-8 SKILL.md path");
         code.push_str(&format!("    (\"{name}\", include_str!(\"{abs}\")),\n"));
     }
-    code.push_str("]\n");
+    code.push_str("];\n");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     fs::write(out_dir.join("embedded_global_skills.rs"), code)

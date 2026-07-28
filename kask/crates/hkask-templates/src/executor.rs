@@ -611,15 +611,16 @@ impl ManifestExecutor {
                                 limit = matryoshka_limit,
                                 "REG"
                             );
-                            self.finalize_convergence_report(
+                            let snap = budget.snapshot();
+                            convergence.finalize_report(
                                 &mut context,
-                                "maxed_out",
+                                ConvergenceStatus::MaxedOut,
                                 "energy_spent",
                                 iteration,
-                                threshold,
-                                &field,
-                                baseline_quality,
-                                manifest.convergence.improvement_ratio,
+                                snap.gas_used,
+                                snap.gas_cap,
+                                snap.rjoule_used,
+                                snap.rjoule_cap,
                             );
                             return Err(TemplateError::Manifest(format!(
                                 "Matryoshka depth limit ({}) exceeded at iteration {}",
@@ -650,15 +651,16 @@ impl ManifestExecutor {
 
                         // Check convergence before looping
                         if iteration >= max_iterations {
-                            self.finalize_convergence_report(
+                            let snap = budget.snapshot();
+                            convergence.finalize_report(
                                 &mut context,
-                                "maxed_out",
+                                ConvergenceStatus::MaxedOut,
                                 "energy_spent",
                                 iteration,
-                                threshold,
-                                &field,
-                                baseline_quality,
-                                manifest.convergence.improvement_ratio,
+                                snap.gas_used,
+                                snap.gas_cap,
+                                snap.rjoule_used,
+                                snap.rjoule_cap,
                             );
                             // Honor on_not_reached: if "escalate", emit span and
                             // return error instead of silently exiting.
@@ -677,25 +679,17 @@ impl ManifestExecutor {
                         }
 
                         // Check threshold convergence
-                        if self.check_convergence(
-                            &context,
-                            &manifest.convergence.convergence_field,
-                            threshold,
-                            manifest.convergence.improvement_ratio,
-                            &manifest.convergence.improvement_gate,
-                            baseline_quality,
-                            iteration,
-                            min_iterations,
-                        ) {
-                            self.finalize_convergence_report(
+                        if convergence.check_met(&context, iteration) {
+                            let snap = budget.snapshot();
+                            convergence.finalize_report(
                                 &mut context,
-                                "converged",
+                                ConvergenceStatus::Converged,
                                 "quality_met",
                                 iteration,
-                                threshold,
-                                &field,
-                                baseline_quality,
-                                manifest.convergence.improvement_ratio,
+                                snap.gas_used,
+                                snap.gas_cap,
+                                snap.rjoule_used,
+                                snap.rjoule_cap,
                             );
                             break 'cascade;
                         }
@@ -739,22 +733,18 @@ impl ManifestExecutor {
                             )
                             .await?;
                         // Check budget exhaustion after select (unified gas + rJoule).
-                        if let Some(exhausted) = budget.check_exhausted(iteration) {
-                            self.finalize_convergence_report(
+                        if let Some(_exhausted) = budget.check_exhausted(iteration) {
+                            let snap = budget.snapshot();
+                            convergence.finalize_report(
                                 &mut context,
-                                "maxed_out",
+                                ConvergenceStatus::MaxedOut,
                                 "energy_spent",
                                 iteration,
-                                threshold,
-                                &field,
-                                baseline_quality,
-                                manifest.convergence.improvement_ratio,
+                                snap.gas_used,
+                                snap.gas_cap,
+                                snap.rjoule_used,
+                                snap.rjoule_cap,
                             );
-                            // Emit the exhausted-budget escalation span for observability.
-                            match exhausted {
-                                BudgetExhaustion::Gas => {}
-                                BudgetExhaustion::Rjoule => {}
-                            }
                             break 'cascade;
                         }
                     }
