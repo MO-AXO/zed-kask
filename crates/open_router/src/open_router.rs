@@ -639,41 +639,42 @@ pub async fn list_models(
                     .and_then(|s| s.parse::<f64>().ok());
                 Model {
                     name: entry.id,
-                // OpenRouter returns display names in the format "provider_name: model_name".
-                // When displayed in the UI, these names can get truncated from the right.
-                // Since users typically already know the provider, we extract just the model name
-                // portion (after the colon) to create a more concise and user-friendly label
-                // for the model dropdown in the agent panel.
-                display_name: Some(
-                    entry
-                        .name
-                        .split(':')
-                        .next_back()
-                        .unwrap_or(&entry.name)
-                        .trim()
-                        .to_string(),
-                ),
-                max_tokens: entry.context_length.unwrap_or(2000000),
-                supports_tools: Some(entry.supported_parameters.contains(&"tools".to_string())),
-                supports_images: Some(
-                    entry
-                        .architecture
-                        .as_ref()
-                        .map(|arch| arch.input_modalities.contains(&"image".to_string()))
-                        .unwrap_or(false),
-                ),
-                mode: if entry
-                    .supported_parameters
-                    .contains(&"reasoning".to_string())
-                {
-                    ModelMode::Thinking {
-                        budget_tokens: Some(4_096),
-                    }
-                } else {
-                    ModelMode::Default
-                },
-                provider: None,
-                output_price_per_token,
+                    // OpenRouter returns display names in the format "provider_name: model_name".
+                    // When displayed in the UI, these names can get truncated from the right.
+                    // Since users typically already know the provider, we extract just the model name
+                    // portion (after the colon) to create a more concise and user-friendly label
+                    // for the model dropdown in the agent panel.
+                    display_name: Some(
+                        entry
+                            .name
+                            .split(':')
+                            .next_back()
+                            .unwrap_or(&entry.name)
+                            .trim()
+                            .to_string(),
+                    ),
+                    max_tokens: entry.context_length.unwrap_or(2000000),
+                    supports_tools: Some(entry.supported_parameters.contains(&"tools".to_string())),
+                    supports_images: Some(
+                        entry
+                            .architecture
+                            .as_ref()
+                            .map(|arch| arch.input_modalities.contains(&"image".to_string()))
+                            .unwrap_or(false),
+                    ),
+                    mode: if entry
+                        .supported_parameters
+                        .contains(&"reasoning".to_string())
+                    {
+                        ModelMode::Thinking {
+                            budget_tokens: Some(4_096),
+                        }
+                    } else {
+                        ModelMode::Default
+                    },
+                    provider: None,
+                    output_price_per_token,
+                }
             })
             .collect();
 

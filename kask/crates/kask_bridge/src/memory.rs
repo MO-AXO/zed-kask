@@ -94,7 +94,14 @@ pub struct RealMemoryPort {
     /// Confidence floor for semantic cleanup during consolidation.
     confidence_floor: f64,
     /// Timestamp of the last consolidation pass. Guarded by a mutex so the
-    /// ingestion path (which is `&self`) can check-and-update atomically.
+    /// test-only `maybe_consolidate` method can check-and-update atomically.
+    ///
+    /// In production, the background timer (`start_consolidation_timer`) uses
+    /// its own `Arc<Mutex<Option<DateTime>>>` (captured at startup) because the
+    /// timer task must be `Send + 'static` and cannot borrow `&self`. The two
+    /// mutexes are not shared — in production, only the timer runs, so this
+    /// field stays at its initial value (`None`). This is not a bug; it's a
+    /// deliberate split between the test entry point and the production timer.
     last_consolidation: Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// Tokio runtime handle — entered around embedding HTTP calls so that
     /// `reqwest` (which is tokio-backed) has a reactor. The memory port's

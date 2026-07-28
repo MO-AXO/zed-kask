@@ -1150,6 +1150,7 @@ mod tests {
             Some(false),
             None,
             None,
+            None,
         );
         let expected_session_id = "a".repeat(MAX_OPEN_ROUTER_SESSION_ID_LENGTH);
         let request = LanguageModelRequest {
@@ -1221,6 +1222,7 @@ mod tests {
             Some(200000),
             Some(true),
             Some(false),
+            None,
             None,
             None,
         );
@@ -1374,6 +1376,7 @@ mod tests {
             Some(false),
             None,
             None,
+            None,
         );
 
         let request = LanguageModelRequest {
@@ -1435,6 +1438,7 @@ mod tests {
             Some(128000),
             Some(true),
             Some(false),
+            None,
             None,
             None,
         );
