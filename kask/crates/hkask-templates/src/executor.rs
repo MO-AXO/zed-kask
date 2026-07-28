@@ -427,21 +427,10 @@ impl ManifestExecutor {
         let mut iteration: u32 = 0;
         let mut recursion_depth: u8 = 0;
         let matryoshka_limit: u8 = hkask_capability::SYSTEM_MAX_RECURSION;
-        // Gas tracking — hard parent allocation for compute cycles
-        let gas_cap = manifest.gas.cap as u64;
-        let gas_cost_per_iter = manifest.gas.cost_per_iteration as u64;
-        let gas_alert_threshold = manifest.gas.alert_threshold;
-        let gas_hard_limit = manifest.gas.hard_limit;
-        let mut gas_used: u64 = 0;
-        let mut gas_alerted: bool = false;
-        // rJoule tracking — hard parent allocation for inference energy
-        // Cost per token is set by the inference provider/model config, not the manifest.
-        let rjoule_cap = manifest.rjoule.cap as f64;
-        let rjoule_alert_threshold = manifest.rjoule.alert_threshold;
-        let rjoule_hard_limit = manifest.rjoule.hard_limit;
-        let rjoule_enabled = rjoule_cap > 0.0;
-        let mut rjoule_used: f64 = 0.0;
-        let mut rjoule_alerted: bool = false;
+        // Unified gas + rJoule budget tracking (extracted to `budget.rs`).
+        // Replaces 6 `let mut` locals (gas_used, gas_alerted, rjoule_used,
+        // rjoule_alerted, plus the cap/threshold reads) with one tracker.
+        let mut budget = BudgetTracker::new(&manifest.gas, &manifest.rjoule);
 
         // Manifest-level fusion control: when manifest.fusion is Some(config),
         // all steps use this per-manifest fusion config (custom judge/panel/mode).
@@ -461,12 +450,12 @@ impl ManifestExecutor {
                 "exit_reason": null,
                 "improvement_target": manifest.convergence.improvement_ratio,
                 "baseline_quality": null,
-                "gas_cap": gas_cap,
+                "gas_cap": budget.snapshot().gas_cap,
                 "gas_used": 0,
-                "gas_remaining": gas_cap,
-                "rjoule_cap": rjoule_cap,
+                "gas_remaining": budget.snapshot().gas_cap,
+                "rjoule_cap": budget.snapshot().rjoule_cap,
                 "rjoule_used": 0.0,
-                "rjoule_remaining": rjoule_cap,
+                "rjoule_remaining": budget.snapshot().rjoule_cap,
             }),
         );
 
@@ -475,6 +464,7 @@ impl ManifestExecutor {
         'cascade: loop {
             iteration += 1;
             // Update live convergence context for template awareness
+            let snap = budget.snapshot();
             context.insert(
                 "_convergence".to_string(),
                 serde_json::json!({
@@ -486,12 +476,12 @@ impl ManifestExecutor {
                     "exit_reason": null,
                     "improvement_target": manifest.convergence.improvement_ratio,
                     "baseline_quality": baseline_quality,
-                    "gas_cap": gas_cap,
-                    "gas_used": gas_used,
-                    "gas_remaining": gas_cap.saturating_sub(gas_used),
-                    "rjoule_cap": rjoule_cap,
-                    "rjoule_used": rjoule_used,
-                    "rjoule_remaining": (rjoule_cap - rjoule_used).max(0.0),
+                    "gas_cap": snap.gas_cap,
+                    "gas_used": snap.gas_used,
+                    "gas_remaining": snap.gas_remaining,
+                    "rjoule_cap": snap.rjoule_cap,
+                    "rjoule_used": snap.rjoule_used,
+                    "rjoule_remaining": snap.rjoule_remaining,
                 }),
             );
 
@@ -1149,18 +1139,11 @@ impl ManifestExecutor {
     /// The selector template (from `step.template_ref` or `step.renderer`) is
     /// rendered with the current context. The rendered prompt is sent to the
     /// inference port. The response is parsed as JSON and merged into context.
-    #[allow(clippy::too_many_arguments)]
     async fn execute_select(
         &self,
         step: &BundleManifestStep,
         mut context: HashMap<String, Value>,
-        gas_used: &mut u64,
-        gas_cap: u64,
-        gas_cost_per_iter: u64,
-        rjoule_used: &mut f64,
-        rjoule_cap: f64,
-        rjoule_enabled: bool,
-        _rjoule_hard_limit: bool,
+        budget: &mut BudgetTracker,
         manifest_fusion_config: Option<&hkask_types::fusion::FusionConfig>,
     ) -> Result<HashMap<String, Value>> {
         // Apply input_mapping: resolve {{ }} string values (and $ref objects) from the
@@ -1238,13 +1221,10 @@ impl ManifestExecutor {
         // TODO: wire rJoule deduction once InferenceResult reports token counts.
         // For now, gas tracking (below) is the only budget enforcement; rJoule
         // is checked at the cascade-loop level via the cap, not per-call.
-        if rjoule_enabled {
-            // Placeholder: once InferenceResult exposes token usage, deduct here:
-            // *rjoule_used += (result_text.len() as f64 / 4.0) * COST_PER_TOKEN_RJOULE;
-        }
+        // (When wired, call `budget.charge_rjoule(...)` here.)
 
         // Gas tracking — deduct one iteration of compute
-        *gas_used = gas_used.saturating_add(gas_cost_per_iter);
+        budget.charge_iteration();
 
         // Extract the parsed result. If the model called the structured-output
         // tool, use the tool call arguments directly (the API guaranteed JSON
@@ -1271,27 +1251,8 @@ impl ManifestExecutor {
         };
         context.insert(format!("step_{}_result", step.ordinal), parsed);
 
-        // Inject dual-budget context for template awareness
-        let gas_remaining = gas_cap.saturating_sub(*gas_used);
-        let rjoule_remaining = (rjoule_cap - *rjoule_used).max(0.0);
-        context.insert(
-            "_gas".to_string(),
-            serde_json::json!({
-                "used": *gas_used,
-                "cap": gas_cap,
-                "remaining": gas_remaining,
-                "cost_per_iteration": gas_cost_per_iter,
-            }),
-        );
-        context.insert(
-            "_rjoule".to_string(),
-            serde_json::json!({
-                "used": *rjoule_used,
-                "cap": rjoule_cap,
-                "remaining": rjoule_remaining,
-                "enabled": rjoule_enabled,
-            }),
-        );
+        // Inject dual-budget context for template awareness (unified via BudgetTracker).
+        budget.inject_into_context(&mut context);
 
         Ok(context)
     }
