@@ -930,7 +930,7 @@ mod tests {
             *self
                 .last_context
                 .lock()
-                .expect("last_context mutex poisoned") = Some(context.clone());
+                .expect("last_context mutex poisoned") = Some(context);
             if self.known.contains(skill_name) {
                 Ok(self.output.clone())
             } else {
