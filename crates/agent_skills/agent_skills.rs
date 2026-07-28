@@ -661,7 +661,11 @@ pub async fn load_marketplace_skills(
         if !fs.is_dir(&user_path).await {
             continue;
         }
-        let source_user = user_path.file_name().to_string_lossy().to_string();
+        let source_user = user_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
 
         // List skill_name directories under each source_user.
         let Ok(mut skill_entries) = fs.read_dir(&user_path).await else {
@@ -671,7 +675,11 @@ pub async fn load_marketplace_skills(
             if !fs.is_dir(&skill_path).await {
                 continue;
             }
-            let skill_name = skill_path.file_name().to_string_lossy().to_string();
+            let skill_name = skill_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             let skill_file = skill_path.join("SKILL.md");
             if !fs.is_file(&skill_file).await {
                 continue;

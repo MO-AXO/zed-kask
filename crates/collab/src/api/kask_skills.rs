@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use aws_sdk_s3::presigning::PresigningConfig;
 use axum::{
     Extension, Json, Router,
-    extract::Path,
+    extract::{Path, Query},
     http::StatusCode,
     response::Redirect,
     routing::{get, post},
@@ -170,7 +170,7 @@ async fn upload_kask_skill(
         .body(body.into())
         .send()
         .await
-        .context("uploading kask skill to S3")?;
+        .map_err(|e| Error::Internal(anyhow::anyhow!("uploading kask skill to S3: {e}")))?;
 
     Ok(StatusCode::CREATED)
 }
@@ -209,18 +209,20 @@ async fn delete_kask_skill(
         let prefix = format!("kask-skills/{}/{}/", source_user, skill_name);
         let list = blob_store_client
             .list_objects()
-            .bucket(bucket)
+            .bucket(&bucket)
             .prefix(&prefix)
             .send()
-            .await?;
+            .await
+            .map_err(|e| Error::Internal(e.into()))?;
         for object in list.contents.unwrap_or_default() {
             if let Some(key) = object.key {
                 blob_store_client
                     .delete_object()
-                    .bucket(bucket)
+                    .bucket(&bucket)
                     .key(&key)
                     .send()
-                    .await?;
+                    .await
+                    .map_err(|e| Error::Internal(e.into()))?;
             }
         }
     }
