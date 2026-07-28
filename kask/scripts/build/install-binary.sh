@@ -27,9 +27,34 @@ set -euo pipefail
 # ============================================================================
 # Shared helpers (log functions, MCP_SERVERS, add_to_path, print_banner)
 # ============================================================================
-_HKASK_INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+#
+# When piped through curl|bash, BASH_SOURCE[0] is empty and the companion
+# files (install-common.sh, mcp-servers.txt) are not on disk.  Download them
+# from the GitHub raw main branch into a temp dir and source from there.
+_HKASK_INSTALL_DIR="$([ -n "${BASH_SOURCE[0]:-}" ] && cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
+_HKASK_COMMON_FILE="${_HKASK_INSTALL_DIR:+$_HKASK_INSTALL_DIR/}install-common.sh"
+
+if [ ! -f "$_HKASK_COMMON_FILE" ]; then
+    _HKASK_BOOTSTRAP_TMP="$(mktemp -d)"
+    trap 'rm -rf "$_HKASK_BOOTSTRAP_TMP"' EXIT
+    _HKASK_RAW_BASE="https://raw.githubusercontent.com/${HKASK_REPO:-mdz-axo/zed-kask}/main/kask/scripts/build"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL -o "$_HKASK_BOOTSTRAP_TMP/install-common.sh" "$_HKASK_RAW_BASE/install-common.sh"
+        curl -fsSL -o "$_HKASK_BOOTSTRAP_TMP/mcp-servers.txt"  "$_HKASK_RAW_BASE/mcp-servers.txt"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$_HKASK_BOOTSTRAP_TMP/install-common.sh" "$_HKASK_RAW_BASE/install-common.sh"
+        wget -qO "$_HKASK_BOOTSTRAP_TMP/mcp-servers.txt"  "$_HKASK_RAW_BASE/mcp-servers.txt"
+    else
+        echo "[ERROR] Neither curl nor wget is available" >&2
+        exit 1
+    fi
+    MCP_SERVERS_LIST_FILE="$_HKASK_BOOTSTRAP_TMP/mcp-servers.txt"
+    _HKASK_COMMON_FILE="$_HKASK_BOOTSTRAP_TMP/install-common.sh"
+    _HKASK_INSTALL_DIR="$_HKASK_BOOTSTRAP_TMP"
+fi
+
 # shellcheck source=install-common.sh
-source "$_HKASK_INSTALL_DIR/install-common.sh"
+source "$_HKASK_COMMON_FILE"
 
 # ============================================================================
 # Configuration
