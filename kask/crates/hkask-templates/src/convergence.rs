@@ -514,7 +514,10 @@ mod tests {
     }
 
     #[test]
-    fn compute_compound_quality_min_takes_worst() {
+    fn compute_compound_quality_min_takes_lowest_score() {
+        // The `min` aggregation returns the lowest quality score (best quality,
+        // since lower = closer to threshold = better). This mirrors the original
+        // `fold(1.0, f64::min)` semantics.
         let cfg = config(0.15, "composite", 3, 0);
         let tracker = ConvergenceTracker::new(&cfg);
         let mut ctx = HashMap::new();
@@ -539,7 +542,7 @@ mod tests {
             },
         ];
         let q = tracker.compute_compound_quality(&ctx, "min", &sources);
-        assert_eq!(q, 0.20); // worst (highest) = 0.20
+        assert_eq!(q, 0.05); // min(0.05, 0.20) = 0.05 (best quality)
     }
 
     #[test]
