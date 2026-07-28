@@ -527,6 +527,13 @@ impl Default for KaskFusionSettings {
 /// Provider-prefixed model names that override the kask built-in defaults.
 /// When a field is empty, kask falls back to its default model selection
 /// (typically the zed `agent.default_model` or the fusion judge model).
+///
+/// **Two-layer default design (intentional):** `default_model`, `embedding_model`,
+/// and `classifier_model` default to empty strings in `Default`. When empty, the
+/// `effective_*` methods fall back to the `DEFAULT_*_MODEL` constants. This lets
+/// users override individual models in settings.json while keeping the kask
+/// built-in defaults as the fallback. Do not merge these layers — the constants
+/// are the kask opinion, the settings fields are the user override.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Default)]
 pub struct KaskModelsSettings {
     /// Default inference model (provider-prefixed, e.g. `"openrouter/z-ai/glm-5.2"`).
