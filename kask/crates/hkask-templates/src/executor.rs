@@ -46,6 +46,7 @@
 use crate::budget::{BudgetExhaustion, BudgetTracker};
 use crate::bundle::BundleManifest;
 use crate::bundle::BundleManifestStep;
+use crate::convergence::{ConvergenceStatus, ConvergenceTracker};
 use crate::load_manifest_from_yaml;
 use crate::ports::{Result, TemplateError};
 use crate::template_renderer::{TemplateRenderer, render_minijinja};
