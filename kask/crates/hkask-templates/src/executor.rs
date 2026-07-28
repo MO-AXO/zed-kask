@@ -743,25 +743,12 @@ impl ManifestExecutor {
                             .execute_select(
                                 step,
                                 context,
-                                &mut gas_used,
-                                gas_cap,
-                                gas_cost_per_iter,
-                                &mut rjoule_used,
-                                rjoule_cap,
-                                rjoule_enabled,
-                                rjoule_hard_limit,
+                                &mut budget,
                                 manifest_fusion_config.as_ref(),
                             )
                             .await?;
-                        // Check gas exhaustion after select
-                        if gas_hard_limit && gas_used >= gas_cap {
-                            info!(
-                                target: "reg.skill.budget.gas_exhausted",
-                                iteration = iteration,
-                                gas_used = gas_used,
-                                gas_cap = gas_cap,
-                                "REG"
-                            );
+                        // Check budget exhaustion after select (unified gas + rJoule).
+                        if let Some(exhausted) = budget.check_exhausted(iteration) {
                             self.finalize_convergence_report(
                                 &mut context,
                                 "maxed_out",
@@ -772,56 +759,12 @@ impl ManifestExecutor {
                                 baseline_quality,
                                 manifest.convergence.improvement_ratio,
                             );
+                            // Emit the exhausted-budget escalation span for observability.
+                            match exhausted {
+                                BudgetExhaustion::Gas => {}
+                                BudgetExhaustion::Rjoule => {}
+                            }
                             break 'cascade;
-                        }
-                        // Gas alert threshold
-                        if !gas_alerted
-                            && gas_cap > 0
-                            && (gas_used as f64 / gas_cap as f64) >= gas_alert_threshold
-                        {
-                            gas_alerted = true;
-                            info!(
-                                target: "reg.skill.budget.gas_alert",
-                                gas_used = gas_used,
-                                gas_cap = gas_cap,
-                                pct = (gas_used as f64 / gas_cap as f64) * 100.0,
-                                "REG"
-                            );
-                        }
-                        // Check rJoule exhaustion after select
-                        if rjoule_enabled && rjoule_hard_limit && rjoule_used >= rjoule_cap {
-                            info!(
-                                target: "reg.skill.budget.rjoule_exhausted",
-                                iteration = iteration,
-                                rjoule_used = rjoule_used,
-                                rjoule_cap = rjoule_cap,
-                                "REG"
-                            );
-                            self.finalize_convergence_report(
-                                &mut context,
-                                "maxed_out",
-                                "energy_spent",
-                                iteration,
-                                threshold,
-                                &field,
-                                baseline_quality,
-                                manifest.convergence.improvement_ratio,
-                            );
-                            break 'cascade;
-                        }
-                        // rJoule alert threshold
-                        if !rjoule_alerted
-                            && rjoule_cap > 0.0
-                            && (rjoule_used / rjoule_cap) >= rjoule_alert_threshold
-                        {
-                            rjoule_alerted = true;
-                            info!(
-                                target: "reg.skill.budget.rjoule_alert",
-                                rjoule_used = rjoule_used,
-                                rjoule_cap = rjoule_cap,
-                                pct = (rjoule_used / rjoule_cap) * 100.0,
-                                "REG"
-                            );
                         }
                     }
                     "populate" => {
@@ -856,13 +799,12 @@ impl ManifestExecutor {
                             .execute_flowdef(
                                 step,
                                 context,
-                                gas_cap.saturating_sub(gas_used),
-                                rjoule_cap - rjoule_used,
+                                budget.remaining_gas(),
+                                budget.remaining_rjoule(),
                             )
                             .await?;
                         context = new_context;
-                        gas_used = gas_used.saturating_add(gas_consumed);
-                        rjoule_used = (rjoule_used + rjoule_consumed).max(0.0);
+                        budget.consume_child(gas_consumed, rjoule_consumed);
                     }
 
                     other => {
@@ -908,14 +850,7 @@ impl ManifestExecutor {
             step_idx = 0;
 
             // Check gas exhaustion at end of pass
-            if gas_hard_limit && gas_used >= gas_cap {
-                info!(
-                    target: "reg.skill.budget.gas_exhausted",
-                    iteration = iteration,
-                    gas_used = gas_used,
-                    gas_cap = gas_cap,
-                    "REG"
-                );
+            if let Some(_exhausted) = budget.check_exhausted(iteration) {
                 self.finalize_convergence_report(
                     &mut context,
                     "maxed_out",
