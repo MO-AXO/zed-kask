@@ -1615,6 +1615,10 @@ fn main() {
                                 cx,
                             )
                             .await;
+                        // Filter the base config env per-server — the curator's
+                        // email config should not be injected into codegraph.
+                        let server_env =
+                            kask_bridge::filter_config_env_for_server(server_id, &server_env);
                         let mut mcp_env = server_env;
                         if let Some(socket_path) = INFERENCE_SOCKET_PATH.get() {
                             mcp_env.insert(
@@ -2028,7 +2032,11 @@ impl project::context_server_store::registry::ContextServerDescriptor for KaskMc
                 .await;
             let mut env_map: collections::HashMap<String, String> =
                 std_env_map.into_iter().collect();
-            env_map.extend(base_env);
+            // Filter the base config env (from mcp_env()) per-server too —
+            // the curator's email config should not be injected into codegraph.
+            let filtered_base_env =
+                kask_bridge::filter_config_env_for_server(&server_id, &base_env);
+            env_map.extend(filtered_base_env);
 
             // Pass the inference IPC socket path so MCP servers can route
             // inference through zed's LanguageModelRegistry.

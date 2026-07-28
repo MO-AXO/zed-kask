@@ -19,16 +19,19 @@ pub struct BuiltinMcpServer {
     pub binary: &'static str,
     /// Human-readable description shown in the settings UI and kask panel.
     pub description: &'static str,
-    /// Credential env vars this server is allowed to receive (allowlist).
-    /// Only credentials in this list are injected into the server's child
-    /// process env. This limits the blast radius of a compromised MCP server —
-    /// a server that only needs `DEEPINFRA_API_KEY` won't receive
-    /// `HKASK_SMTP_PASSWORD` or `HKASK_EODHD_API_KEY`.
+    /// Credential env vars (secrets from the keychain) this server is allowed
+    /// to receive. Only credentials in this list are injected into the
+    /// server's child process env.
     ///
     /// `None` means "no credential filtering" (receives all credentials).
-    /// Used for servers that haven't been audited yet — prefer `Some(&[])`
-    /// (receives no credentials) for new servers.
+    /// Prefer `Some(&[])` (receives no credentials) for new servers.
     pub credentials: Option<&'static [&'static str]>,
+    /// Config env vars (non-secret settings from `mcp_env()`) this server is
+    /// allowed to receive. Only config vars in this list are injected.
+    ///
+    /// `None` means "no config filtering" (receives all config). Prefer
+    /// `Some(&[])` for new servers and add specific env vars as needed.
+    pub config_env: Option<&'static [&'static str]>,
 }
 
 /// The canonical list of built-in kask MCP servers.
@@ -40,6 +43,14 @@ pub const BUILT_IN_MCP_SERVERS: &[BuiltinMcpServer] = &[
         binary: "hkask-mcp-codegraph",
         description: "Codegraph — code structure query and traversal",
         credentials: Some(&["DEEPINFRA_API_KEY", "OPENROUTER_API_KEY"]),
+        config_env: Some(&[
+            "HKASK_CODEGRAPH_DB",
+            "HKASK_EMBEDDING_DIM",
+            "HKASK_EMBEDDING_MODEL",
+            "HKASK_DEFAULT_MODEL",
+            "HKASK_CLASSIFIER_MODEL",
+            "HKASK_TEMPLATE_ROOT",
+        ]),
     },
     BuiltinMcpServer {
         id: "companies",
@@ -53,36 +64,82 @@ pub const BUILT_IN_MCP_SERVERS: &[BuiltinMcpServer] = &[
             "HKASK_BRAVE_API_KEY",
             "HKASK_SERPAPI_API_KEY",
         ]),
+        config_env: Some(&[
+            "HKASK_CHRONIC_STALENESS_DAYS",
+            "HKASK_FERMI_DEFAULTS",
+            "HKASK_TRANSACTIONS_DIR",
+            "HKASK_DEFAULT_MODEL",
+            "HKASK_EMBEDDING_MODEL",
+            "HKASK_CLASSIFIER_MODEL",
+        ]),
     },
     BuiltinMcpServer {
         id: "condenser",
         binary: "hkask-mcp-condenser",
         description: "Condenser — context condensation and summarization",
         credentials: Some(&[]),
+        config_env: Some(&[
+            "HKASK_CONDENSER_PERSONA_KEYWORDS",
+            "HKASK_CONDENSE_SALIENCY_WINDOW",
+            "HKASK_DEFAULT_MODEL",
+            "HKASK_EMBEDDING_MODEL",
+        ]),
     },
     BuiltinMcpServer {
         id: "corpus",
         binary: "hkask-mcp-corpus",
         description: "Corpus — document corpus and QA generation",
-        credentials: Some(&["FALAI_API_KEY", "RUNPOD_API_KEY"]),
+        credentials: Some(&["FALAI_API_KEY"]),
+        config_env: Some(&[
+            "HKASK_EMBEDDING_DIM",
+            "HKASK_EMBEDDING_MODEL",
+            "HKASK_OCR_CONCURRENCY",
+            "HKASK_OCR_SIMPLE_MAX",
+            "HKASK_OCR_MODERATE_MAX",
+            "HKASK_OCR_SAMPLE_RATE",
+            "HKASK_OCR_TUNEABLE",
+            "HKASK_TEMPLATE_ROOT",
+            "HKASK_DEFAULT_MODEL",
+            "HKASK_CLASSIFIER_MODEL",
+        ]),
     },
     BuiltinMcpServer {
         id: "curator",
         binary: "hkask-mcp-curator",
         description: "Curator — regulation cascade and algedonic signals",
         credentials: Some(&["HKASK_SMTP_PASSWORD"]),
+        config_env: Some(&[
+            "HKASK_MXROUTE_SERVER",
+            "HKASK_SMTP_USERNAME",
+            "HKASK_CURATOR_EMAIL",
+            "HKASK_ALERT_EMAIL",
+            "HKASK_AUTHORIZED_EMAILS",
+            "HKASK_INBOX_POLL_INTERVAL_SECS",
+            "HKASK_DIGEST_INTERVAL_SECS",
+            "HKASK_DEFAULT_MODEL",
+            "HKASK_EMBEDDING_MODEL",
+            "HKASK_CLASSIFIER_MODEL",
+        ]),
     },
     BuiltinMcpServer {
         id: "kata-kanban",
         binary: "hkask-mcp-kata-kanban",
         description: "Kata Kanban — improvement kata board",
         credentials: Some(&[]),
+        config_env: Some(&["HKASK_DEFAULT_MODEL", "HKASK_EMBEDDING_MODEL"]),
     },
     BuiltinMcpServer {
         id: "media",
         binary: "hkask-mcp-media",
         description: "Media — image generation and media workflows",
         credentials: Some(&["FALAI_API_KEY"]),
+        config_env: Some(&[
+            "HKASK_MEDIA_TTS_MODEL",
+            "HKASK_MEDIA_STT_MODEL",
+            "HKASK_MEDIA_VISION_MODEL",
+            "HKASK_MEDIA_IMAGE_GEN_MODEL",
+            "HKASK_DEFAULT_MODEL",
+        ]),
     },
     BuiltinMcpServer {
         id: "research",
@@ -96,12 +153,18 @@ pub const BUILT_IN_MCP_SERVERS: &[BuiltinMcpServer] = &[
             "HKASK_FIRECRAWL_API_KEY",
             "HKASK_BROWSERBASE_API_KEY",
         ]),
+        config_env: Some(&["HKASK_DEFAULT_MODEL", "HKASK_EMBEDDING_MODEL"]),
     },
     BuiltinMcpServer {
         id: "scenarios",
         binary: "hkask-mcp-scenarios",
         description: "Scenarios — scenario planning and forecasting",
         credentials: Some(&[]),
+        config_env: Some(&[
+            "HKASK_SCENARIOS_DATA",
+            "HKASK_DEFAULT_MODEL",
+            "HKASK_EMBEDDING_MODEL",
+        ]),
     },
     BuiltinMcpServer {
         id: "training",
@@ -114,6 +177,13 @@ pub const BUILT_IN_MCP_SERVERS: &[BuiltinMcpServer] = &[
             "NEBIUS_PROJECT_ID",
             "NEBIUS_SUBNET_ID",
             "HF_TOKEN",
+        ]),
+        config_env: Some(&[
+            "HKASK_TRAINING_HOST",
+            "HKASK_TRAINING_CACHE_DIR",
+            "HKASK_TEMPLATE_ROOT",
+            "HKASK_DEFAULT_MODEL",
+            "HKASK_EMBEDDING_MODEL",
         ]),
     },
 ];
@@ -193,6 +263,33 @@ pub fn filter_credentials_for_server(
     }
 }
 
+/// Filter a base config env map (`mcp_env()` output) to only the env vars the
+/// specified server is allowed to receive.
+///
+/// When the server's `config_env` field is `Some(allowlist)`, only env vars
+/// in the allowlist are kept. When it's `None`, all config is kept.
+///
+/// This prevents the curator's email config (`HKASK_SMTP_USERNAME`,
+/// `HKASK_MXROUTE_SERVER`, etc.) from being injected into servers that don't
+/// need it (codegraph, condenser, kata-kanban, etc.).
+#[must_use]
+pub fn filter_config_env_for_server(
+    server_id: &str,
+    config_env: &std::collections::HashMap<String, String>,
+) -> std::collections::HashMap<String, String> {
+    let Some(server) = find_server(server_id) else {
+        return config_env.clone();
+    };
+    match server.config_env {
+        Some(allowlist) => config_env
+            .iter()
+            .filter(|(env_var, _)| allowlist.contains(&env_var.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        None => config_env.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +362,12 @@ mod tests {
                  use Some(&[]) for servers that need no credentials",
                 s.id
             );
+            assert!(
+                s.config_env.is_some(),
+                "server '{}' has no config_env allowlist (config_env is None) — \
+                 use Some(&[]) for servers that need no config env vars",
+                s.id
+            );
         }
     }
 
@@ -327,6 +430,75 @@ mod tests {
             ("KEY_B".to_string(), "url_b".to_string()),
         ];
         let filtered = filter_credentials_for_server("nonexistent", &credentials);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    // The codegraph server should not receive the curator's email config.
+    // This pins the config-env blast-radius reduction.
+    #[test]
+    fn codegraph_config_env_excludes_curator_email() {
+        let mut config_env = std::collections::HashMap::new();
+        config_env.insert("HKASK_CODEGRAPH_DB".to_string(), "/path/to/db".to_string());
+        config_env.insert(
+            "HKASK_SMTP_USERNAME".to_string(),
+            "curator@example.com".to_string(),
+        );
+        config_env.insert(
+            "HKASK_MXROUTE_SERVER".to_string(),
+            "mail.example.com".to_string(),
+        );
+        config_env.insert(
+            "HKASK_AUTHORIZED_EMAILS".to_string(),
+            "ops@example.com".to_string(),
+        );
+        let filtered = filter_config_env_for_server("codegraph", &config_env);
+        assert!(
+            filtered.contains_key("HKASK_CODEGRAPH_DB"),
+            "codegraph should receive HKASK_CODEGRAPH_DB"
+        );
+        assert!(
+            !filtered.contains_key("HKASK_SMTP_USERNAME"),
+            "codegraph should NOT receive HKASK_SMTP_USERNAME"
+        );
+        assert!(
+            !filtered.contains_key("HKASK_MXROUTE_SERVER"),
+            "codegraph should NOT receive HKASK_MXROUTE_SERVER"
+        );
+        assert!(
+            !filtered.contains_key("HKASK_AUTHORIZED_EMAILS"),
+            "codegraph should NOT receive HKASK_AUTHORIZED_EMAILS"
+        );
+    }
+
+    // The curator server should receive its email config.
+    #[test]
+    fn curator_config_env_includes_email_settings() {
+        let mut config_env = std::collections::HashMap::new();
+        config_env.insert(
+            "HKASK_SMTP_USERNAME".to_string(),
+            "curator@example.com".to_string(),
+        );
+        config_env.insert(
+            "HKASK_MXROUTE_SERVER".to_string(),
+            "mail.example.com".to_string(),
+        );
+        config_env.insert("HKASK_CODEGRAPH_DB".to_string(), "/path".to_string());
+        let filtered = filter_config_env_for_server("curator", &config_env);
+        assert!(filtered.contains_key("HKASK_SMTP_USERNAME"));
+        assert!(filtered.contains_key("HKASK_MXROUTE_SERVER"));
+        assert!(
+            !filtered.contains_key("HKASK_CODEGRAPH_DB"),
+            "curator should NOT receive HKASK_CODEGRAPH_DB"
+        );
+    }
+
+    // Unknown server IDs get all config env (backward-compatible).
+    #[test]
+    fn unknown_server_gets_all_config_env() {
+        let mut config_env = std::collections::HashMap::new();
+        config_env.insert("KEY_A".to_string(), "val_a".to_string());
+        config_env.insert("KEY_B".to_string(), "val_b".to_string());
+        let filtered = filter_config_env_for_server("nonexistent", &config_env);
         assert_eq!(filtered.len(), 2);
     }
 }
