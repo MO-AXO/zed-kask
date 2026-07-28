@@ -1,5 +1,6 @@
 ---
 name: gradient-hunter
+visibility: public
 description: Find steep gradients between populated and unpopulated regions of a codebase/telemetry/test field and investigate the reason for the gradient. The signal is in the gradient shape and its cause, not in the absence itself. Anchored to a substrate ontology (Parisi spin glass theory: non-ergodicity, frustration, metastable valleys) and seven surface gradient-shape ontologies (wombling, regression discontinuity, Rubin MCAR/MAR/MNAR, persistent homology, edge detection, oracle gap, Monod allostery with agentic-orchestrator corollary). Decomposed into phased templates: Prior → Map → Detect → Hypothesize → Report → Convergence. Composes graph-audit, pragmatic-cybernetics, falsifiability, metacognition. Emits reg.gradient.* spans. Any userpod may invoke this skill.
 ---
 
@@ -63,7 +64,7 @@ Feedback loop closure: the convergence check emits `next_prior_focus`, which the
 | 0.50 | Not converged — many new gradients or significant unexplored surface |
 | 1.00 | First iteration or no meaningful mapping performed |
 
-**Threshold**: 0.25. **Max iterations**: 5.
+**Threshold**: 0.25. **Max iterations**: 3.
 
 **Scoring breakdown** (composite of two sub-metrics, weighted 0.5/0.5):
 
@@ -151,7 +152,7 @@ Seven reason classes adapted from Rubin 1976 + spin glass + allostery:
 
 - All flow templates are `KnowAct` type with `Public` visibility. Reference documents are `RenderAct`.
 - Energy caps: prior (4096), map (4096), detect (6144), hypothesize (6144), report (4096), convergence-check (2048).
-- Gas cap: 150,000 per invocation. Maximum 5 iterations.
+- Gas cap: 100,000 per invocation. Maximum 3 iterations.
 - The prior must be explicit before gradient detection. Implicit priors produce implicit gradients — unrepeatable and unfalsifiable.
 - The fractal recurrence check is mandatory, not optional. A gradient classified without checking whether its shape recurs at other scales or domains is incomplete.
 - The metastable trap reason class must be considered for every gradient. The default assumption that "the artifact is missing" is an ergodic-system assumption. Non-ergodic systems trap.
