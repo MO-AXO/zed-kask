@@ -353,22 +353,11 @@ install_desktop_entry() {
         xdg-mime default "$app_id.desktop" x-scheme-handler/zed-kask 2>/dev/null || true
     fi
 
-    # Refresh the hicolor icon cache so the launcher picks up the new icon
-    # immediately. Without this, desktop shells that cache icons by mtime
-    # (GNOME Shell, KDE Plasma) can keep serving a stale or sibling-app icon
-    # for the new desktop entry until the next cache invalidation event.
-    # `gtk-update-icon-cache` is the canonical refresh tool on GTK-based
-    # desktops; `update-icon-caches` is the Debian/Ubuntu wrapper. We try
-    # both and touch the theme root as a last-resort mtime bump.
+    # Best-effort icon cache refresh. GTK resolves icons by scanning the
+    # hicolor directory, so the icon works even when this fails.
     local hicolor_root="$data_root/icons/hicolor"
     if [ -d "$hicolor_root" ]; then
-        if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-            gtk-update-icon-cache -f "$hicolor_root" 2>/dev/null || true
-        elif command -v update-icon-caches >/dev/null 2>&1; then
-            update-icon-caches "$hicolor_root" 2>/dev/null || true
-        fi
-        # Bump the theme root mtime so any shell that keys off directory
-        # mtimes (rather than the icon-theme.cache file) re-scans the dir.
+        gtk-update-icon-cache -f "$hicolor_root" 2>/dev/null || true
         touch "$hicolor_root" 2>/dev/null || true
     fi
 
@@ -497,17 +486,7 @@ uninstall_hkask() {
             rm -f "$icon_file_1024"
             log "Removed icon: $icon_file_1024"
         fi
-        # Refresh the icon cache after removal so the launcher drops the
-        # stale entry instead of showing a ghost icon.
-        local hicolor_root="$data_root/icons/hicolor"
-        if [ -d "$hicolor_root" ]; then
-            if command -v gtk-update-icon-cache >/dev/null 2>&1; then
-                gtk-update-icon-cache -f "$hicolor_root" 2>/dev/null || true
-            elif command -v update-icon-caches >/dev/null 2>&1; then
-                update-icon-caches "$hicolor_root" 2>/dev/null || true
-            fi
-            touch "$hicolor_root" 2>/dev/null || true
-        fi
+        gtk-update-icon-cache -f "$data_root/icons/hicolor" 2>/dev/null || true
     done
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "${XDG_DATA_HOME:-$HOME/.local/share}/applications" 2>/dev/null || true
