@@ -83,7 +83,15 @@ pub async fn package_skill_for_publish(
     }
 
     let tar_bytes = tar_builder.into_inner().await?;
-    let sha256 = hex::encode(Sha256::digest(&tar_bytes));
+
+    // Gzip the tar first, then compute SHA256 on the gzipped bytes.
+    // The install path downloads the .tar.gz and verifies SHA256 on the
+    // downloaded bytes — so the hash must be on the compressed data.
+    let mut gzip_encoder = GzipEncoder::new(tar_bytes.as_slice());
+    let mut gz_bytes = Vec::new();
+    smol::io::AsyncReadExt::read_to_end(&mut gzip_encoder, &mut gz_bytes).await?;
+
+    let sha256 = hex::encode(Sha256::digest(&gz_bytes));
 
     // Create the manifest JSON.
     let manifest = KaskSkillManifest {
@@ -95,11 +103,6 @@ pub async fn package_skill_for_publish(
         tarball_sha256: sha256.clone(),
     };
     let manifest_json = serde_json::to_string(&manifest)?;
-
-    // Gzip the tar.
-    let mut gzip_encoder = GzipEncoder::new(tar_bytes.as_slice());
-    let mut gz_bytes = Vec::new();
-    smol::io::AsyncReadExt::read_to_end(&mut gzip_encoder, &mut gz_bytes).await?;
 
     Ok((gz_bytes, sha256, manifest_json))
 }
@@ -238,7 +241,8 @@ pub async fn unpublish_skill(
     let auth_header = credentials.authorization_header();
     // zed-kask: URL-encode the skill ID (alice/bug-hunt → alice%2Fbug-hunt)
     // so it's a single path segment. The server decodes it back.
-    let encoded_id = urlencoding::encode(&format!("{}/{}", source_user, skill_name));
+    let skill_id_str = format!("{}/{}", source_user, skill_name);
+    let encoded_id = urlencoding::encode(&skill_id_str);
     let delete_url =
         http_client.build_zed_api_url(&format!("/api/kask-skills/{}", encoded_id), &[])?;
     http_client
@@ -318,6 +322,16 @@ pub async fn install_skill(
     )
     .await?;
 
+    // Create the install directory and all parent directories.
+    // First install: ~/.agents/skills/_marketplace/ doesn't exist yet.
+    let marketplace_parent = marketplace_dir;
+    if !fs.is_dir(marketplace_parent).await {
+        fs.create_dir(marketplace_parent).await?;
+    }
+    let user_dir = marketplace_dir.join(source_user);
+    if !fs.is_dir(&user_dir).await {
+        fs.create_dir(&user_dir).await?;
+    }
     fs.create_dir(&install_dir).await?;
 
     // Decompress and extract.
