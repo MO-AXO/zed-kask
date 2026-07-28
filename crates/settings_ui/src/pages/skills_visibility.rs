@@ -208,6 +208,7 @@ pub fn spawn_drain(queue: &mut SkillVisibilityQueue, cx: &mut Context<SettingsWi
     let app_state = workspace::AppState::global(cx);
     let fs = app_state.fs.clone();
     let http_client = app_state.client.http_client();
+    let credentials = app_state.client.credentials();
     let source_user = app_state
         .user_store
         .read(cx)
@@ -240,6 +241,7 @@ pub fn spawn_drain(queue: &mut SkillVisibilityQueue, cx: &mut Context<SettingsWi
             let result = kask_extensions_ui::publish_skill(
                 fs.as_ref(),
                 &http_client,
+                credentials.as_ref().unwrap(),
                 &skill,
                 &source_user,
                 &version,
@@ -260,7 +262,7 @@ pub fn spawn_drain(queue: &mut SkillVisibilityQueue, cx: &mut Context<SettingsWi
             }
         }
         for skill_name in skills_to_unpublish {
-            let result = kask_extensions_ui::unpublish_skill(&http_client, &source_user, &skill_name)
+            let result = kask_extensions_ui::unpublish_skill(&http_client, credentials.as_ref().unwrap(), &source_user, &skill_name)
                 .await;
             if let Err(error) = result {
                 log::warn!(

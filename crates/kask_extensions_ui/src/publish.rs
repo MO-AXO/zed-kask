@@ -25,7 +25,6 @@ use cloud_api_types::KaskSkillManifest;
 use fs::{Fs, read_dir_items};
 use http_client::{AsyncBody, HttpClient, HttpClientWithUrl};
 use sha2::{Digest, Sha256};
-
 /// The S3 key prefix for kask skills. Mirrors `extensions/` for extensions.
 pub const KASK_SKILLS_S3_PREFIX: &str = "kask-skills";
 
@@ -144,6 +143,7 @@ fn parse_manifest_dependencies(manifest_content: &str) -> Vec<String> {
 pub async fn publish_skill(
     fs: &dyn Fs,
     http_client: &HttpClientWithUrl,
+    credentials: &client::Credentials,
     skill: &Skill,
     source_user: &str,
     version: &str,
@@ -178,6 +178,8 @@ pub async fn publish_skill(
         KASK_SKILLS_S3_PREFIX, source_user, skill.name, version
     );
 
+    let auth_header = credentials.authorization_header();
+
     // Upload tarball.
     let upload_url =
         http_client.build_zed_api_url("/api/kask-skills/upload", &[("key", &s3_key)])?;
@@ -185,6 +187,7 @@ pub async fn publish_skill(
         .send(
             http_client::http::Request::post(upload_url.as_ref())
                 .header("Content-Type", "application/octet-stream")
+                .header("Authorization", &auth_header)
                 .body(AsyncBody::from_bytes(Bytes::from(tarball_bytes)))?,
         )
         .await
@@ -197,6 +200,7 @@ pub async fn publish_skill(
         .send(
             http_client::http::Request::post(manifest_upload_url.as_ref())
                 .header("Content-Type", "application/json")
+                .header("Authorization", &auth_header)
                 .body(AsyncBody::from_bytes(Bytes::from(
                     manifest_json.into_bytes(),
                 )))?,
@@ -221,6 +225,7 @@ pub async fn publish_skill(
 /// marketplace listing is removed.
 pub async fn unpublish_skill(
     http_client: &HttpClientWithUrl,
+    credentials: &client::Credentials,
     source_user: &str,
     skill_name: &str,
 ) -> Result<()> {
@@ -230,12 +235,17 @@ pub async fn unpublish_skill(
         skill_name
     );
 
+    let auth_header = credentials.authorization_header();
     let delete_url = http_client.build_zed_api_url(
         "/api/kask-skills/unpublish",
         &[("id", &format!("{}/{}", source_user, skill_name))],
     )?;
     http_client
-        .send(http_client::http::Request::delete(delete_url.as_ref()).body(AsyncBody::empty())?)
+        .send(
+            http_client::http::Request::delete(delete_url.as_ref())
+                .header("Authorization", &auth_header)
+                .body(AsyncBody::empty())?,
+        )
         .await
         .context("unpublishing kask skill")?;
 
@@ -326,16 +336,20 @@ pub async fn install_skill(
 /// Vote on a kask skill (+1 or -1).
 pub async fn vote_skill(
     http_client: &HttpClientWithUrl,
+    credentials: &client::Credentials,
     skill_id: &str,
     vote: i8,
 ) -> Result<(i64, i64)> {
+    let auth_header = credentials.authorization_header();
     let vote_url =
         http_client.build_zed_api_url(&format!("/api/kask-skills/{}/vote", skill_id), &[])?;
     let body = serde_json::to_string(&cloud_api_types::KaskSkillVoteRequest { vote })?;
     let mut response = http_client
-        .post_json(
-            vote_url.as_ref(),
-            AsyncBody::from_bytes(Bytes::from(body.into_bytes())),
+        .send(
+            http_client::http::Request::post(vote_url.as_ref())
+                .header("Content-Type", "application/json")
+                .header("Authorization", &auth_header)
+                .body(AsyncBody::from_bytes(Bytes::from(body.into_bytes())))?,
         )
         .await
         .context("voting on kask skill")?;
