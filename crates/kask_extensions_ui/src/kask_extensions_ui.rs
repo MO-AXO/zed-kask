@@ -14,7 +14,6 @@ use std::{any::TypeId, ops::Range, sync::Arc};
 use anyhow::Context as _;
 use cloud_api_types::{
     ExtensionMetadata, ExtensionProvides, GetKaskSkillsResponse, KaskSkillMetadata,
-    KaskSkillVoteRequest,
 };
 use collections::{BTreeMap, BTreeSet};
 use command_palette_hooks::CommandPaletteFilter;
@@ -33,6 +32,7 @@ use release_channel::ReleaseChannel;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use settings::{Settings, SettingsContent};
+#[allow(unused_imports)]
 use strum::IntoEnumIterator as _;
 use theme_settings::ThemeSettings;
 use ui::{
@@ -287,6 +287,7 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
+#[allow(dead_code)]
 fn extension_provides_label(provides: ExtensionProvides) -> &'static str {
     match provides {
         ExtensionProvides::Themes => "Themes",
@@ -303,16 +304,22 @@ fn extension_provides_label(provides: ExtensionProvides) -> &'static str {
     }
 }
 
-#[derive(Clone)]
 // zed-kask: kask skill status mirrors ExtensionStatus but for kask skills.
 // Tracks whether a skill is installed, installing, or not installed.
 #[derive(Clone, Debug)]
 pub enum KaskSkillStatus {
     NotInstalled,
     Installing,
-    Installed(String), // installed version
+    Installed(Arc<str>),
     Removing,
+    Upgrading,
 }
+
+#[allow(dead_code)]
+// zed-kask: ExtensionStatus is kept as a type alias for the dead extension
+// render code that hasn't been removed yet. The new kask render path uses
+// KaskSkillStatus. This will be removed when the dead code is cleaned up.
+type ExtensionStatus = KaskSkillStatus;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 enum ExtensionFilter {
@@ -322,6 +329,7 @@ enum ExtensionFilter {
 }
 
 impl ExtensionFilter {
+    #[allow(dead_code)]
     pub fn include_dev_extensions(&self) -> bool {
         match self {
             Self::All | Self::Installed => true,
@@ -399,10 +407,12 @@ fn keywords_by_feature() -> &'static BTreeMap<Feature, Vec<&'static str>> {
     })
 }
 
+#[allow(dead_code)]
 fn extension_button_id(extension_id: &Arc<str>, operation: ExtensionOperation) -> ElementId {
     (SharedString::from(extension_id.clone()), operation as usize).into()
 }
 
+#[allow(dead_code)]
 struct ExtensionCardButtons {
     install_or_uninstall: Button,
     upgrade: Option<Button>,
@@ -431,6 +441,7 @@ pub struct KaskExtensionsPage {
     upsells: BTreeSet<Feature>,
 }
 
+#[allow(dead_code)]
 impl KaskExtensionsPage {
     pub fn new(
         workspace: &Workspace,
@@ -440,7 +451,7 @@ impl KaskExtensionsPage {
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         cx.new(|cx| {
-            let workspace_handle = workspace.weak_handle();
+            let _workspace_handle = workspace.weak_handle();
             let app_state = workspace::AppState::global(cx);
             let http_client = app_state.client.http_client();
             let fs = app_state.fs.clone();
@@ -564,24 +575,25 @@ impl KaskExtensionsPage {
     }
 
     fn filter_extension_entries(&mut self, cx: &mut Context<Self>) {
-        self.filtered_remote_skill_indices.clear();
-        self.filtered_remote_skill_indices.extend(
-            self.remote_skill_entries
-                .iter()
-                .enumerate()
-                .filter(|(_, skill)| match self.filter {
-                    ExtensionFilter::All => true,
-                    ExtensionFilter::Installed => {
-                        let status = self.skill_status(&skill.id, cx);
-                        matches!(status, KaskSkillStatus::Installed(_))
-                    }
-                    ExtensionFilter::NotInstalled => {
-                        let status = self.skill_status(&skill.id, cx);
-                        matches!(status, KaskSkillStatus::NotInstalled)
-                    }
-                })
-                .map(|(ix, _)| ix),
-        );
+        let filter = self.filter;
+        let indices: Vec<usize> = self
+            .remote_skill_entries
+            .iter()
+            .enumerate()
+            .filter(|(_, skill)| match filter {
+                ExtensionFilter::All => true,
+                ExtensionFilter::Installed => {
+                    let status = self.skill_status(&skill.id, cx);
+                    matches!(status, KaskSkillStatus::Installed(_))
+                }
+                ExtensionFilter::NotInstalled => {
+                    let status = self.skill_status(&skill.id, cx);
+                    matches!(status, KaskSkillStatus::NotInstalled)
+                }
+            })
+            .map(|(ix, _)| ix)
+            .collect();
+        self.filtered_remote_skill_indices = indices;
 
         cx.notify();
     }
@@ -669,7 +681,7 @@ impl KaskExtensionsPage {
                 .iter()
                 .any(|s| matches!(&s.source, agent_skills::SkillSource::Public { original_skill_id, .. } if original_skill_id.as_ref() == skill_id));
             if is_installed {
-                return KaskSkillStatus::Installed("latest".to_string());
+                return KaskSkillStatus::Installed("latest".into());
             }
         }
         KaskSkillStatus::NotInstalled
@@ -857,7 +869,7 @@ impl KaskExtensionsPage {
             .insert(skill_id.clone(), KaskSkillStatus::Installing);
         cx.notify();
 
-        let http_client = http_client.clone();
+        let http_client = http_client;
         let fs = fs.clone();
         cx.spawn(async move |this, cx| {
             let result = install_skill(
@@ -877,8 +889,11 @@ impl KaskExtensionsPage {
                             skill_id
                         );
                         // Fire SkillsUpdatedHook so the Settings page refreshes.
-                        if let Some(hook) = cx.try_global::<agent_skills::SkillsUpdatedHook>() {
-                            (hook.0)(cx);
+                        let hook = cx
+                            .try_global::<agent_skills::SkillsUpdatedHook>()
+                            .map(|h| h.0.clone());
+                        if let Some(hook) = hook {
+                            hook(cx);
                         }
                     }
                     Err(err) => {
@@ -945,8 +960,11 @@ impl KaskExtensionsPage {
                             "kask-extensions: successfully uninstalled skill '{}'",
                             skill_id_for_hook
                         );
-                        if let Some(hook) = cx.try_global::<agent_skills::SkillsUpdatedHook>() {
-                            (hook.0)(cx);
+                        let hook = cx
+                            .try_global::<agent_skills::SkillsUpdatedHook>()
+                            .map(|h| h.0.clone());
+                        if let Some(hook) = hook {
+                            hook(cx);
                         }
                     }
                     Err(err) => {
