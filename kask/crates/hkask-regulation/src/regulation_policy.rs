@@ -540,13 +540,10 @@ pub(crate) fn default_substitution_ladder(metric: SignalMetric) -> &'static [Act
         SignalMetric::MemoryLife => &[Calibrate, Escalate],
         SignalMetric::InferenceAvailable => &[Throttle, Calibrate, Escalate],
         SignalMetric::InferenceModelAvailable => &[Calibrate, Escalate],
-        SignalMetric::DiskUsagePct => &[Prune, Escalate],
-        SignalMetric::McpServerHealth => &[CircuitBreak, Calibrate, Escalate],
         // ── Observational (no substitution — Notify is terminal) ──
         SignalMetric::StorageUsage
         | SignalMetric::TripleCount
         | SignalMetric::LowConfidenceCount
-        | SignalMetric::SnapshotInterval
         | SignalMetric::ConsolidationCandidates
         | SignalMetric::PendingEscalations
         | SignalMetric::SeamCoverage
