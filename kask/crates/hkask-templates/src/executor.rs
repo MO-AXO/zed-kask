@@ -1299,9 +1299,12 @@ impl ManifestExecutor {
 
         // rJoule tracking — cost per token comes from inference provider.
         // Token count is tracked; rJoule deduction wired when provider reports cost.
+        // TODO: wire rJoule deduction once InferenceResult reports token counts.
+        // For now, gas tracking (below) is the only budget enforcement; rJoule
+        // is checked at the cascade-loop level via the cap, not per-call.
         if rjoule_enabled {
-            let tokens = result_text.len() as f64 / 4.0; // rough token estimate
-            let _ = tokens;
+            // Placeholder: once InferenceResult exposes token usage, deduct here:
+            // *rjoule_used += (result_text.len() as f64 / 4.0) * COST_PER_TOKEN_RJOULE;
         }
 
         // Gas tracking — deduct one iteration of compute
@@ -1777,7 +1780,7 @@ fn dispatch_compute(compute_ref: &str, input: &Value) -> Result<Value> {
 ///
 /// Dispatches based on `step.renderer`:
 /// - `"minijinja"` — Load template from `step.template_ref` (a file path
-///   like `curator/system_state_gather.j2`) relative to `template_base_path`,
+///   like `curator/system_state_gather.j2`) relative to the renderer's base path,
 ///   then render with full Jinja2 syntax via minijinja.
 /// - Inline/absent — Render `step.template_ref` or `step.renderer` as a
 ///   simple template string with `{{key}}` substitution.
@@ -1804,7 +1807,7 @@ impl ManifestExecutor {
 
         match renderer {
             "minijinja" => {
-                // template_ref is a file path relative to template_base_path.
+                // template_ref is a file path relative to the renderer's base path.
                 // Resolve {{key}} references from context before loading.
                 let template_ref_raw = step.template_ref.as_deref().ok_or_else(|| {
                     TemplateError::Manifest(format!(
@@ -1812,20 +1815,11 @@ impl ManifestExecutor {
                         step.ordinal
                     ))
                 })?;
-                let template_ref = render_inline_template(template_ref_raw, context);
+                let template_ref = TemplateRenderer::render_inline(template_ref_raw, context);
 
-                // Prefer the embedded (build-time) template — works regardless
-                // of CWD or install location. Fall back to filesystem for dev
-                // workflows where a template has been edited but not rebuilt.
-                // Try .j2 first, then .yaml (FlowDef sub-manifests and RenderAct
-                // reference docs can be .yaml files).
-                let template_content = if let Some(content) = crate::template_file(&template_ref) {
-                    content.to_string()
-                } else if let Some(content) = crate::template_yaml_file(&template_ref) {
-                    content.to_string()
-                } else {
-                    self.load_template_from_disk(&template_ref, step.ordinal)?
-                };
+                // Delegate resolution + loading to the renderer. The renderer
+                // owns the embedded→filesystem ladder and the .j2/.yaml fallbacks.
+                let template_content = self.template_renderer.load(&template_ref, step.ordinal)?;
 
                 info!(
                     target: "reg.spec.executor",
@@ -1834,8 +1828,7 @@ impl ManifestExecutor {
                     "Rendering minijinja template"
                 );
 
-                let prompt =
-                    render_minijinja(&template_content, context, &self.template_base_path)?;
+                let prompt = self.template_renderer.render(&template_content, context)?;
                 Ok((prompt, template_content))
             }
             _ => {
@@ -1851,183 +1844,11 @@ impl ManifestExecutor {
                         ))
                     })?;
 
-                let rendered = render_inline_template(template_content, context);
+                let rendered = TemplateRenderer::render_inline(template_content, context);
                 Ok((rendered, template_content.to_string()))
             }
         }
     }
-
-    /// Load a template from the filesystem, trying the ref as-is, then with
-    /// `.j2` appended, then with `.yaml` appended. Used as a dev-workflow
-    /// fallback when the embedded registry doesn't have the template.
-    ///
-    /// `step_ordinal` is used for error messages and heal callbacks.
-    fn load_template_from_disk(&self, template_ref: &str, step_ordinal: u32) -> Result<String> {
-        let template_path =
-            safe_template_join(&self.template_base_path, template_ref).ok_or_else(|| {
-                TemplateError::PathTraversal(format!(
-                    "step {step_ordinal}: template_ref '{template_ref}' escapes base path '{}'",
-                    self.template_base_path.display()
-                ))
-            })?;
-
-        // Try the ref as-is first.
-        if let Ok(c) = std::fs::read_to_string(&template_path) {
-            return Ok(c);
-        }
-
-        // Try .j2 extension if not already present.
-        if !template_ref.ends_with(".j2") {
-            let j2_ref = format!("{template_ref}.j2");
-            if let Some(j2_path) = safe_template_join(&self.template_base_path, &j2_ref)
-                && let Ok(c) = std::fs::read_to_string(&j2_path)
-            {
-                info!(
-                    target: "reg.spec.executor",
-                    step = step_ordinal,
-                    resolved = %j2_path.display(),
-                    "Resolved template with .j2 fallback"
-                );
-                return Ok(c);
-            }
-        }
-
-        // Try .yaml extension if not already present (FlowDef sub-manifests
-        // and RenderAct reference docs can be .yaml files).
-        if !template_ref.ends_with(".yaml") {
-            let yaml_ref = format!("{template_ref}.yaml");
-            if let Some(yaml_path) = safe_template_join(&self.template_base_path, &yaml_ref)
-                && let Ok(c) = std::fs::read_to_string(&yaml_path)
-            {
-                info!(
-                    target: "reg.spec.executor",
-                    step = step_ordinal,
-                    resolved = %yaml_path.display(),
-                    "Resolved template with .yaml fallback"
-                );
-                return Ok(c);
-            }
-        }
-
-        let err_msg = format!(
-            "Step {step_ordinal}: template file not found at {} (also tried .j2 and .yaml extensions)",
-            template_path.display()
-        );
-        if let Some(ref cb) = self.heal_error_cb {
-            cb(&err_msg, &template_path.display().to_string());
-        }
-        Err(TemplateError::NotFound(NotFound {
-            entity_type: "template".to_string(),
-            id: err_msg,
-        }))
-    }
-}
-
-/// Render a template using minijinja (full Jinja2 syntax).
-///
-/// Supports `{% for %}`, `{{ var }}`, `| filter`, `{% if %}`, `{% include %}`
-/// etc. The main template is registered under the synthetic name `"step"`;
-/// `{% include "path/frag.j2" %}` references resolve relative to
-/// `template_base_path` (the same root used for `template_ref` values).
-fn render_minijinja(
-    template: &str,
-    context: &HashMap<String, Value>,
-    template_base_path: &std::path::Path,
-) -> Result<String> {
-    let mut env = minijinja::Environment::new();
-    env.set_undefined_behavior(UndefinedBehavior::Lenient);
-
-    // Register custom filters
-    env.add_filter(
-        "truncate",
-        |state: &minijinja::State, value: String, max_len: usize| -> String {
-            let _ = state;
-            if value.len() <= max_len {
-                value
-            } else {
-                let mut truncated: String = value.chars().take(max_len).collect();
-                truncated.push_str("...");
-                truncated
-            }
-        },
-    );
-
-    // Loader: the synthetic "step" name resolves to the in-memory main
-    // template; any other name (from `{% include %}`) resolves from the
-    // embedded registry first, then from disk under `template_base_path`,
-    // mirroring the `template_ref` resolution rules (including the `.j2`
-    // extension fallback).
-    let main_template = template.to_string();
-    let base = template_base_path.to_path_buf();
-    env.set_loader(
-        move |name: &str| -> std::result::Result<Option<String>, minijinja::Error> {
-            if name == "step" {
-                return Ok(Some(main_template.clone()));
-            }
-            // Prefer the embedded (build-time) template — works regardless
-            // of CWD or install location. Try .j2 first, then .yaml.
-            if let Some(content) = crate::template_file(name) {
-                return Ok(Some(content.to_string()));
-            }
-            if let Some(content) = crate::template_yaml_file(name) {
-                return Ok(Some(content.to_string()));
-            }
-            // safe_join rejects any segment starting with '.' or containing '\\',
-            // preventing `{% include "../../etc/passwd" %}` path traversal.
-            let primary = match safe_template_join(&base, name) {
-                Some(p) => p,
-                None => return Ok(None),
-            };
-            if let Ok(content) = std::fs::read_to_string(&primary) {
-                return Ok(Some(content));
-            }
-            if !name.ends_with(".j2") {
-                let j2_name = format!("{name}.j2");
-                if let Some(j2_path) = safe_template_join(&base, &j2_name)
-                    && let Ok(content) = std::fs::read_to_string(&j2_path)
-                {
-                    return Ok(Some(content));
-                }
-            }
-            if !name.ends_with(".yaml") {
-                let yaml_name = format!("{name}.yaml");
-                if let Some(yaml_path) = safe_template_join(&base, &yaml_name)
-                    && let Ok(content) = std::fs::read_to_string(&yaml_path)
-                {
-                    return Ok(Some(content));
-                }
-            }
-            Ok(None)
-        },
-    );
-
-    // Convert HashMap<String, Value> to minijinja context via serde
-    let context_value = serde_json::to_value(context)
-        .map_err(|e| TemplateError::Render(format!("Failed to serialize context: {}", e)))?;
-    let minijinja_context = minijinja::Value::from_serialize(&context_value);
-
-    // Validate the main template parses, surfacing syntax errors with a
-    // clear message (the loader resolves "step" lazily on first access).
-    env.add_template("step", template)
-        .map_err(|e| TemplateError::Render(format!("Invalid template: {}", e)))?;
-
-    env.get_template("step")
-        .and_then(|tmpl| tmpl.render(minijinja_context))
-        .map_err(|e| TemplateError::Render(format!("Template render error: {}", e)))
-}
-
-/// Render an inline template using simple `{{key}}` substitution.
-fn render_inline_template(template: &str, context: &HashMap<String, Value>) -> String {
-    let mut result = template.to_string();
-    for (key, value) in context {
-        let placeholder = format!("{{{{{}}}}}", key);
-        let replacement = match value {
-            Value::String(s) => s.clone(),
-            other => other.to_string(),
-        };
-        result = result.replace(&placeholder, &replacement);
-    }
-    result
 }
 
 /// Parse a JSON response from an inference call.

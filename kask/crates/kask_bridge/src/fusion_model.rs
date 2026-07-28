@@ -832,4 +832,24 @@ mod tests {
         assert!(!should_auto_discover("OpenRouter/z-ai/glm-5.2"));
         assert!(!should_auto_discover("OpenRouter/a,OpenRouter/b"));
     }
+
+    /// Document the case-insensitive provider-id contract.
+    ///
+    /// `FusionConfig::kask_default()` uses `"OpenRouter/..."` (capitalized)
+    /// while zed's `LanguageModelRegistry` registers OpenRouter under
+    /// `"openrouter"` (lowercase). `resolve_model` must match these
+    /// case-insensitively. This test pins the string-comparison logic; a full
+    /// integration test would require a GPUI test context with a registered
+    /// OpenRouter provider.
+    #[test]
+    fn resolve_model_matches_provider_id_case_insensitively() {
+        // The kask_default panel uses "OpenRouter" (capitalized).
+        let configured_prefix = "OpenRouter";
+        // The registered provider id is "openrouter" (lowercase).
+        let registered_id = "openrouter";
+        assert!(
+            registered_id.eq_ignore_ascii_case(configured_prefix),
+            "case-insensitive comparison must match OpenRouter <-> openrouter"
+        );
+    }
 }

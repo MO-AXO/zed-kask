@@ -48,10 +48,12 @@ use zed_actions::kask_panel::{
 };
 
 mod kanban_view;
+mod panel_button;
 mod portfolio_view;
 mod scenarios_view;
 
 pub use kanban_view::KanbanBoardView;
+pub use panel_button::KaskPanelButton;
 pub use portfolio_view::PortfolioDashboardView;
 pub use scenarios_view::ScenariosView;
 
@@ -579,6 +581,7 @@ impl KaskPanel {
         });
         self.busy = true;
         self.spinner_frame = 0;
+        self.scroll_messages_to_bottom(cx);
         cx.notify();
 
         let args_value = parse_args(&args);
@@ -606,6 +609,7 @@ impl KaskPanel {
                         }),
                     }
                     this.busy = false;
+                    this.scroll_messages_to_bottom(cx);
                     cx.notify();
                 })
             })
@@ -616,6 +620,7 @@ impl KaskPanel {
                 content: "Tool invoker not wired — set_tool_invoker() not called.".to_string(),
             });
             self.busy = false;
+            self.scroll_messages_to_bottom(cx);
             cx.notify();
         }
     }
@@ -785,6 +790,7 @@ impl KaskPanel {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.messages_scroll_handle)
             .p_2()
             .gap_2()
             .rounded_sm()
@@ -793,6 +799,7 @@ impl KaskPanel {
             .bg(bg_color)
             .children(message_elements)
             .children(spinner_element)
+            .vertical_scrollbar_for(&self.messages_scroll_handle, cx)
     }
 
     fn render_input(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -817,9 +824,11 @@ impl KaskPanel {
                             .color(Color::Muted),
                     )
                     .child(
-                        Button::new("send-btn", "Send")
+                        IconButton::new("send-btn", IconName::Send)
                             .style(ButtonStyle::Filled)
+                            .icon_color(Color::Accent)
                             .disabled(self.busy)
+                            .tooltip(move |_window, cx| ui::Tooltip::text("Send")(cx))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.submit_input(window, cx);
                             })),
