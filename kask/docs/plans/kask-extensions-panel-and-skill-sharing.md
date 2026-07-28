@@ -224,7 +224,7 @@ Each phase is independently shippable. Phases 1–3 land client-side without any
 
 ---
 
-### Phase 3 — `KaskExtensionsPage` UI shell (no backend)
+### Phase 3 — `KaskExtensionsPage` UI shell (no backend) ✅ COMPLETE
 
 **Goal:** the forked `ExtensionsPage` exists as a center-pane `Item`, renders a search field and a list, and shows placeholder data. No network yet.
 
