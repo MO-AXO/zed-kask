@@ -982,4 +982,43 @@ mod tests {
             "SKILL.md body must not be injected even when no manifest is registered: {rendered}"
         );
     }
+
+    // zed-kask: `render_skill_envelope` emits `<source>marketplace</source>` for
+    // `SkillSource::Public` skills (not the namespaced id, which is in
+    // `display_label`). This pins the stable literal the model pattern-matches
+    // against; upstream has no `Public` variant.
+    #[test]
+    fn test_render_skill_envelope_public_source_label_is_marketplace() {
+        let skill = Skill {
+            name: "bug-hunt".to_string(),
+            description: "Bug hunting skill.".to_string(),
+            source: SkillSource::Public {
+                source_user: "alice".into(),
+                original_skill_id: "alice/bug-hunt".into(),
+            },
+            directory_path: std::path::PathBuf::from(
+                "/home/user/.agents/skills/_marketplace/alice/bug-hunt",
+            ),
+            skill_file_path: std::path::PathBuf::from(
+                "/home/user/.agents/skills/_marketplace/alice/bug-hunt/SKILL.md",
+            ),
+            load_warnings: Vec::new(),
+            disable_model_invocation: false,
+            visibility: agent_skills::SkillVisibility::Private,
+            embedded_body: None,
+        };
+        let rendered = render_skill_envelope(&skill, "body content");
+        assert!(
+            rendered.contains("<source>marketplace</source>"),
+            "Public source must render as 'marketplace' in the envelope: {rendered}"
+        );
+        assert!(
+            !rendered.contains("<source>alice/bug-hunt</source>"),
+            "Namespaced id must not appear in the source tag (it's in display_label, not the envelope): {rendered}"
+        );
+        assert!(
+            !rendered.contains("<worktree>"),
+            "Public skills have no worktree: {rendered}"
+        );
+    }
 }
