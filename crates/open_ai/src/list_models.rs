@@ -240,4 +240,88 @@ mod tests {
         let parsed: ListModelsResponse = serde_json::from_str(&body.to_string()).unwrap();
         assert!(parsed.data.is_empty());
     }
+
+    #[test]
+    fn test_list_models_sends_bearer_token_and_parses_response() {
+        use futures::executor::block_on;
+        use std::sync::{Arc, Mutex};
+
+        let captured_uri = Arc::new(Mutex::new(None));
+        let captured_auth = Arc::new(Mutex::new(None));
+        let captured_uri_for_handler = captured_uri.clone();
+        let captured_auth_for_handler = captured_auth.clone();
+        let http_client = FakeHttpClient::create(move |request| {
+            let captured_uri = captured_uri_for_handler.clone();
+            let captured_auth = captured_auth_for_handler.clone();
+            async move {
+                *captured_uri.lock().unwrap() = Some(request.uri().to_string());
+                *captured_auth.lock().unwrap() = request
+                    .headers()
+                    .get("Authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                let body = serde_json::json!({
+                    "data": [
+                        { "id": "model-a", "object": "model" },
+                        { "id": "model-b", "context_length": 32000 }
+                    ]
+                });
+                Ok(http_client::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(AsyncBody::from(body.to_string()))
+                    .unwrap())
+            }
+        });
+
+        let extra_headers = CustomHeaders::default();
+        let result = block_on(list_models(
+            http_client.as_ref(),
+            "https://api.example.com/v1",
+            "test-key",
+            &extra_headers,
+        ));
+
+        assert!(result.is_ok(), "expected Ok, got Err: {:?}", result.err());
+        let models = result.unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "model-a");
+        assert_eq!(models[1].context_length, Some(32000));
+        assert_eq!(
+            *captured_uri.lock().unwrap(),
+            Some("https://api.example.com/v1/models".to_string())
+        );
+        assert_eq!(
+            *captured_auth.lock().unwrap(),
+            Some("Bearer test-key".to_string())
+        );
+    }
+
+    #[test]
+    fn test_list_models_returns_api_error_on_non_200() {
+        use futures::executor::block_on;
+
+        let http_client = FakeHttpClient::create(|_| async move {
+            Ok(http_client::Response::builder()
+                .status(401)
+                .body(AsyncBody::from("unauthorized"))
+                .unwrap())
+        });
+
+        let extra_headers = CustomHeaders::default();
+        let result = block_on(list_models(
+            http_client.as_ref(),
+            "https://api.example.com/v1",
+            "bad-key",
+            &extra_headers,
+        ));
+
+        match result {
+            Err(ListModelsError::ApiError { status, body }) => {
+                assert_eq!(status, 401);
+                assert_eq!(body, "unauthorized");
+            }
+            other => panic!("expected ApiError, got {:?}", other),
+        }
+    }
 }
