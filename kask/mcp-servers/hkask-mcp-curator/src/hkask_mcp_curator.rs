@@ -9,12 +9,14 @@
 #![allow(unused_crate_dependencies)] // Bin target — deps used in main.rs, lint checks lib target only
 
 pub mod types;
+pub mod governance;
 
 // Bridge crates: shared ontological vocabulary (P5.4 dual-axis framework)
 
 use hkask_mcp_server::server::{McpToolError, execute_tool};
-use hkask_services_context::governance;
 use hkask_storage::database::sqlite::SqliteDriver;
+
+use crate::governance;
 
 use hkask_types::WebID;
 use hkask_types::event::RegulationSink;
