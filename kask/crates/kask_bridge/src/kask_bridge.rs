@@ -43,7 +43,7 @@ pub use inference_providers::{
 };
 pub use mcp_servers::{
     BUILT_IN_MCP_SERVERS, BUILT_IN_MCP_SERVERS_IDS, BUILT_IN_MCP_SERVERS_PAIRS, BuiltinMcpServer,
-    find_server,
+    filter_credentials_for_server, find_server,
 };
 pub use memory::{BridgeMemoryPort, LoggingMemoryPort, RealMemoryPort};
 pub use settings::{
