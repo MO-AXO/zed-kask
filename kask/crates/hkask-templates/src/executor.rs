@@ -1524,7 +1524,11 @@ impl ManifestExecutor {
         // Extract the sub-cascade's final result value. We do NOT merge the
         // full sub-context back into the parent — only the result is stored,
         // preventing the sub-cascade from overwriting parent context keys.
-        let result_value = sub_result.values().last().cloned().unwrap_or(Value::Null);
+        //
+        // The final result is the highest-ordinal `step_N_result` key —
+        // HashMap iteration order is randomized, so we can't use `.last()`.
+        // This mirrors the bridge's `extract_final_step_result` logic.
+        let result_value = extract_final_step_result(&sub_result);
 
         // Reconstruct the parent context from the sub-result. The sub-cascade
         // received the parent's context, so the sub-result contains the
@@ -1849,6 +1853,30 @@ impl ManifestExecutor {
             }
         }
     }
+}
+
+/// Deterministically extract the final step's result from a cascade context.
+///
+/// `execute_manifest` stores each step's output under a `step_{ordinal}_result`
+/// key. HashMap iteration order is randomized, so `values().last()` would pick
+/// an arbitrary step. This function parses the ordinal from each `step_N_result`
+/// key and returns the value of the highest ordinal as a `Value`. Falls back to
+/// `Value::Null` if no `step_N_result` keys are present.
+///
+/// Used by `execute_flowdef` to extract the sub-cascade's final result without
+/// merging the full sub-context back into the parent.
+fn extract_final_step_result(context: &HashMap<String, Value>) -> Value {
+    context
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("step_")
+                .and_then(|rest| rest.strip_suffix("_result"))
+                .and_then(|n| n.parse::<u32>().ok())
+                .map(|ordinal| (ordinal, value))
+        })
+        .max_by_key(|(ordinal, _)| *ordinal)
+        .map(|(_, v)| v.clone())
+        .unwrap_or(Value::Null)
 }
 
 /// Parse a JSON response from an inference call.

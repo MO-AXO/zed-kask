@@ -2165,14 +2165,29 @@ struct PanelScopedInference {
 }
 
 impl kask_panel::ScopedInference for PanelScopedInference {
-    fn infer(&self, _server: &str, prompt: &str) -> gpui::Task<Result<String, String>> {
+    fn infer(
+        &self,
+        _server: &str,
+        prompt: &str,
+        system_prompt: &str,
+    ) -> gpui::Task<Result<String, String>> {
         let inference = self.inference.clone();
         let prompt = prompt.to_string();
+        let system_prompt = system_prompt.to_string();
 
         self.executor.spawn(async move {
             let params = hkask_types::template::LLMParameters::default();
+            // Build a message array with the system prompt as the leading
+            // `system` message so the provider sees the context-aware
+            // instructions (which MCP server, tool list, interaction model)
+            // as distinct from the user's prompt. This is the correct path
+            // for chat/REPL — see `InferencePort::generate_with_messages`.
+            let messages = vec![
+                hkask_types::ChatMessage::system(system_prompt),
+                hkask_types::ChatMessage::user(prompt),
+            ];
             let result = inference
-                .generate(&prompt, &params, None)
+                .generate_with_messages(&messages, &params, None, None)
                 .await
                 .map_err(|e| e.to_string())?;
             Ok(result.text)
