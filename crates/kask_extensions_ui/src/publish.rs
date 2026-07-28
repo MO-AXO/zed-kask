@@ -236,10 +236,11 @@ pub async fn unpublish_skill(
     );
 
     let auth_header = credentials.authorization_header();
-    let delete_url = http_client.build_zed_api_url(
-        "/api/kask-skills/unpublish",
-        &[("id", &format!("{}/{}", source_user, skill_name))],
-    )?;
+    // zed-kask: URL-encode the skill ID (alice/bug-hunt → alice%2Fbug-hunt)
+    // so it's a single path segment. The server decodes it back.
+    let encoded_id = urlencoding::encode(&format!("{}/{}", source_user, skill_name));
+    let delete_url =
+        http_client.build_zed_api_url(&format!("/api/kask-skills/{}", encoded_id), &[])?;
     http_client
         .send(
             http_client::http::Request::delete(delete_url.as_ref())
@@ -281,8 +282,9 @@ pub async fn install_skill(
     );
 
     // Download the tarball.
+    let encoded_id = urlencoding::encode(skill_id);
     let download_url =
-        http_client.build_zed_api_url(&format!("/api/kask-skills/{}/download", skill_id), &[])?;
+        http_client.build_zed_api_url(&format!("/api/kask-skills/{}/download", encoded_id), &[])?;
     let mut response = http_client
         .get(download_url.as_ref(), AsyncBody::empty(), true)
         .await
@@ -341,8 +343,9 @@ pub async fn vote_skill(
     vote: i8,
 ) -> Result<(i64, i64)> {
     let auth_header = credentials.authorization_header();
+    let encoded_id = urlencoding::encode(skill_id);
     let vote_url =
-        http_client.build_zed_api_url(&format!("/api/kask-skills/{}/vote", skill_id), &[])?;
+        http_client.build_zed_api_url(&format!("/api/kask-skills/{}/vote", encoded_id), &[])?;
     let body = serde_json::to_string(&cloud_api_types::KaskSkillVoteRequest { vote })?;
     let mut response = http_client
         .send(

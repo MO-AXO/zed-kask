@@ -208,7 +208,16 @@ pub fn spawn_drain(queue: &mut SkillVisibilityQueue, cx: &mut Context<SettingsWi
     let app_state = workspace::AppState::global(cx);
     let fs = app_state.fs.clone();
     let http_client = app_state.client.http_client();
-    let credentials = app_state.client.credentials();
+    let credentials = match app_state.client.credentials() {
+        Some(c) => c,
+        None => {
+            log::warn!(
+                "kask-extensions: not logged in; cannot publish/unpublish skills. \
+                 Remediation: sign in to Zed to share skills."
+            );
+            return Task::ready(());
+        }
+    };
     let source_user = app_state
         .user_store
         .read(cx)
@@ -241,7 +250,7 @@ pub fn spawn_drain(queue: &mut SkillVisibilityQueue, cx: &mut Context<SettingsWi
             let result = kask_extensions_ui::publish_skill(
                 fs.as_ref(),
                 &http_client,
-                credentials.as_ref().unwrap(),
+                &credentials,
                 &skill,
                 &source_user,
                 &version,
@@ -262,7 +271,7 @@ pub fn spawn_drain(queue: &mut SkillVisibilityQueue, cx: &mut Context<SettingsWi
             }
         }
         for skill_name in skills_to_unpublish {
-            let result = kask_extensions_ui::unpublish_skill(&http_client, credentials.as_ref().unwrap(), &source_user, &skill_name)
+            let result = kask_extensions_ui::unpublish_skill(&http_client, &credentials, &source_user, &skill_name)
                 .await;
             if let Err(error) = result {
                 log::warn!(
