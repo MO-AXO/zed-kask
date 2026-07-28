@@ -1,7 +1,7 @@
 use anyhow::Result;
 use credentials_provider::CredentialsProvider;
 use futures::{FutureExt, StreamExt, future::BoxFuture};
-use gpui::{App, AppContext, AsyncApp, Context, Entity, Task, TaskExt};
+use gpui::{App, AppContext, AsyncApp, Context, Entity, Task};
 use http_client::{CustomHeaders, HttpClient};
 use language_model::{
     AuthenticateError, IconOrSvg, LanguageModel, LanguageModelCompletionError,
@@ -11,7 +11,8 @@ use language_model::{
     LanguageModelToolSchemaFormat, ProviderSettingsView, RateLimiter, SubPageProviderSettings,
 };
 use open_ai::{
-    ResponseStreamEvent, list_models,
+    ResponseStreamEvent,
+    list_models::list_models,
     responses::{Request as ResponseRequest, StreamEvent as ResponsesStreamEvent, stream_response},
     stream_completion,
 };
@@ -72,10 +73,6 @@ impl DiscoveryState {
         }
     }
 
-    fn is_authenticated(state: &State, cx: &App) -> bool {
-        state.is_authenticated()
-    }
-
     /// Spawn (or replace) the fetch-models task. Reads the api_key and api_url
     /// from the shared state. When `auto_discover` is false, this is a no-op.
     fn restart_fetch_models_task(
@@ -93,7 +90,8 @@ impl DiscoveryState {
             .api_key_state
             .key(&api_url)
             .map(|k| k.to_string());
-        drop(state_read);
+        // Release the borrow before spawning the task.
+        let _ = state_read;
 
         if !auto_discover {
             return;
@@ -106,28 +104,37 @@ impl DiscoveryState {
             return;
         };
 
+        let state_for_notify = state.clone();
         let task = cx.spawn(async move |this, cx| {
             let result = list_models(http_client.as_ref(), &api_url, &api_key, &extra_headers)
                 .await
                 .map(|models| {
                     models
                         .into_iter()
-                        .map(|m| AvailableModel {
-                            name: m.id,
-                            display_name: Some(m.name.unwrap_or_default()).filter(|s| !s.is_empty()),
-                            max_tokens: m.context_length.unwrap_or(128_000),
-                            max_output_tokens: m.max_output_tokens,
-                            max_completion_tokens: None,
-                            reasoning_effort: None,
-                            capabilities: ModelCapabilities {
-                                tools: m.supports_tools(),
-                                images: m.supports_images(),
-                                parallel_tool_calls: m.supports_tools(),
-                                prompt_cache_key: false,
-                                chat_completions: true,
-                                interleaved_reasoning: false,
-                                max_tokens_parameter: false,
-                            },
+                        .map(|m| {
+                            let supports_tools = m.supports_tools();
+                            let supports_images = m.supports_images();
+                            let display_name = {
+                                let name = m.name.clone().unwrap_or_default();
+                                if name.is_empty() { None } else { Some(name) }
+                            };
+                            AvailableModel {
+                                name: m.id,
+                                display_name,
+                                max_tokens: m.context_length.unwrap_or(128_000),
+                                max_output_tokens: m.max_output_tokens,
+                                max_completion_tokens: None,
+                                reasoning_effort: None,
+                                capabilities: ModelCapabilities {
+                                    tools: supports_tools,
+                                    images: supports_images,
+                                    parallel_tool_calls: supports_tools,
+                                    prompt_cache_key: false,
+                                    chat_completions: true,
+                                    interleaved_reasoning: false,
+                                    max_tokens_parameter: false,
+                                },
+                            }
                         })
                         .collect::<Vec<_>>()
                 });
@@ -138,6 +145,9 @@ impl DiscoveryState {
                         cx.notify();
                     })
                     .ok();
+                    // Notify the shared state so the LanguageModelRegistry
+                    // re-reads `provided_models` and the picker updates.
+                    state_for_notify.update(cx, |_, cx| cx.notify());
                 }
                 Err(e) => {
                     log::warn!(
@@ -184,14 +194,19 @@ impl OpenAiCompatibleLanguageModelProvider {
             // Re-trigger discovery when the shared state notifies (settings or
             // api-key change). The shared state calls cx.notify() in
             // `update_settings` and after `authenticate`/`set_api_key`.
-            cx.observe(&state, move |this, cx| {
-                this.restart_fetch_models_task(
-                    state_for_discovery.clone(),
-                    http_client_for_discovery.clone(),
-                    provider_name.clone(),
-                    cx,
-                );
-            })
+            let observe_http = http_client_for_discovery.clone();
+            let observe_name = provider_name.clone();
+            cx.observe(
+                &state,
+                move |this: &mut DiscoveryState, observed_state, cx| {
+                    this.restart_fetch_models_task(
+                        observed_state.clone(),
+                        observe_http.clone(),
+                        observe_name.clone(),
+                        cx,
+                    );
+                },
+            )
             .detach();
             let mut discovery = DiscoveryState::new();
             discovery.restart_fetch_models_task(

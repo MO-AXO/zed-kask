@@ -47,6 +47,7 @@ use crate::bundle::BundleManifest;
 use crate::bundle::BundleManifestStep;
 use crate::load_manifest_from_yaml;
 use crate::ports::{Result, TemplateError};
+use crate::template_renderer::{TemplateRenderer, render_minijinja, safe_template_join};
 use hkask_capability::{DelegationAction, DelegationResource, DelegationToken};
 use hkask_capability::{ToolPort, ToolPortError};
 use hkask_guard::{SpotlightMode, Spotlighter};
@@ -56,10 +57,8 @@ use hkask_types::ToolTaint;
 use hkask_types::WebID;
 use hkask_types::template::LLMParameters;
 use hkask_types::{ChatToolDefinition, ChatToolFunction, InferencePort, InferenceResult};
-use minijinja::UndefinedBehavior;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
@@ -2148,15 +2147,21 @@ fn parse_json_response(text: &str, step_ordinal: u32) -> Result<Value> {
 /// instead of emitting prose and hoping `parse_json_response` can extract
 /// JSON from it.
 fn extract_contract_output(template_content: &str) -> Option<Value> {
-    // The frontmatter is YAML between `---` separators. Templates use `---`
-    // as both opener and closer (YAML frontmatter convention).
-    let mut sections = template_content.splitn(3, "---");
-    let _before = sections.next()?; // typically empty or a comment
-    let frontmatter = sections.next()?; // the YAML block
+    // hKask templates use a frontmatter format where:
+    // - The frontmatter starts at the beginning of the file (optionally after
+    //   a `[inference]` marker line) and ends at the first `---` separator.
+    // - The frontmatter is YAML containing `template_type`, `lexicon_terms`,
+    //   `contract`, `energy_cap`, `visibility`, etc.
+    // - The body after `---` is the Jinja2 template.
+    //
+    // We find the `\n---\n` separator and parse everything before it as YAML.
+    // The `[inference]` marker is stripped before parsing — it's not valid YAML.
+    let separator_pos = template_content.find("\n---\n")?;
+    let frontmatter = &template_content[..separator_pos];
+    let frontmatter = frontmatter
+        .strip_prefix("[inference]\n")
+        .unwrap_or(frontmatter);
 
-    // Parse the frontmatter as YAML and extract contract.output.
-    // serde_yaml_neo is already a dependency of this crate (used by
-    // manifest_loader.rs and skill_loader.rs for YAML parsing).
     let parsed: Value = serde_yaml_neo::from_str(frontmatter).ok()?;
     let contract = parsed.get("contract")?;
     let output = contract.get("output")?;

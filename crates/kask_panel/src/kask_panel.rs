@@ -98,7 +98,18 @@ pub trait ToolInvoker: Send + Sync {
 /// The bridge provides the implementation.
 pub trait ScopedInference: Send + Sync {
     /// Run scoped inference with only the selected server's tools in scope.
-    fn infer(&self, server: &str, prompt: &str) -> Task<Result<String, String>>;
+    ///
+    /// `system_prompt` carries the context-aware system prompt the bridge
+    /// builds from the selected server's identity and tool list. The panel
+    /// constructs it via `build_system_prompt` so the LLM knows which MCP
+    /// server it is acting as, what tools it has, and how to interact with
+    /// the user.
+    fn infer(
+        &self,
+        server: &str,
+        prompt: &str,
+        system_prompt: &str,
+    ) -> Task<Result<String, String>>;
 }
 
 /// A snapshot of regulation/gas status for the status bar.
