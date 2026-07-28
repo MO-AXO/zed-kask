@@ -21,7 +21,9 @@
 //! crates, not here.
 
 use futures::AsyncReadExt;
-use http_client::{AsyncBody, CustomHeaders, HttpClient, Method, Request as HttpRequest, RequestBuilderExt};
+use http_client::{
+    AsyncBody, CustomHeaders, HttpClient, Method, Request as HttpRequest, RequestBuilderExt,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -140,9 +142,7 @@ pub async fn list_models(
 impl DiscoveredModel {
     /// Whether the provider advertises tool support via `supported_parameters`.
     pub fn supports_tools(&self) -> bool {
-        self.supported_parameters
-            .iter()
-            .any(|p| p == "tools")
+        self.supported_parameters.iter().any(|p| p == "tools")
     }
 
     /// Whether the provider advertises image input support via architecture
@@ -163,7 +163,7 @@ impl DiscoveredModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http_client::http_client::FakeHttpClient;
+    use http_client::FakeHttpClient;
     use serde_json::json;
 
     #[test]
