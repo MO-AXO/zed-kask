@@ -43,7 +43,7 @@
 //! `InferencePort` (for select/populate) and `ToolPort` (for execute),
 //! both of which are already dependencies of this crate.
 
-use crate::budget::{BudgetExhaustion, BudgetTracker};
+use crate::budget::BudgetTracker;
 use crate::bundle::BundleManifest;
 use crate::bundle::BundleManifestStep;
 use crate::convergence::{ConvergenceStatus, ConvergenceTracker};
@@ -1946,61 +1946,6 @@ fn resolve_mapping_value(
                 .collect(),
         ),
         other => other.clone(),
-    }
-}
-
-impl ManifestExecutor {
-    /// Compute compound quality from nested inner skill convergence reports.
-    fn compute_compound_quality(
-        &self,
-        context: &HashMap<String, Value>,
-        method: &str,
-        sources: &[crate::bundle::config::AggregationSource],
-    ) -> f64 {
-        match method {
-            "all_converged" => {
-                let all_ok = sources.iter().all(|src| {
-                    let key = format!("step_{}_result", src.step_ordinal);
-                    context
-                        .get(&key)
-                        .and_then(|v| v.get("_convergence"))
-                        .and_then(|c| c.get("status"))
-                        .and_then(|s| s.as_str())
-                        .map(|s| s == "converged")
-                        .unwrap_or(false)
-                });
-                if all_ok { 0.0 } else { 1.0 }
-            }
-            "min" => sources
-                .iter()
-                .filter_map(|src| {
-                    let key = format!("step_{}_result", src.step_ordinal);
-                    context
-                        .get(&key)
-                        .and_then(|v| v.get("_convergence"))
-                        .and_then(|c| c.get("quality_at_exit"))
-                        .and_then(|v| v.as_f64())
-                })
-                .fold(1.0_f64, f64::min),
-            "weighted_avg" => {
-                let mut sum = 0.0_f64;
-                let mut total = 0.0_f64;
-                for src in sources {
-                    let key = format!("step_{}_result", src.step_ordinal);
-                    if let Some(v) = context
-                        .get(&key)
-                        .and_then(|v| v.get("_convergence"))
-                        .and_then(|c| c.get("quality_at_exit"))
-                        .and_then(|v| v.as_f64())
-                    {
-                        sum += v * src.weight;
-                        total += src.weight;
-                    }
-                }
-                if total > 0.0 { sum / total } else { 1.0 }
-            }
-            _ => 0.0,
-        }
     }
 }
 
