@@ -107,11 +107,10 @@ Every artifact in hKask has both a state identity and a process identity — it 
 | **codegraph** | PKO | DC+BIBO | — |
 | **companies** | PKO | DC+BIBO | FIBO (financial concepts) |
 | **condenser** | PKO | DC+BIBO | — (DC is the connective tissue for graph saliency) |
+| **corpus** | PKO | DC+BIBO | GOLEM (narrative structure, for the replica sub-system) |
 | **curator** | PKO | DC+BIBO | — (the curator IS the 5W1H core applied as Socratic inquiry) |
-| **docproc** | PKO | DC+BIBO | — |
 | **kata-kanban** | PKO | DC+BIBO | — |
 | **media** | PKO | DC+BIBO | OMC (media creation) |
-| **replica** | PKO | DC+BIBO | GOLEM (narrative structure) |
 | **research** | PKO | DC+BIBO | — |
 | **scenarios** | PKO | DC+BIBO | — |
 | **training** | PKO | DC+BIBO | ML-Schema (ML experiments) |
