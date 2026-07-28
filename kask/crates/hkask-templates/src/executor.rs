@@ -1044,7 +1044,7 @@ impl ManifestExecutor {
             .as_ref()
             .map(|schema| build_structured_output_tool(schema.clone()));
         let tools: Option<&[ChatToolDefinition]> =
-            structured_tool.as_ref().map(|t| std::slice::from_ref(t));
+            structured_tool.as_ref().map(std::slice::from_ref);
 
         let (result_text, tool_calls): (String, Vec<hkask_types::StructuredToolCall>) = {
             let timeout_dur = std::time::Duration::from_secs(step.timeout_seconds as u64);
@@ -1821,10 +1821,10 @@ fn build_structured_output_tool(schema: Value) -> ChatToolDefinition {
 /// is available (in which case the executor falls back to text parsing).
 fn resolve_output_schema(step: &BundleManifestStep, template_content: &str) -> Option<Value> {
     // Priority 1: manifest-declared output_schema.
-    if let Some(ref schema) = step.output_schema {
-        if schema.is_object() {
-            return Some(schema.clone());
-        }
+    if let Some(ref schema) = step.output_schema
+        && schema.is_object()
+    {
+        return Some(schema.clone());
     }
 
     // Priority 2: contract.output from the template frontmatter.
