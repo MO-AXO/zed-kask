@@ -17,12 +17,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use agent_skills::{Skill, SkillIndex, SkillMetadata, SkillSource, SkillVisibility};
+use agent_skills::{Skill, SkillIndex, SkillSource, SkillVisibility};
 use anyhow::{Context as _, Result};
 use fs::Fs;
-use gpui::{App, Context, Task};
+use gpui::{App, AppContext, Context, Task};
 use serde_yaml_ng::Mapping;
-use util::ResultExt as _;
 
 use crate::SettingsWindow;
 
@@ -51,11 +50,13 @@ impl SkillVisibilityQueue {
     }
 
     /// Number of pending changes.
+    #[allow(dead_code)] // used in tests; will be used by Phase 5 drain retry logic
     pub fn len(&self) -> usize {
         self.pending.len()
     }
 
     /// Returns the pending visibility for a skill name, if any.
+    #[allow(dead_code)] // used in tests; will be used by Phase 5 drain retry logic
     pub fn pending_visibility(&self, skill_name: &str) -> Option<SkillVisibility> {
         self.pending.get(skill_name).copied()
     }
@@ -69,6 +70,7 @@ impl SkillVisibilityQueue {
     }
 
     /// Re-push a failed entry so it retries on the next drain.
+    #[allow(dead_code)] // used in tests; will be used by Phase 5 drain retry logic
     pub fn requeue(&mut self, skill_name: String, visibility: SkillVisibility) {
         self.pending.insert(skill_name, visibility);
     }
@@ -94,7 +96,7 @@ pub async fn rewrite_skill_visibility_on_disk(
 
     let rewritten = rewrite_skill_visibility_in_content(&content, new_visibility)?;
 
-    fs.save(skill_file_path, rewritten.as_bytes(), Default::default())
+    fs.write(skill_file_path, rewritten.as_bytes())
         .await
         .with_context(|| {
             format!(
@@ -127,7 +129,7 @@ pub fn rewrite_skill_visibility_in_content(
         .find(close_marker)
         .or_else(|| {
             // Handle CRLF line endings in the closing delimiter.
-            after_open.find("\r\n---\r\n").map(|p| p)
+            after_open.find("\r\n---\r\n")
         })
         .context("SKILL.md frontmatter is missing the closing `---` delimiter")?;
 
@@ -170,7 +172,8 @@ pub fn update_skill_visibility_in_index(
     skill_name: &str,
     visibility: SkillVisibility,
 ) {
-    if let Some(mut index) = cx.try_global::<SkillIndex>() {
+    if let Some(index) = cx.try_global::<SkillIndex>() {
+        let mut index = index.clone();
         if let Some(skill) = index
             .global_skills
             .iter_mut()
@@ -518,7 +521,7 @@ mod tests {
     // clears the queue. Pinned so a future change that adds a real
     // publish/unpublish pipeline without updating this test fails loudly.
     #[gpui::test]
-    async fn test_spawn_drain_phase2_noop_clears_queue(cx: &mut TestAppContext) {
+    async fn test_spawn_drain_phase2_noop_clears_queue(_cx: &mut TestAppContext) {
         // We can't easily construct a `SettingsWindow` in a unit test, so
         // test the queue drain logic directly. The `spawn_drain` function
         // delegates to `queue.drain()` and logs.

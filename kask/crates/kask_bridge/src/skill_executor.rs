@@ -228,17 +228,39 @@ impl agent::SkillManifestExecutor for BridgeManifestExecutor {
             .await
             .map_err(|e| format!("Manifest execution task failed: {e}"))??;
 
-        // The cascade returns a HashMap<String, Value> — extract the final output.
-        // Convention: the last step's result is under "step_N_result" where N is
-        // the last ordinal. For KnowAct skills, the result is typically under
-        // "step_1_result" or the step's output key.
-        // For now, serialize the full context as JSON so nothing is lost.
-        let output = result
-            .values()
-            .last()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| serde_json::to_string(&result).unwrap_or_default());
+        // The cascade returns a HashMap<String, Value> whose iteration order is
+        // randomized (HashMap uses RandomState). Extract the final step's result
+        // deterministically by selecting the highest-ordinal `step_N_result` key.
+        // This is the convention enforced by ManifestExecutor (executor.rs stores
+        // every step's output under `step_{ordinal}_result`).
+        let output = extract_final_step_result(&result);
 
         Ok(output)
+    }
+}
+
+/// Deterministically extract the final step's result from the cascade context.
+///
+/// `ManifestExecutor::execute_manifest` stores each step's output under a
+/// `step_{ordinal}_result` key. HashMap iteration order is randomized, so
+/// `values().last()` would pick an arbitrary step. This function parses the
+/// ordinal from each `step_N_result` key and returns the value of the highest
+/// ordinal, serialized as JSON. Falls back to the full context if no
+/// `step_N_result` keys are present (e.g. manifests that only emit
+/// `step_N_populated` or other keys).
+fn extract_final_step_result(result: &std::collections::HashMap<String, Value>) -> String {
+    let mut step_results: Vec<(u32, &Value)> = result
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("step_")
+                .and_then(|rest| rest.strip_suffix("_result"))
+                .and_then(|n| n.parse::<u32>().ok())
+                .map(|ordinal| (ordinal, value))
+        })
+        .collect();
+    step_results.sort_by_key(|(ordinal, _)| *ordinal);
+    match step_results.last() {
+        Some((_, value)) => value.to_string(),
+        None => serde_json::to_string(result).unwrap_or_default(),
     }
 }
