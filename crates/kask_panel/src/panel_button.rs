@@ -44,9 +44,9 @@ impl Render for KaskPanelButton {
             .icon_size(IconSize::Small)
             .tab_index(0isize)
             .aria_label("Kask Panel")
-            .tooltip(move |window, cx| {
+            .tooltip(move |_window, cx| {
                 if let Some(focus_handle) = &focus_handle {
-                    Tooltip::for_action_in("Toggle Kask Panel", &Toggle, focus_handle, window, cx)
+                    Tooltip::for_action_in("Toggle Kask Panel", &Toggle, focus_handle, cx)
                 } else {
                     Tooltip::for_action("Toggle Kask Panel", &Toggle, cx)
                 }

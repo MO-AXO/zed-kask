@@ -732,7 +732,7 @@ impl KaskPanel {
             )
     }
 
-    fn render_messages(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_messages(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let border_color = cx.theme().colors().border;
         let bg_color = cx.theme().colors().editor_background;
 
@@ -1115,7 +1115,7 @@ impl SerializableItem for KaskPanel {
 }
 
 impl Render for KaskPanel {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Ensure the conversation for the selected server is initialized
         // (lazy welcome message on first render).
         self.current_messages();
@@ -1147,7 +1147,7 @@ impl Render for KaskPanel {
                     .child(Label::new("Kask Panel").size(LabelSize::Large)),
             )
             .child(self.render_server_selector(cx))
-            .child(self.render_messages(cx))
+            .child(self.render_messages(window, cx))
             .child(self.render_status_bar(cx))
             .child(self.render_input(cx))
             .into_any_element()

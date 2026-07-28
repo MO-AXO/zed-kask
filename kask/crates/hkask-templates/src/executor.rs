@@ -1929,23 +1929,62 @@ fn parse_json_response(text: &str, step_ordinal: u32) -> Result<Value> {
 fn extract_contract_output(template_content: &str) -> Option<Value> {
     // hKask templates use a frontmatter format where:
     // - The frontmatter starts at the beginning of the file (optionally after
-    //   a `[inference]` marker line) and ends at the first `---` separator.
+    //   leading Jinja comments `{# ... #}` and a `[inference]` marker line)
+    //   and ends at the first `---` separator.
     // - The frontmatter is YAML containing `template_type`, `lexicon_terms`,
     //   `contract`, `energy_cap`, `visibility`, etc.
     // - The body after `---` is the Jinja2 template.
     //
     // We find the `\n---\n` separator and parse everything before it as YAML.
-    // The `[inference]` marker is stripped before parsing — it's not valid YAML.
+    // Leading Jinja comments (`{# ... #}`) are stripped — they're not valid YAML
+    // and would cause the parser to fail. The `[inference]` marker is also
+    // stripped for the same reason.
     let separator_pos = template_content.find("\n---\n")?;
     let frontmatter = &template_content[..separator_pos];
+
+    // Strip Jinja comments ({# ... #}) — they can appear anywhere in the
+    // frontmatter and are not valid YAML.
+    let stripped = strip_jinja_comments(frontmatter);
+    let frontmatter = stripped.trim();
     let frontmatter = frontmatter
-        .strip_prefix("[inference]\n")
-        .unwrap_or(frontmatter);
+        .strip_prefix("[inference]")
+        .unwrap_or(frontmatter)
+        .trim();
 
     let parsed: Value = serde_yaml_neo::from_str(frontmatter).ok()?;
     let contract = parsed.get("contract")?;
     let output = contract.get("output")?;
     Some(output.clone())
+}
+
+/// Strip Jinja comments (`{# ... #}`) from a string. Comments can span
+/// multiple lines. Uses a simple state machine rather than regex to avoid
+/// the regex dependency.
+fn strip_jinja_comments(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '{' && chars.peek() == Some(&'#') {
+            // Skip until we find #}
+            chars.next(); // consume '#'
+            let mut found_close = false;
+            while let Some(c) = chars.next() {
+                if c == '#' && chars.peek() == Some(&'}') {
+                    chars.next(); // consume '}'
+                    found_close = true;
+                    break;
+                }
+            }
+            if !found_close {
+                // Unterminated comment — append the rest as-is
+                result.push('{');
+                result.push('#');
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 /// Convert a `contract.output` block (field name → type string) into a
@@ -2547,6 +2586,19 @@ mod tests {
     fn extract_contract_output_returns_none_without_contract() {
         let template = "[inference]\ntemplate_type: KnowAct\n---\nYou are an evaluator.\n";
         assert!(extract_contract_output(template).is_none());
+    }
+
+    #[test]
+    fn extract_contract_output_strips_jinja_comments() {
+        // Some templates have leading Jinja comments ({# ... #}) before the
+        // [inference] block. The parser must strip them before YAML parsing.
+        let template = "{# goal: Test comment stripping #}\n{# Second comment #}\n[inference]\ntemplate_type: KnowAct\ncontract:\n  output:\n    result: string\n---\nBody\n";
+        let output = extract_contract_output(template)
+            .expect("should find contract.output despite Jinja comments");
+        assert_eq!(
+            output.get("result").and_then(|v| v.as_str()),
+            Some("string")
+        );
     }
 
     #[test]
