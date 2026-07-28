@@ -122,15 +122,15 @@ Inference routing (`crates/language_model`, `language_model_core`, `language_mod
 
 ---
 
-### 2.4 MCP load set (11 on disk)
+### 2.4 MCP load set (10 on disk)
 
-The original 16 MCP servers have been pruned to **11 on disk**. The `BUILTIN_SERVERS` constant in `kask/crates/hkask-mcp-server/src/lib.rs` has been updated to match.
+The original 16 MCP servers have been pruned to **10 on disk**. The `BUILT_IN_MCP_SERVERS` constant in `kask/crates/kask_bridge/src/mcp_servers.rs` enumerates them.
 
-| On disk (11) | Deleted (5) |
+| On disk (10) | Removed / merged |
 |---|---|
-| `codegraph`, `companies`, `condenser`, `curator`, `docproc`, `kata-kanban`, `media`, `replica`, `research`, `scenarios`, `training` | `communication` (Matrix/TTS → zed voip), `filesystem` (zed provides fs tools), `memory` (consolidated into `hkask-memory` crate), `skill` (skill execution is native via D1), `regulation` (consolidated into `hkask-regulation` crate) |
+| `codegraph`, `companies`, `condenser`, `corpus`, `curator`, `kata-kanban`, `media`, `research`, `scenarios`, `training` | `communication` (Matrix/TTS → zed voip), `filesystem` (zed provides fs tools), `memory` (consolidated into `hkask-memory` crate), `skill` (skill execution is native via D1), `regulation` (consolidated into `hkask-regulation` crate), `docproc`/`replica` (folded into `corpus`) |
 
-> The `curator` MCP server is kept on disk but may be unloaded by default (Curator is a native agent, D2). All 11 build clean.
+> The `curator` MCP server is kept on disk but may be unloaded by default (Curator is a native agent, D2). All 10 build clean.
 
 ---
 
