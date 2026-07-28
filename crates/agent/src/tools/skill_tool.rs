@@ -866,12 +866,16 @@ mod tests {
     /// Stub `SkillManifestExecutor` for tests.
     ///
     /// Returns a fixed cascade output for a known skill name, simulating the
-    /// hKask manifest cascade without standing up the bridge. `has_manifest`
-    /// reports `true` only for skills the stub knows about, mirroring the
-    /// real executor's registry lookup.
+    /// real executor's registry lookup. The `known` set reports `true` only
+    /// for skills the stub knows about, mirroring the real executor's registry
+    /// lookup.
     struct StubManifestExecutor {
         known: std::collections::HashSet<String>,
         output: String,
+        /// Captures the context passed to the most recent `execute_skill` call
+        /// so tests can assert that `task` (and other fields) are injected.
+        last_context:
+            std::sync::Mutex<Option<std::collections::HashMap<String, serde_json::Value>>>,
     }
 
     impl StubManifestExecutor {
@@ -882,7 +886,17 @@ mod tests {
             Self {
                 known: known.into_iter().map(|s| s.into()).collect(),
                 output: output.into(),
+                last_context: std::sync::Mutex::new(None),
             }
+        }
+
+        /// Return a clone of the context passed to the most recent
+        /// `execute_skill` call, or `None` if it was never called.
+        fn last_context(&self) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+            self.last_context
+                .lock()
+                .expect("last_context mutex poisoned")
+                .clone()
         }
     }
 
@@ -891,8 +905,12 @@ mod tests {
         async fn execute_skill(
             &self,
             skill_name: &str,
-            _context: std::collections::HashMap<String, serde_json::Value>,
+            context: std::collections::HashMap<String, serde_json::Value>,
         ) -> Result<String, String> {
+            *self
+                .last_context
+                .lock()
+                .expect("last_context mutex poisoned") = Some(context.clone());
             if self.known.contains(skill_name) {
                 Ok(self.output.clone())
             } else {

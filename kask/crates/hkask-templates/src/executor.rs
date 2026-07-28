@@ -2148,16 +2148,16 @@ fn parse_json_response(text: &str, step_ordinal: u32) -> Result<Value> {
 /// instead of emitting prose and hoping `parse_json_response` can extract
 /// JSON from it.
 fn extract_contract_output(template_content: &str) -> Option<Value> {
-    // The frontmatter is everything before the closing `---` line.
-    // Templates use `---` as both opener and closer (YAML frontmatter).
+    // The frontmatter is YAML between `---` separators. Templates use `---`
+    // as both opener and closer (YAML frontmatter convention).
     let mut sections = template_content.splitn(3, "---");
     let _before = sections.next()?; // typically empty or a comment
     let frontmatter = sections.next()?; // the YAML block
 
     // Parse the frontmatter as YAML and extract contract.output.
-    // We use serde_yaml for this — it's already a dependency via serde_json::Value
-    // interop. If serde_yaml isn't available, fall back to a simple line parser.
-    let parsed: Value = serde_yaml::from_str(frontmatter).ok()?;
+    // serde_yaml_neo is already a dependency of this crate (used by
+    // manifest_loader.rs and skill_loader.rs for YAML parsing).
+    let parsed: Value = serde_yaml_neo::from_str(frontmatter).ok()?;
     let contract = parsed.get("contract")?;
     let output = contract.get("output")?;
     Some(output.clone())
