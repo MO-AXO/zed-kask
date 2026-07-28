@@ -66,27 +66,6 @@ use zeroize::Zeroizing;
 /// Error healing callback: (error_string, operation_name).
 type HealCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
-/// Default base path for template files relative to the project root.
-const DEFAULT_TEMPLATE_BASE_PATH: &str = "registry/templates";
-
-/// Safely join a base path with a template reference, rejecting path traversal.
-///
-/// Mirrors minijinja's internal `safe_join`: any segment starting with `.`
-/// or containing a backslash is rejected. This prevents `{% include "../../etc/passwd" %}`
-/// and `template_ref: "../../../secrets"` from reading files outside the base.
-///
-/// Returns `None` if the template_ref would escape the base path.
-fn safe_template_join(base: &std::path::Path, template_ref: &str) -> Option<PathBuf> {
-    let mut rv = base.to_path_buf();
-    for segment in template_ref.split('/') {
-        if segment.starts_with('.') || segment.contains('\\') {
-            return None;
-        }
-        rv.push(segment);
-    }
-    Some(rv)
-}
-
 /// Extract the PDCA feedback phase from a template_ref string.
 ///
 /// Template refs look like "sankey-flow/sankey-classify" or
@@ -153,7 +132,7 @@ pub struct ManifestExecutor {
     /// Base filesystem path for resolving template_ref values.
     /// When `step.renderer == "minijinja"`, `step.template_ref` is resolved
     /// relative to this path. Defaults to `registry/templates/`.
-    template_base_path: PathBuf,
+    template_renderer: TemplateRenderer,
     /// Optional heal callback: (error_string, operation_name).
     heal_error_cb: Option<HealCallback>,
     /// Spotlighter for transforming untrusted tool outputs (Layer 2 defense).
@@ -189,7 +168,9 @@ impl ManifestExecutor {
             tools,
             default_params,
             a2a_secret: Zeroizing::new(a2a_secret),
-            template_base_path: PathBuf::from(DEFAULT_TEMPLATE_BASE_PATH),
+            template_renderer: TemplateRenderer::new(std::path::PathBuf::from(
+                crate::template_renderer::DEFAULT_TEMPLATE_BASE_PATH,
+            )),
             heal_error_cb: None,
             spotlighter: Spotlighter::new(SpotlightMode::Delimit),
             runtime_policy: None,
@@ -200,8 +181,8 @@ impl ManifestExecutor {
     /// Set the template base path for resolving template_ref values.
     /// Useful for integration tests that need to point to a test fixture directory.
     #[must_use]
-    pub fn with_template_base_path(mut self, path: PathBuf) -> Self {
-        self.template_base_path = path;
+    pub fn with_template_base_path(mut self, path: std::path::PathBuf) -> Self {
+        self.template_renderer = TemplateRenderer::new(path);
         self
     }
 

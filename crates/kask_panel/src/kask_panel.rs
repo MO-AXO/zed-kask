@@ -179,7 +179,19 @@ fn regulation_status() -> Option<&'static Arc<dyn RegulationStatus>> {
 /// A per-server welcome message explaining what the server does and how to
 /// interact with it. Mirrors the deleted hKask TUI's per-window welcome text.
 fn server_welcome(server: &str) -> String {
-    let description = match server {
+    let description = server_description(server);
+    format!(
+        "{server} — {description}.\nType /tool_name args for direct invocation, or a natural language message for scoped inference.\nType /help for commands, /tools to list this server's tools."
+    )
+}
+
+/// Human-readable description for a built-in MCP server.
+///
+/// Mirrors the descriptions in `kask_bridge::BUILT_IN_MCP_SERVERS_PAIRS`,
+/// kept here as a static lookup so the panel can render the welcome message
+/// without a bridge round-trip.
+fn server_description(server: &str) -> &'static str {
+    match server {
         "codegraph" => "code structure query and traversal",
         "companies" => "company research and filings",
         "condenser" => "context condensation and summarization",
@@ -191,17 +203,88 @@ fn server_welcome(server: &str) -> String {
         "scenarios" => "scenario planning and Wardley mapping",
         "training" => "LoRA training configuration and audit",
         _ => "MCP server",
-    };
-    format!(
-        "{server} — {description}.\nType /tool_name args for direct invocation, or a natural language message for scoped inference.\nType /help for commands, /tools to list this server's tools."
-    )
+    }
 }
+
+/// Build a context-aware system prompt for scoped inference.
+///
+/// The prompt tells the LLM which MCP server it is acting as, what that
+/// server does, what tools it has (names + descriptions), and how to
+/// interact with the user. For the curator server, it additionally instructs
+/// the LLM to remember issues raised in the panel so they can be surfaced
+/// in future sessions.
+///
+/// This is the single source of truth for the panel's system prompt — the
+/// bridge's `PanelScopedInference` adapter receives it via the
+/// `ScopedInference::infer` trait method and passes it to the inference port
+/// as the leading `system` message.
+fn build_system_prompt(server: &str, tools: &[ToolDescriptor]) -> String {
+    let description = server_description(server);
+    let mut prompt = format!(
+        "You are the {server} MCP server — {description}.\n\
+         You are interacting with the user through the kask panel. The user's \
+         messages are scoped to your server's tools only.\n\n\
+         ## Your capabilities\n\
+         You have access to the following tools:"
+    );
+
+    if tools.is_empty() {
+        prompt.push_str("\n  (no tools discovered — the server may not be connected)");
+    } else {
+        for tool in tools {
+            prompt.push_str(&format!("\n  - /{} — {}", tool.name, tool.description));
+        }
+    }
+
+    prompt.push_str(
+        "\n\n\
+         ## Interaction model\n\
+         - The user can type natural language messages (you respond using \
+           your tools as needed) or `/tool_name args` (direct tool invocation \
+           that bypasses you).\n\
+         - When the user asks you to do something, call the relevant tool(s) \
+           and explain the result.\n\
+         - If the user's request is outside your server's scope, say so \
+           clearly and suggest which other server might handle it.\n",
+    );
+
+    // The curator is the default server and has a special role: it remembers
+    // issues raised in the panel so they can be surfaced in future sessions.
+    // This is the panel-side instruction; the curator MCP server itself
+    // persists issues via its own regulation cascade.
+    if server == "curator" {
+        prompt.push_str(
+            "\n\
+             ## Curator-specific guidance\n\
+             You are the curator — the regulation cascade and algedonic \
+             signal hub. Remember any issues, obstacles, or feedback the \
+             user raises about the kask panel itself (UX, missing features, \
+             bugs, configuration problems) so you can surface them in future \
+             sessions. When the user reports an issue, acknowledge it and \
+             note that it has been recorded for follow-up.\n",
+        );
+    }
+
+    prompt
+}
+
+/// The index of the default selected server in `BUILT_IN_MCP_SERVERS`.
+///
+/// The curator is the default because it is the regulation cascade hub —
+/// it remembers issues raised in the panel and surfaces them in future
+/// sessions. Users can switch to other servers via the selector buttons.
+const DEFAULT_SERVER_INDEX: usize = 4; // "curator"
 
 /// The kask panel — a center-pane `Item` for per-MCP-server chat + tool invocation.
 pub struct KaskPanel {
     _workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     /// Currently selected server (index into `BUILT_IN_MCP_SERVERS`).
+    ///
+    /// Defaults to `curator` (index 4) — the curator is the regulation
+    /// cascade hub and the natural default for panel interactions. It
+    /// remembers issues raised in the panel and surfaces them in future
+    /// sessions.
     selected_server: usize,
     /// Per-server conversation history (preserved when switching servers).
     conversations: std::collections::HashMap<usize, Vec<KaskMessage>>,
@@ -218,6 +301,11 @@ pub struct KaskPanel {
     /// Whether a regulation status fetch is in progress (guards against
     /// overlapping fetches on every render).
     status_fetching: bool,
+    /// Scroll handle for the messages container. Used to auto-scroll to the
+    /// bottom when new messages arrive so the latest message is always
+    /// visible (without this, the chat overflows past the bottom of the
+    /// viewport and the user cannot see or scroll to it).
+    messages_scroll_handle: gpui::ScrollHandle,
 }
 
 impl KaskPanel {
@@ -252,7 +340,7 @@ impl KaskPanel {
             Self {
                 _workspace: workspace.weak_handle(),
                 focus_handle: cx.focus_handle(),
-                selected_server: 0,
+                selected_server: DEFAULT_SERVER_INDEX,
                 conversations: std::collections::HashMap::new(),
                 input_editor,
                 busy: false,
@@ -260,6 +348,7 @@ impl KaskPanel {
                 cached_tools: None,
                 regulation_snapshot: RegulationSnapshot::default(),
                 status_fetching: false,
+                messages_scroll_handle: gpui::ScrollHandle::new(),
             }
         });
         // Wire the completion provider now that we have a weak handle.
@@ -502,10 +591,24 @@ impl KaskPanel {
         });
         self.busy = true;
         self.spinner_frame = 0;
+        self.scroll_messages_to_bottom(cx);
         cx.notify();
 
         if let Some(inference) = scoped_inference() {
-            let task = inference.infer(&server, prompt);
+            // Build the system prompt from the cached tool list. If the cache
+            // is empty or stale, the system prompt will note that no tools
+            // were discovered — the LLM can still respond, just without tool
+            // awareness. The cache is populated by `/tools` or the lazy fetch
+            // below.
+            let tools: Vec<ToolDescriptor> = self
+                .cached_tools
+                .as_ref()
+                .filter(|(idx, _)| *idx == self.selected_server)
+                .map(|(_, tools)| tools.clone())
+                .unwrap_or_default();
+            let system_prompt = build_system_prompt(&server, &tools);
+
+            let task = inference.infer(&server, prompt, &system_prompt);
             cx.spawn(async move |this, cx| {
                 let result = task.await;
                 this.update(cx, |this, cx| {
@@ -520,10 +623,23 @@ impl KaskPanel {
                         }),
                     }
                     this.busy = false;
+                    this.scroll_messages_to_bottom(cx);
                     cx.notify();
                 })
             })
             .detach();
+
+            // Lazily fetch the tool list in the background if we don't have
+            // it cached yet, so the next inference call has a complete system
+            // prompt. This is fire-and-forget — the result is stored in
+            // `cached_tools` and used on subsequent calls.
+            if self
+                .cached_tools
+                .as_ref()
+                .map_or(true, |(idx, _)| *idx != self.selected_server)
+            {
+                self.fetch_tools_background(cx);
+            }
         } else {
             self.current_messages().push(KaskMessage {
                 role: KaskMessageRole::System,
@@ -531,6 +647,7 @@ impl KaskPanel {
                     .to_string(),
             });
             self.busy = false;
+            this.scroll_messages_to_bottom(cx);
             cx.notify();
         }
     }

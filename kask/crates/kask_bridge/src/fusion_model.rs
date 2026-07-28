@@ -470,6 +470,13 @@ pub fn resolve_fusion_models(
 }
 
 /// Resolve a single provider-prefixed model name.
+///
+/// Provider-ID lookup is case-insensitive: fusion config defaults use
+/// `"OpenRouter/..."` (capitalized) while zed's `LanguageModelRegistry`
+/// registers OpenRouter under `"openrouter"` (lowercase). Rather than
+/// normalizing one side (which would break env-var overrides that use either
+/// casing), we normalize at the lookup boundary — exact-case first, then a
+/// case-insensitive fallback across all registered providers.
 fn resolve_model(
     registry: &language_model::LanguageModelRegistry,
     prefixed_name: &str,
@@ -478,7 +485,20 @@ fn resolve_model(
     // Try to split on the first `/` to get provider/model.
     if let Some((provider_id_str, model_id)) = prefixed_name.split_once('/') {
         let provider_id = LanguageModelProviderId(provider_id_str.to_string().into());
-        if let Some(provider) = registry.provider(&provider_id) {
+
+        // Exact-case lookup first (fast path — the common case when the user
+        // types the provider id exactly as registered).
+        let provider = registry.provider(&provider_id).or_else(|| {
+            // Case-insensitive fallback. `LanguageModelProviderId` derives
+            // `Eq`/`Hash` with case-sensitive `SharedString`, so a capitalized
+            // prefix like "OpenRouter" won't match the registered "openrouter".
+            // Iterate all providers and compare case-insensitively.
+            registry
+                .providers()
+                .find(|p| p.id().0.as_ref().eq_ignore_ascii_case(provider_id_str))
+        });
+
+        if let Some(provider) = provider {
             // The model ID after the prefix may itself contain a `/` (e.g.
             // "anthropic/claude-sonnet-4.5" under provider "OR"). Search the
             // provider's models for a match on id or telemetry_id.
