@@ -415,16 +415,14 @@ impl ManifestExecutor {
         let mut steps = manifest.steps.clone();
         steps.sort_by_key(|s| s.ordinal);
 
-        let max_iterations = if manifest.convergence.max_iterations == 0 {
-            1 // single-pass for one-shot manifests
-        } else {
-            manifest.convergence.max_iterations
-        };
-        let threshold = manifest.convergence.threshold;
-        let field = manifest.convergence.convergence_field.clone();
-        let improvement_enabled = manifest.convergence.improvement_ratio > 0.0;
-        let min_iterations = manifest.convergence.min_iterations;
-        let mut baseline_quality: Option<f64> = None; // captured on first pass
+        // Unified convergence tracking (extracted to `convergence.rs`).
+        // Replaces 5 `let` locals (max_iterations, threshold, field,
+        // improvement_enabled, min_iterations, baseline_quality) with one tracker.
+        let mut convergence = ConvergenceTracker::new(&manifest.convergence);
+        let max_iterations = convergence.max_iterations();
+        let threshold = convergence.threshold();
+        let field = convergence.field().to_string();
+        let improvement_enabled = convergence.improvement_enabled();
         let mut iteration: u32 = 0;
         let mut recursion_depth: u8 = 0;
         let matryoshka_limit: u8 = hkask_capability::SYSTEM_MAX_RECURSION;
@@ -440,24 +438,15 @@ impl ManifestExecutor {
         // None inherits the manifest behavior.
         let manifest_fusion_config = manifest.fusion.clone();
 
-        context.insert(
-            "_convergence".to_string(),
-            serde_json::json!({
-                "threshold": threshold,
-                "max_iterations": max_iterations,
-                "field": field,
-                "status": "running",
-                "iterations_completed": 0,
-                "exit_reason": null,
-                "improvement_target": manifest.convergence.improvement_ratio,
-                "baseline_quality": null,
-                "gas_cap": budget.snapshot().gas_cap,
-                "gas_used": 0,
-                "gas_remaining": budget.snapshot().gas_cap,
-                "rjoule_cap": budget.snapshot().rjoule_cap,
-                "rjoule_used": 0.0,
-                "rjoule_remaining": budget.snapshot().rjoule_cap,
-            }),
+        // Initial convergence context (status: running, iteration 0).
+        let snap = budget.snapshot();
+        convergence.inject_running(
+            &mut context,
+            0,
+            snap.gas_used,
+            snap.gas_cap,
+            snap.rjoule_used,
+            snap.rjoule_cap,
         );
 
         let mut step_idx: usize = 0;
@@ -466,24 +455,13 @@ impl ManifestExecutor {
             iteration += 1;
             // Update live convergence context for template awareness
             let snap = budget.snapshot();
-            context.insert(
-                "_convergence".to_string(),
-                serde_json::json!({
-                    "threshold": threshold,
-                    "max_iterations": max_iterations,
-                    "field": field,
-                    "status": "running",
-                    "iterations_completed": iteration,
-                    "exit_reason": null,
-                    "improvement_target": manifest.convergence.improvement_ratio,
-                    "baseline_quality": baseline_quality,
-                    "gas_cap": snap.gas_cap,
-                    "gas_used": snap.gas_used,
-                    "gas_remaining": snap.gas_remaining,
-                    "rjoule_cap": snap.rjoule_cap,
-                    "rjoule_used": snap.rjoule_used,
-                    "rjoule_remaining": snap.rjoule_remaining,
-                }),
+            convergence.inject_running(
+                &mut context,
+                iteration,
+                snap.gas_used,
+                snap.gas_cap,
+                snap.rjoule_used,
+                snap.rjoule_cap,
             );
 
             while step_idx < steps.len() {
@@ -542,15 +520,16 @@ impl ManifestExecutor {
                             reason = "abort action",
                             "REG"
                         );
-                        self.finalize_convergence_report(
+                        let snap = budget.snapshot();
+                        convergence.finalize_report(
                             &mut context,
-                            "converged",
+                            ConvergenceStatus::Converged,
                             "quality_met",
                             iteration,
-                            threshold,
-                            &field,
-                            baseline_quality,
-                            manifest.convergence.improvement_ratio,
+                            snap.gas_used,
+                            snap.gas_cap,
+                            snap.rjoule_used,
+                            snap.rjoule_cap,
                         );
                         break 'cascade;
                     }
@@ -564,15 +543,16 @@ impl ManifestExecutor {
                             reason = %reason,
                             "REG"
                         );
-                        self.finalize_convergence_report(
+                        let snap = budget.snapshot();
+                        convergence.finalize_report(
                             &mut context,
-                            "escalated",
+                            ConvergenceStatus::Escalated,
                             "obstacle_blocked",
                             iteration,
-                            threshold,
-                            &field,
-                            baseline_quality,
-                            manifest.convergence.improvement_ratio,
+                            snap.gas_used,
+                            snap.gas_cap,
+                            snap.rjoule_used,
+                            snap.rjoule_cap,
                         );
                         return Err(TemplateError::Manifest(format!(
                             "Cascade escalated at step {}: {}",
@@ -832,32 +812,30 @@ impl ManifestExecutor {
 
             // Check gas exhaustion at end of pass
             if let Some(_exhausted) = budget.check_exhausted(iteration) {
-                self.finalize_convergence_report(
+                let snap = budget.snapshot();
+                convergence.finalize_report(
                     &mut context,
-                    "maxed_out",
+                    ConvergenceStatus::MaxedOut,
                     "energy_spent",
                     iteration,
-                    threshold,
-                    &field,
-                    baseline_quality,
-                    manifest.convergence.improvement_ratio,
+                    snap.gas_used,
+                    snap.gas_cap,
+                    snap.rjoule_used,
+                    snap.rjoule_cap,
                 );
                 break 'cascade;
             }
 
             // Capture baseline quality on first full pass
-            if improvement_enabled && baseline_quality.is_none() {
-                baseline_quality = context
-                    .get(&field)
-                    .and_then(|v| v.as_f64())
-                    .or_else(|| resolve_dot_path(&field, &context).and_then(|v| v.as_f64()));
+            if improvement_enabled {
+                convergence.capture_baseline(&context);
             }
 
             // Compute compound quality from nested skill reports
             if manifest.convergence.aggregation != "none"
                 && !manifest.convergence.aggregation_sources.is_empty()
             {
-                let compound = self.compute_compound_quality(
+                let compound = convergence.compute_compound_quality(
                     &context,
                     &manifest.convergence.aggregation,
                     &manifest.convergence.aggregation_sources,
@@ -867,15 +845,16 @@ impl ManifestExecutor {
 
             // ── End of pass: check convergence if no explicit loop/abort ──
             if iteration >= max_iterations {
-                self.finalize_convergence_report(
+                let snap = budget.snapshot();
+                convergence.finalize_report(
                     &mut context,
-                    "maxed_out",
+                    ConvergenceStatus::MaxedOut,
                     "energy_spent",
                     iteration,
-                    threshold,
-                    &field,
-                    baseline_quality,
-                    manifest.convergence.improvement_ratio,
+                    snap.gas_used,
+                    snap.gas_cap,
+                    snap.rjoule_used,
+                    snap.rjoule_cap,
                 );
                 // Honor on_not_reached: if "escalate", emit span and return error
                 // instead of silently exiting. This makes the convergence contract
@@ -895,25 +874,17 @@ impl ManifestExecutor {
                 break 'cascade;
             }
 
-            if self.check_convergence(
-                &context,
-                &manifest.convergence.convergence_field,
-                threshold,
-                manifest.convergence.improvement_ratio,
-                &manifest.convergence.improvement_gate,
-                baseline_quality,
-                iteration,
-                min_iterations,
-            ) {
-                self.finalize_convergence_report(
+            if convergence.check_met(&context, iteration) {
+                let snap = budget.snapshot();
+                convergence.finalize_report(
                     &mut context,
-                    "converged",
+                    ConvergenceStatus::Converged,
                     "quality_met",
                     iteration,
-                    threshold,
-                    &field,
-                    baseline_quality,
-                    manifest.convergence.improvement_ratio,
+                    snap.gas_used,
+                    snap.gas_cap,
+                    snap.rjoule_used,
+                    snap.rjoule_cap,
                 );
                 break 'cascade;
             }
@@ -921,15 +892,16 @@ impl ManifestExecutor {
             // Implicit loop: re-enter from step 0
             recursion_depth += 1;
             if recursion_depth > matryoshka_limit {
-                self.finalize_convergence_report(
+                let snap = budget.snapshot();
+                convergence.finalize_report(
                     &mut context,
-                    "maxed_out",
+                    ConvergenceStatus::MaxedOut,
                     "energy_spent",
                     iteration,
-                    threshold,
-                    &field,
-                    baseline_quality,
-                    manifest.convergence.improvement_ratio,
+                    snap.gas_used,
+                    snap.gas_cap,
+                    snap.rjoule_used,
+                    snap.rjoule_cap,
                 );
                 return Err(TemplateError::Manifest(format!(
                     "Matryoshka depth limit ({}) exceeded at iteration {}",
@@ -943,119 +915,6 @@ impl ManifestExecutor {
             Value::Number(recursion_depth.into()),
         );
         Ok(context)
-    }
-
-    /// Finalize the convergence report at cascade exit.
-    /// Writes a complete report with status, reason, iterations, quality at exit, threshold, field,
-    /// and improvement metadata (baseline_quality, improvement_ratio, improvement_pct).
-    #[allow(clippy::too_many_arguments)]
-    fn finalize_convergence_report(
-        &self,
-        context: &mut HashMap<String, Value>,
-        status: &str,
-        reason: &str,
-        iteration: u32,
-        threshold: f64,
-        field: &str,
-        baseline_quality: Option<f64>,
-        improvement_target: f64,
-    ) {
-        let quality = context
-            .get(field)
-            .and_then(|v| v.as_f64())
-            .or_else(|| resolve_dot_path(field, context).and_then(|v| v.as_f64()));
-
-        let gas_used_val = context
-            .get("_gas")
-            .and_then(|g| g.get("used"))
-            .and_then(|v| v.as_u64())
-            .map(|v| v as f64)
-            .unwrap_or(0.0);
-        let gas_cap_val = context
-            .get("_gas")
-            .and_then(|g| g.get("cap"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        context.insert(
-            "_convergence".to_string(),
-            serde_json::json!({
-                "status": status,
-                "reason": reason,
-                "iterations_completed": iteration,
-                "quality_at_exit": quality,
-                "threshold": threshold,
-                "field": field,
-                "improvement_achieved": baseline_quality.and_then(|b| quality.map(|q| if b > 0.0 { (b - q) / b } else { 0.0 })),
-                "improvement_pct": baseline_quality.and_then(|b| quality.map(|q| if b > 0.0 { ((b - q) / b) * 100.0 } else { 0.0 })),
-                "improvement_target": improvement_target,
-                "baseline_quality": baseline_quality,
-                "gas_used": gas_used_val,
-                "gas_cap": gas_cap_val,
-                "gas_remaining": (gas_cap_val - gas_used_val).max(0.0),
-                "gas_pct": if gas_cap_val > 0.0 { (gas_used_val / gas_cap_val) * 100.0 } else { 0.0 },
-                "rjoule_used": context.get("_rjoule").and_then(|g| g.get("used")).and_then(|v| v.as_f64()).unwrap_or(0.0),
-                "rjoule_cap": context.get("_rjoule").and_then(|g| g.get("cap")).and_then(|v| v.as_f64()).unwrap_or(0.0),
-            }),
-        );
-    }
-
-    /// Check whether the convergence threshold has been met.
-    /// Looks for the configured `convergence_field` in the context (defaults to "composite").
-    /// Also enforces improvement tracking: min_iterations, improvement_ratio, and improvement_gate.
-    #[allow(clippy::too_many_arguments)]
-    fn check_convergence(
-        &self,
-        context: &HashMap<String, Value>,
-        field: &str,
-        threshold: f64,
-        improvement_ratio: f64,
-        improvement_gate: &str,
-        baseline_quality: Option<f64>,
-        iteration: u32,
-        min_iterations: u32,
-    ) -> bool {
-        // Enforce minimum iterations before exit is allowed
-        if iteration <= min_iterations {
-            return false;
-        }
-
-        // Compute current quality and threshold check
-        let current = context
-            .get(field)
-            .and_then(|v| v.as_f64())
-            .or_else(|| resolve_dot_path(field, context).and_then(|v| v.as_f64()));
-
-        // Fallback: also check the composite score when a specific field is configured
-        let current = if current.is_none() && field != "composite" {
-            context.get("composite").and_then(|v| v.as_f64())
-        } else {
-            current
-        };
-
-        // Check convergence metadata as additional fallback
-        let current = if current.is_none() {
-            context.get("_convergence_score").and_then(|v| v.as_f64())
-        } else {
-            current
-        };
-
-        let threshold_met = current.map(|q| q <= threshold).unwrap_or(false);
-
-        // Compute improvement from baseline as proportional ratio
-        let improvement_met = if improvement_ratio > 0.0 {
-            match (baseline_quality, current) {
-                (Some(b), Some(c)) if b > 0.0 => ((b - c) / b) >= improvement_ratio,
-                _ => false,
-            }
-        } else {
-            false
-        };
-
-        match improvement_gate {
-            "both" => threshold_met && improvement_met,
-            "either" => threshold_met || improvement_met,
-            _ => threshold_met, // "threshold_only"
-        }
     }
 
     /// Evaluate a `choice` step's condition against the context.
