@@ -204,7 +204,7 @@ pub fn spawn_drain(queue: &mut SkillVisibilityQueue, cx: &mut Context<SettingsWi
 
     // Gather the skills to publish/unpublish from the SkillIndex on the
     // foreground thread (SkillIndex is a GPUI global, not Send).
-    let skill_index = cx.try_global::<SkillIndex>().unwrap_or_default();
+    let skill_index = cx.try_global::<SkillIndex>().cloned().unwrap_or_default();
     let app_state = workspace::AppState::global(cx);
     let fs = app_state.fs.clone();
     let http_client = app_state.client.http_client();
