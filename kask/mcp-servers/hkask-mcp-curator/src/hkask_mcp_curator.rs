@@ -16,8 +16,6 @@ pub mod governance;
 use hkask_mcp_server::server::{McpToolError, execute_tool};
 use hkask_storage::database::sqlite::SqliteDriver;
 
-use crate::governance;
-
 use hkask_types::WebID;
 use hkask_types::event::RegulationSink;
 use hkask_types::regulation::RegulationSpan;
