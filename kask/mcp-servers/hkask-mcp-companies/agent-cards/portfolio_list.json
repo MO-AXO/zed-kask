@@ -1,0 +1,11 @@
+{
+  "name": "portfolio_list",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_ledger",
+  "description": "List all portfolios.",
+  "parameters": {
+    "type": "object",
+    "required": [],
+    "properties": {}
+  }
+}

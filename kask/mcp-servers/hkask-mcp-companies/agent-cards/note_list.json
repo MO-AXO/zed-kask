@@ -1,0 +1,17 @@
+{
+  "name": "note_list",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_ledger",
+  "description": "List notes for a symbol, optionally filtered by date range or tags.",
+  "parameters": {
+    "type": "object",
+    "required": ["portfolio", "symbol"],
+    "properties": {
+      "portfolio": { "type": "string" },
+      "symbol": { "type": "string", "description": "Ticker symbol." },
+      "date_from": { "type": "string", "description": "YYYY-MM-DD." },
+      "date_to": { "type": "string", "description": "YYYY-MM-DD." },
+      "tags": { "type": "array", "items": { "type": "string" } }
+    }
+  }
+}

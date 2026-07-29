@@ -1,0 +1,15 @@
+{
+  "name": "portfolio_attribution",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_analytics_and_dcf",
+  "description": "Rank position contributions to portfolio movement — each position's weight, return, and contribution.",
+  "parameters": {
+    "type": "object",
+    "required": ["portfolio", "from", "to"],
+    "properties": {
+      "portfolio": { "type": "string", "description": "Portfolio name" },
+      "from": { "type": "string", "description": "Start date (YYYY-MM-DD)" },
+      "to": { "type": "string", "description": "End date (YYYY-MM-DD)" }
+    }
+  }
+}

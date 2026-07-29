@@ -1,0 +1,30 @@
+{
+  "name": "monte_carlo_dcf",
+  "server": "hkask-mcp-companies",
+  "group": "valuation_and_forecasting",
+  "description": "Simulate DCF assumptions and return an intrinsic-value distribution. Runs N simulations (default 1000, clamped 100–10000). Returns percentiles p10/p25/median/p75/p90, histogram, probability of undervaluation, and base case comparison.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "stage1_years": { "type": "integer" },
+      "stage2_years": { "type": "integer" },
+      "discount_rate": { "type": "number" },
+      "terminal_growth": { "type": "number" },
+      "revenue_growth": { "type": "number" },
+      "gross_margin": { "type": "number" },
+      "da_to_revenue": { "type": "number" },
+      "capex_to_revenue": { "type": "number" },
+      "nwc_to_revenue": { "type": "number" },
+      "tax_rate": { "type": "number" },
+      "simulations": { "type": "integer", "description": "Number of simulations. Default 1000, clamped 100–10000." },
+      "range_revenue_growth": { "type": "number", "description": "±range for revenue growth. Default 0.03." },
+      "range_gross_margin": { "type": "number", "description": "±range for gross margin. Default 0.03." },
+      "range_da": { "type": "number", "description": "±range for D&A. Default 0.01." },
+      "range_capex": { "type": "number", "description": "±range for capex. Default 0.01." },
+      "range_nwc": { "type": "number", "description": "±range for NWC. Default 0.03." },
+      "range_discount_rate": { "type": "number", "description": "±range for discount rate. Default 0.01." }
+    }
+  }
+}

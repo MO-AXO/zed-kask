@@ -1,0 +1,13 @@
+{
+  "name": "note_delete",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_ledger",
+  "description": "Delete a note by ID.",
+  "parameters": {
+    "type": "object",
+    "required": ["note_id"],
+    "properties": {
+      "note_id": { "type": "string" }
+    }
+  }
+}

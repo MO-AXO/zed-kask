@@ -1,0 +1,15 @@
+{
+  "name": "portfolio_characteristics",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_analytics_and_dcf",
+  "description": "Calculate weighted-average portfolio valuation, profitability, leverage, growth, and composition.",
+  "parameters": {
+    "type": "object",
+    "required": ["portfolio", "date"],
+    "properties": {
+      "portfolio": { "type": "string", "description": "Portfolio name" },
+      "date": { "type": "string", "description": "As-of date (YYYY-MM-DD)" },
+      "aggregation": { "type": "string", "enum": ["weighted_arithmetic", "weighted_harmonic", "weighted_median", "winsorized"], "description": "Aggregation method. Defaults to weighted_arithmetic." }
+    }
+  }
+}

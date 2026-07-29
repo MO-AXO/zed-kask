@@ -1,0 +1,14 @@
+{
+  "name": "research_search",
+  "server": "hkask-mcp-companies",
+  "group": "analysis_and_research",
+  "description": "Search Exa, Tavily, and Brave for company-specific fundamental-research claims. Returns raw claims with source URLs.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol", "query"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "query": { "type": "string", "description": "Research query. Example: 'management guidance 2025', 'competition market share'" }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "ledger_export",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_ledger",
+  "description": "Export a portfolio ledger as CSV or JSON.",
+  "parameters": {
+    "type": "object",
+    "required": ["portfolio", "format"],
+    "properties": {
+      "portfolio": { "type": "string", "description": "Portfolio name." },
+      "format": { "type": "string", "enum": ["csv", "json"], "description": "Export format." }
+    }
+  }
+}

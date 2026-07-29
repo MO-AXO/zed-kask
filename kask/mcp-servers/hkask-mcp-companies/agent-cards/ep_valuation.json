@@ -1,0 +1,18 @@
+{
+  "name": "ep_valuation",
+  "server": "hkask-mcp-companies",
+  "group": "economic_profit_and_expectations",
+  "description": "Value a company as Book Value + PV(Future Economic Profits) with competitive fade (Bergen et al. 2025, FAJ). Economic Profit = (ROIC − WACC) × Invested Capital. The IVM ratio (Intrinsic Value / Market Cap) is the primary screening metric.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "wacc": { "type": "number", "description": "Discount rate / WACC. Range 0.0–0.30. Default 0.10." },
+      "ic_growth_rate": { "type": "number", "description": "Invested capital growth rate. Range 0.0–0.30. Default 0.0." },
+      "moat_override": { "type": "string", "description": "Direct fade horizon override." },
+      "moat_result": { "type": "string", "description": "Moat classification from moat_check. Used when moat_override absent." },
+      "stage1_years": { "type": "integer", "description": "Hold current EP constant before fade. Range 1–5. Default 3." }
+    }
+  }
+}

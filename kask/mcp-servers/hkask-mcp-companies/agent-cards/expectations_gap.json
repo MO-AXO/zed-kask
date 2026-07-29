@@ -1,0 +1,14 @@
+{
+  "name": "expectations_gap",
+  "server": "hkask-mcp-companies",
+  "group": "economic_profit_and_expectations",
+  "description": "Compare market-implied growth (reverse DCF) vs management guidance vs your own estimate (Mauboussin's Expectations Investing). Produces a structured gap report.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "growth_estimate": { "type": "number", "description": "Your estimate of sustainable revenue growth. Range 0.0–1.0. Default 0.05." }
+    }
+  }
+}

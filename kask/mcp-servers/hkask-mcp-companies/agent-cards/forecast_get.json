@@ -1,0 +1,13 @@
+{
+  "name": "forecast_get",
+  "server": "hkask-mcp-companies",
+  "group": "valuation_and_forecasting",
+  "description": "Retrieve one durable forecast and its recorded outcomes for the authenticated owner.",
+  "parameters": {
+    "type": "object",
+    "required": ["forecast_id"],
+    "properties": {
+      "forecast_id": { "type": "string", "description": "UUID from dcf_valuation or calibrate_forecast." }
+    }
+  }
+}

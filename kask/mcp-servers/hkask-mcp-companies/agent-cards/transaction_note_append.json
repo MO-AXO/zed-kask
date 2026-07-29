@@ -1,0 +1,15 @@
+{
+  "name": "transaction_note_append",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_ledger",
+  "description": "Append a note to an existing transaction.",
+  "parameters": {
+    "type": "object",
+    "required": ["portfolio", "tx_id", "note"],
+    "properties": {
+      "portfolio": { "type": "string", "description": "Portfolio name." },
+      "tx_id": { "type": "string", "description": "Transaction ID." },
+      "note": { "type": "string", "description": "Note text to append." }
+    }
+  }
+}

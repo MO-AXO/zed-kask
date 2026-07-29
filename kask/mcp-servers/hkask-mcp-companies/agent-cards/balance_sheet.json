@@ -1,0 +1,14 @@
+{
+  "name": "balance_sheet",
+  "server": "hkask-mcp-companies",
+  "group": "financial_data",
+  "description": "Get a balance sheet.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "limit": { "type": "integer", "description": "Number of periods to return. Defaults to 5." }
+    }
+  }
+}

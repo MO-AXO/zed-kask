@@ -1,0 +1,24 @@
+{
+  "name": "dcf_valuation",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_analytics_and_dcf",
+  "description": "Build a two-stage DCF valuation. Projects 11 line items per period to derive FCF, discounts back to intrinsic equity per share. Returns a forecast_id for later decomposition. Default: 10yr model, 3yr stage 1, 7yr stage 2, 10% WACC, 2.5% terminal growth.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "revision_of": { "type": "string", "description": "Parent forecast ID for same-symbol revision." },
+      "stage1_years": { "type": "integer", "description": "Stage 1 years. Range 1–3. Default 3." },
+      "stage2_years": { "type": "integer", "description": "Stage 2 years. Range 2–7. Default 7." },
+      "discount_rate": { "type": "number", "description": "WACC. Range 0.05–0.30. Default 0.10." },
+      "terminal_growth": { "type": "number", "description": "Terminal growth rate. Range 0.00–0.10. Default 0.025." },
+      "revenue_growth": { "type": "number", "description": "Revenue growth override. Range -0.50–1.00. Calibrated from history if omitted." },
+      "gross_margin": { "type": "number", "description": "Gross margin override. Range 0.05–0.95." },
+      "da_to_revenue": { "type": "number", "description": "D&A as % of revenue override. Range 0.00–0.20." },
+      "capex_to_revenue": { "type": "number", "description": "Capex as % of revenue override. Range 0.00–0.30." },
+      "nwc_to_revenue": { "type": "number", "description": "Net working capital as % of revenue override. Range -0.20–0.50." },
+      "tax_rate": { "type": "number", "description": "Tax rate override. Range 0.00–1.00." }
+    }
+  }
+}

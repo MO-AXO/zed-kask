@@ -1,0 +1,13 @@
+{
+  "name": "moat_check",
+  "server": "hkask-mcp-companies",
+  "group": "analysis_and_research",
+  "description": "Analyze competitive moat through gross-margin stability and working-capital market-power signals (MAIA framework). Fetches 10 years of key metrics.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "symbol_search",
+  "server": "hkask-mcp-companies",
+  "group": "financial_data",
+  "description": "Search for symbols. Routes FMP first then EODHD.",
+  "parameters": {
+    "type": "object",
+    "required": ["query"],
+    "properties": {
+      "query": { "type": "string", "description": "Search query. Must be non-empty." },
+      "limit": { "type": "integer", "description": "Max results. Defaults to 10." }
+    }
+  }
+}

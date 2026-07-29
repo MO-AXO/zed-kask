@@ -1,0 +1,13 @@
+{
+  "name": "company_profile",
+  "server": "hkask-mcp-companies",
+  "group": "financial_data",
+  "description": "Get a company profile.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" }
+    }
+  }
+}

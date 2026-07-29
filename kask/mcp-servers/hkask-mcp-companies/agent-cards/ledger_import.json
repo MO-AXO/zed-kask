@@ -1,0 +1,15 @@
+{
+  "name": "ledger_import",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_ledger",
+  "description": "Import CSV or JSON transactions into a portfolio ledger. Portfolio is auto-created if it doesn't exist.",
+  "parameters": {
+    "type": "object",
+    "required": ["portfolio", "format", "data"],
+    "properties": {
+      "portfolio": { "type": "string", "description": "Portfolio name." },
+      "format": { "type": "string", "enum": ["csv", "json"], "description": "Import format." },
+      "data": { "type": "string", "description": "Raw CSV or JSON content." }
+    }
+  }
+}

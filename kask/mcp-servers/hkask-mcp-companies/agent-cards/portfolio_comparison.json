@@ -1,0 +1,14 @@
+{
+  "name": "portfolio_comparison",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_ledger",
+  "description": "Compare two portfolios' positions, overlap, and unique symbols.",
+  "parameters": {
+    "type": "object",
+    "required": ["portfolio_a", "portfolio_b"],
+    "properties": {
+      "portfolio_a": { "type": "string", "description": "First portfolio name." },
+      "portfolio_b": { "type": "string", "description": "Second portfolio name." }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "file_list",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_ledger",
+  "description": "List a portfolio's attached files for a symbol.",
+  "parameters": {
+    "type": "object",
+    "required": ["portfolio", "symbol"],
+    "properties": {
+      "portfolio": { "type": "string" },
+      "symbol": { "type": "string", "description": "Ticker symbol." }
+    }
+  }
+}

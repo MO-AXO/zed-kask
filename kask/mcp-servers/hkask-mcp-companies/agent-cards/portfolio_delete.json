@@ -1,0 +1,13 @@
+{
+  "name": "portfolio_delete",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_ledger",
+  "description": "Delete a portfolio and all its data.",
+  "parameters": {
+    "type": "object",
+    "required": ["name"],
+    "properties": {
+      "name": { "type": "string", "description": "Portfolio name." }
+    }
+  }
+}

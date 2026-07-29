@@ -1,0 +1,24 @@
+{
+  "name": "sensitivity_analysis",
+  "server": "hkask-mcp-companies",
+  "group": "valuation_and_forecasting",
+  "description": "Rank DCF inputs by their effect on intrinsic value (tornado chart). Varies each driver by ±range_pct while holding others constant.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "stage1_years": { "type": "integer" },
+      "stage2_years": { "type": "integer" },
+      "discount_rate": { "type": "number" },
+      "terminal_growth": { "type": "number" },
+      "revenue_growth": { "type": "number", "description": "Base value override." },
+      "gross_margin": { "type": "number" },
+      "da_to_revenue": { "type": "number" },
+      "capex_to_revenue": { "type": "number" },
+      "nwc_to_revenue": { "type": "number" },
+      "tax_rate": { "type": "number" },
+      "range_pct": { "type": "number", "description": "±variation per driver. Default 0.10 (10%)." }
+    }
+  }
+}

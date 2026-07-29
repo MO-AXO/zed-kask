@@ -1,0 +1,15 @@
+{
+  "name": "company_screener",
+  "server": "hkask-mcp-companies",
+  "group": "analysis_and_research",
+  "description": "Screen companies from natural-language criteria using the FMP stock screener. Supports filtering by market cap, price, volume, P/E ratio, dividend yield, beta, sector, industry, country, exchange, ROE, ROIC, and more.",
+  "parameters": {
+    "type": "object",
+    "required": ["prompt"],
+    "properties": {
+      "prompt": { "type": "string", "description": "Natural language screening query. Example: 'large cap tech stocks with pe under 20'" },
+      "limit": { "type": "integer", "description": "Max results. Defaults to 20." },
+      "criteria_overrides": { "type": "object", "description": "Direct field overrides bypassing prompt parsing." }
+    }
+  }
+}

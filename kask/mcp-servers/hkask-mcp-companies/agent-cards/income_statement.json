@@ -1,0 +1,14 @@
+{
+  "name": "income_statement",
+  "server": "hkask-mcp-companies",
+  "group": "financial_data",
+  "description": "Get an income statement.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "limit": { "type": "integer", "description": "Number of periods to return. Defaults to 5." }
+    }
+  }
+}

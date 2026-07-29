@@ -1,0 +1,16 @@
+{
+  "name": "comparable_analysis",
+  "server": "hkask-mcp-companies",
+  "group": "valuation_and_forecasting",
+  "description": "Compare peer valuation multiples (P/E, P/B, P/S, EV/EBITDA) with a DCF overlay for the target company.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "peers": { "type": "string", "description": "Comma-separated peer ticker symbols." },
+      "discount_rate": { "type": "number", "description": "WACC. Range 0.05–0.30. Default 0.10." },
+      "terminal_growth": { "type": "number", "description": "Terminal growth rate. Range 0.00–0.10. Default 0.025." }
+    }
+  }
+}

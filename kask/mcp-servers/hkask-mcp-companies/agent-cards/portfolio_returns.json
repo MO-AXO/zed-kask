@@ -1,0 +1,15 @@
+{
+  "name": "portfolio_returns",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_ledger",
+  "description": "Calculate time-weighted and money-weighted returns for a date range.",
+  "parameters": {
+    "type": "object",
+    "required": ["portfolio", "from", "to"],
+    "properties": {
+      "portfolio": { "type": "string", "description": "Portfolio name." },
+      "from": { "type": "string", "description": "Start date (YYYY-MM-DD)." },
+      "to": { "type": "string", "description": "End date (YYYY-MM-DD)." }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "file_attach",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_ledger",
+  "description": "Attach a base64-encoded file to a company or security.",
+  "parameters": {
+    "type": "object",
+    "required": ["portfolio", "symbol", "date", "filename", "mime_type", "data"],
+    "properties": {
+      "portfolio": { "type": "string" },
+      "symbol": { "type": "string", "description": "Ticker symbol." },
+      "date": { "type": "string", "description": "YYYY-MM-DD." },
+      "filename": { "type": "string" },
+      "mime_type": { "type": "string" },
+      "data": { "type": "string", "description": "Base64-encoded file content." },
+      "notes": { "type": "string", "description": "Optional notes." }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "reverse_dcf",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_analytics_and_dcf",
+  "description": "Solve for the revenue growth rate implied by the current market price (Mauboussin's Expectations Investing). Default: 10yr model, 3yr stage 1, 7yr stage 2, 10% WACC.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "stage1_years": { "type": "integer", "description": "Stage 1 years. Range 1–3. Default 3." },
+      "stage2_years": { "type": "integer", "description": "Stage 2 years. Range 2–7. Default 7." },
+      "discount_rate": { "type": "number", "description": "WACC. Range 0.0–0.30. Default 0.10." },
+      "terminal_growth": { "type": "number", "description": "Terminal growth rate. Range 0.0–0.10. Default 0.025." }
+    }
+  }
+}

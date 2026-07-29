@@ -1,0 +1,13 @@
+{
+  "name": "stock_quote",
+  "server": "hkask-mcp-companies",
+  "group": "financial_data",
+  "description": "Get a stock quote.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" }
+    }
+  }
+}

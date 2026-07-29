@@ -1,0 +1,15 @@
+{
+  "name": "historical_price",
+  "server": "hkask-mcp-companies",
+  "group": "financial_data",
+  "description": "Get historical price data.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol", "from", "to"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "from": { "type": "string", "description": "Start date (YYYY-MM-DD)" },
+      "to": { "type": "string", "description": "End date (YYYY-MM-DD)" }
+    }
+  }
+}

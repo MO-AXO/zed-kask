@@ -1,0 +1,13 @@
+{
+  "name": "file_delete",
+  "server": "hkask-mcp-companies",
+  "group": "portfolio_ledger",
+  "description": "Delete an attached file by ID — removes record and file from disk.",
+  "parameters": {
+    "type": "object",
+    "required": ["file_id"],
+    "properties": {
+      "file_id": { "type": "string" }
+    }
+  }
+}

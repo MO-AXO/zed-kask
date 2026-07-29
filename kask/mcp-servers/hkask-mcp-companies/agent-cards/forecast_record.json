@@ -1,0 +1,21 @@
+{
+  "name": "forecast_record",
+  "server": "hkask-mcp-companies",
+  "group": "valuation_and_forecasting",
+  "description": "Record a forecast outcome, compute Brier scores, and optionally decompose the return gap into 7 drivers (revenue growth, gross margin, D&A, capex, NWC, multiple expansion, net debt) when forecast_id is provided.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol", "forecast_date", "horizon", "forecast_multiple", "forecast_price_change", "outcome_date", "actual_multiple", "actual_price_change"],
+    "properties": {
+      "symbol": { "type": "string" },
+      "forecast_date": { "type": "string", "description": "YYYY-MM-DD" },
+      "horizon": { "type": "string", "enum": ["3mo", "6mo", "1yr", "2yr", "3yr"] },
+      "forecast_multiple": { "type": "number", "description": "Forecast valuation multiple (e.g. P/E)." },
+      "forecast_price_change": { "type": "number", "description": "Forecast return (e.g. 0.10 = 10%)." },
+      "outcome_date": { "type": "string", "description": "YYYY-MM-DD" },
+      "actual_multiple": { "type": "number", "description": "Actual valuation multiple at outcome date." },
+      "actual_price_change": { "type": "number", "description": "Actual price change." },
+      "forecast_id": { "type": "string", "description": "Links to stored projection model for decomposition." }
+    }
+  }
+}

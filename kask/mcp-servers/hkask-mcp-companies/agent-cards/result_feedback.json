@@ -1,0 +1,16 @@
+{
+  "name": "result_feedback",
+  "server": "hkask-mcp-companies",
+  "group": "valuation_and_forecasting",
+  "description": "Rate a previous tool result on a 1–5 scale to feed the provider-learning loop. Score: 5 = exceeded expectations, 3 = met expectations, 1 = completely missed.",
+  "parameters": {
+    "type": "object",
+    "required": ["tool", "query"],
+    "properties": {
+      "tool": { "type": "string", "description": "Which tool produced the result being rated." },
+      "query": { "type": "string", "description": "Symbol, portfolio name, or search query used." },
+      "score": { "type": "integer", "description": "Rating 1–5. Omit to leave comments-only." },
+      "comments": { "type": "string", "description": "Free-text feedback." }
+    }
+  }
+}

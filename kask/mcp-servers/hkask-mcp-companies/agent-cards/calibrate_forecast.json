@@ -1,0 +1,22 @@
+{
+  "name": "calibrate_forecast",
+  "server": "hkask-mcp-companies",
+  "group": "valuation_and_forecasting",
+  "description": "Calibrated superforecast anchored to Tetlock's GJP methodology. Runs Fermi decomposition on growth and margin estimates, applies outside/inside view adjustments, distributes probabilities across four Schwartz scenarios, and produces a probability-weighted intrinsic value.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "revision_of": { "type": "string", "description": "Parent forecast ID." },
+      "growth_estimate": { "type": "number", "description": "Revenue growth estimate 0.0–1.0. If omitted runs Fermi decomposition." },
+      "margin_estimate": { "type": "number", "description": "Profit margin estimate 0.0–1.0. If omitted runs Fermi." },
+      "reference_class": { "type": "string", "description": "Default: 'S&P 500 large-cap, 2015-2025'." },
+      "reference_count": { "type": "integer", "description": "N cases for outside-view calibration. Default 500." },
+      "stage1_years": { "type": "integer" },
+      "stage2_years": { "type": "integer" },
+      "discount_rate": { "type": "number" },
+      "terminal_growth": { "type": "number" }
+    }
+  }
+}

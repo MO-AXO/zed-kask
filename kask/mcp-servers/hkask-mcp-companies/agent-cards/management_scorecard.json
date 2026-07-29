@@ -1,0 +1,13 @@
+{
+  "name": "management_scorecard",
+  "server": "hkask-mcp-companies",
+  "group": "analysis_and_research",
+  "description": "Score CEO capital allocation against returns on capital and invested capital over time (MAIA framework).",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" }
+    }
+  }
+}

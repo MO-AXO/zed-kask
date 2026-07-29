@@ -1,0 +1,13 @@
+{
+  "name": "forecast_list",
+  "server": "hkask-mcp-companies",
+  "group": "valuation_and_forecasting",
+  "description": "List an authenticated owner's durable forecasts for a symbol.",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" }
+    }
+  }
+}

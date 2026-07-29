@@ -1,0 +1,14 @@
+{
+  "name": "working_capital_cycle",
+  "server": "hkask-mcp-companies",
+  "group": "analysis_and_research",
+  "description": "Analyze days payable, days sales outstanding, and cash-conversion cycle over time (MAIA CFO scorecard).",
+  "parameters": {
+    "type": "object",
+    "required": ["symbol"],
+    "properties": {
+      "symbol": { "type": "string", "description": "Ticker symbol" },
+      "limit": { "type": "integer", "description": "Number of periods. Defaults to 10, capped at 40." }
+    }
+  }
+}
