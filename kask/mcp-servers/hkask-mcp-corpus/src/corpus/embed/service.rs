@@ -8,7 +8,6 @@ use super::types::{
     CURATOR_PERSONA, CorpusConfig, DimensionCentroidResult, EmbedPhase, EmbedProgress, EmbedResult,
     ProgressFn,
 };
-use super::utils::strip_provider_prefix;
 use crate::corpus::embed::Entity;
 use crate::runtime::TripleExtraction;
 use hkask_memory::SemanticMemory;
@@ -365,7 +364,7 @@ impl EmbedService {
 
         let settings_model = hkask_services_core::HkaskSettings::load().classifier_model();
         if !settings_model.is_empty() {
-            classifier_config.model = strip_provider_prefix(&settings_model).to_string();
+            classifier_config.model = settings_model;
         }
 
         let texts: Vec<String> = all_passages.iter().map(|p| p.text.clone()).collect();
@@ -378,7 +377,8 @@ impl EmbedService {
         );
 
         let classify_results =
-            crate::runtime::classify_batch(&texts, classifier_config, None).await?;
+            crate::runtime::classify_batch(&texts, classifier_config, Arc::clone(&inference_port))
+                .await?;
 
         for (passage, result) in all_passages.iter_mut().zip(classify_results.iter()) {
             passage.section_type = result.category.clone();
@@ -479,10 +479,14 @@ impl EmbedService {
                     let settings_model = settings.classifier_model();
                     let mut model_config = classifier_config.clone();
                     if !settings_model.is_empty() {
-                        model_config.model = strip_provider_prefix(&settings_model).to_string();
+                        model_config.model = settings_model;
                     }
-                    let fallback =
-                        crate::runtime::extract_triples_batch(&texts, &model_config).await?;
+                    let fallback = crate::runtime::extract_triples_batch(
+                        &texts,
+                        &model_config,
+                        Arc::clone(&inference_port),
+                    )
+                    .await?;
                     extractions = fallback;
                 }
 
@@ -504,7 +508,7 @@ impl EmbedService {
                 let settings_model = settings.classifier_model();
                 let mut model_config = classifier_config.clone();
                 if !settings_model.is_empty() {
-                    model_config.model = strip_provider_prefix(&settings_model).to_string();
+                    model_config.model = settings_model;
                 }
 
                 tracing::info!(
@@ -513,8 +517,12 @@ impl EmbedService {
                     "Single-model h_mem extraction (no fusion configured)"
                 );
 
-                let a_extractions =
-                    crate::runtime::extract_triples_batch(&texts, &model_config).await?;
+                let a_extractions = crate::runtime::extract_triples_batch(
+                    &texts,
+                    &model_config,
+                    Arc::clone(&inference_port),
+                )
+                .await?;
 
                 for (passage, ext) in all_passages.iter_mut().zip(a_extractions.iter()) {
                     passage.semantic_triples = ext.clone();

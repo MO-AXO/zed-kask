@@ -3,14 +3,16 @@
 //! Classifier configs live in registry/classify/{name}.yaml.
 //! corpus.yaml references which one to use via the `classifier` field.
 //!
-//! Supports DeepInfra (OpenAI-compatible) with concurrent batch requests.
-//! Graceful degradation: no API key → all passages default to fallback category.
+//! Routes through zed's `LanguageModelRegistry` via `InferencePort::generate_with_model`,
+//! which forwards the provider-prefixed model string to the IPC bridge.
+//! Graceful degradation: no model resolved → all passages default to fallback category.
 
 use hkask_services_core::{DomainKind, ErrorKind, ServiceError};
 use hkask_types::InferencePort;
 use hkask_types::template::LLMParameters;
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::LazyLock;
 use std::time::Duration;
 
@@ -63,48 +65,6 @@ pub struct TripleExtraction {
     pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
-/// OpenAI-compatible chat completion response.
-#[derive(Debug, Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-    #[serde(default)]
-    usage: Option<Usage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Choice {
-    message: Message,
-}
-
-#[derive(Debug, Deserialize)]
-struct Message {
-    content: String,
-}
-
-/// Token usage from the API response, including cached token details.
-#[derive(Debug, Deserialize)]
-struct Usage {
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    /// Cached prompt tokens (DeepInfra, OpenRouter, Together).
-    /// Returns the number of input tokens served from cache at a discount.
-    #[serde(default)]
-    prompt_tokens_details: Option<PromptTokensDetails>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PromptTokensDetails {
-    #[serde(default)]
-    cached_tokens: u64,
-}
-
-/// Error response body that may still include usage data.
-#[derive(Debug, Deserialize)]
-struct ErrorResponse {
-    #[serde(default)]
-    usage: Option<Usage>,
-}
-
 /// Classifier configuration loaded from registry/classify/{name}.yaml.
 #[derive(Debug, Deserialize)]
 pub struct ClassifierYaml {
@@ -114,11 +74,12 @@ pub struct ClassifierYaml {
 #[derive(Debug, Deserialize)]
 pub struct ClassifierDef {
     pub name: String,
-    /// Provider-native model id sent to the classifier API. When empty,
-    /// `ClassifierConfig::from_def` resolves the canonical classifier model
-    /// via `HKASK_CLASSIFIER_MODEL` → `DEFAULT_CLASSIFIER_MODEL` and strips
-    /// the router prefix. Leave empty in `registry/classify/*.yaml` to defer
-    /// to the single canonical path.
+    /// Provider-prefixed model id (e.g. `DeepInfra/Qwen/Qwen3-235B-A22B-Instruct-2507`)
+    /// passed as `model_override` to `InferencePort::generate_with_model`, which
+    /// forwards it to zed's `LanguageModelRegistry` via the IPC bridge. When empty,
+    /// `ClassifierConfig::from_def` resolves the canonical classifier model via
+    /// `HKASK_CLASSIFIER_MODEL` → `DEFAULT_CLASSIFIER_MODEL`. Leave empty in
+    /// `registry/classify/*.yaml` to defer to the single canonical path.
     #[serde(default)]
     pub model: String,
     #[serde(default)]
@@ -403,12 +364,12 @@ async fn classify_one(
 ///
 /// \[P5\] Motivating: Essentialism — service-layer orchestration earns its existence; no raw domain logic.
 /// pre:  texts must be non-empty; config must have valid timeout and concurrency
-/// post: returns `Vec<ClassifyResult>` in input order; failed classifications fall back to config.fallback_category; all fallback if no API key
+/// post: returns `Vec<ClassifyResult>` in input order; failed classifications fall back to config.fallback_category; all fallback if no model resolved
 #[must_use = "result must be used"]
 pub async fn classify_batch(
     texts: &[String],
     config: ClassifierConfig,
-    inference_port: &dyn InferencePort,
+    inference_port: Arc<dyn InferencePort>,
 ) -> Result<Vec<ClassifyResult>, ServiceError> {
     // P9: Regulation span
     tracing::info!(target: "hkask.classify", operation = "classify_batch", item_count = texts.len(), "REG");
@@ -435,13 +396,14 @@ pub async fn classify_batch(
     let mut handles = Vec::with_capacity(texts.len());
 
     for (i, text) in texts.iter().enumerate() {
-        let cfg = config.clone();
+        let inference_port = Arc::clone(&inference_port);
+        let cfg = Arc::clone(&config);
         let text = text.clone();
-        let permit = semaphore.clone();
+        let permit = Arc::clone(&semaphore);
 
         handles.push(tokio::spawn(async move {
             let _permit = permit.acquire().await;
-            let result = classify_one(&cfg, &cfg, &text).await;
+            let result = classify_one(inference_port.as_ref(), &cfg, &text).await;
             (i, result)
         }));
     }
@@ -494,50 +456,38 @@ pub async fn classify_batch(
 ///
 /// Returns results in the same order as the input texts.
 /// Failed extractions default to empty TripleExtraction.
-/// Graceful degradation: no API key → all empty extractions.
+/// Graceful degradation: no model resolved → all empty extractions.
 ///
 /// \[P5\] Motivating: Essentialism — service-layer orchestration earns its existence; no raw domain logic.
 /// pre:  texts must be non-empty; config must have valid timeout and concurrency
-/// post: returns `Vec<TripleExtraction>` in input order; failed extractions fall back to empty; all empty if no API key
+/// post: returns `Vec<TripleExtraction>` in input order; failed extractions fall back to empty; all empty if no model resolved
 #[must_use = "result must be used"]
 pub async fn extract_triples_batch(
     texts: &[String],
     config: &ClassifierConfig,
+    inference_port: Arc<dyn InferencePort>,
 ) -> Result<Vec<TripleExtraction>, ServiceError> {
     // P9: Regulation span
     tracing::info!(target: "hkask.classify", operation = "extract_triples_batch", item_count = texts.len(), "REG");
 
-    if config.api_key.is_empty() {
-        tracing::info!("No API key for h_mem extraction — returning empty extractions");
+    if config.model.is_empty() {
+        tracing::info!("No model resolved for h_mem extraction — returning empty extractions");
         return Ok(texts.iter().map(|_| TripleExtraction::default()).collect());
     }
 
-    let client = Client::builder()
-        .timeout(config.timeout)
-        .build()
-        .map_err(|e| {
-            let msg = format!("HMem extractor client build error: {e}");
-            ServiceError::Domain {
-                domain: DomainKind::Wallet,
-                kind: ErrorKind::ServiceUnavailable,
-                source: None,
-                message: msg,
-            }
-        })?;
-
-    let config = std::sync::Arc::new(config.clone());
-    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(config.concurrency));
+    let config = Arc::new(config.clone());
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(config.concurrency));
     let mut handles = Vec::with_capacity(texts.len());
 
     for (i, text) in texts.iter().enumerate() {
-        let client = client.clone();
-        let cfg = config.clone();
+        let inference_port = Arc::clone(&inference_port);
+        let cfg = Arc::clone(&config);
         let text = text.clone();
-        let permit = semaphore.clone();
+        let permit = Arc::clone(&semaphore);
 
         handles.push(tokio::spawn(async move {
             let _permit = permit.acquire().await;
-            let result = extract_triples_one(&client, &cfg, &text).await;
+            let result = extract_triples_one(inference_port.as_ref(), &cfg, &text).await;
             (i, result)
         }));
     }
@@ -563,7 +513,7 @@ pub async fn extract_triples_batch(
 
 /// Extract h_mems from a single passage.
 async fn extract_triples_one(
-    client: &Client,
+    inference_port: &dyn InferencePort,
     config: &ClassifierConfig,
     text: &str,
 ) -> Result<TripleExtraction, ServiceError> {
@@ -573,25 +523,20 @@ async fn extract_triples_one(
         return Ok(TripleExtraction::default());
     }
 
-    let body = serde_json::json!({
-        "model": config.model,
-        "messages": [
-            {"role": "system", "content": config.system_prompt},
-            {"role": "user", "content": text}
-        ],
-        "temperature": config.temperature,
-        "max_tokens": config.max_tokens
-    });
+    let parameters = LLMParameters {
+        temperature: config.temperature as f32,
+        max_tokens: config.max_tokens,
+        top_p: 1.0,
+        top_k: 0,
+        system_prompt: Some(config.system_prompt.clone()),
+        ..Default::default()
+    };
 
-    let resp = client
-        .post(&config.base_url)
-        .header("Authorization", format!("Bearer {}", config.api_key))
-        .json(&body)
-        .timeout(config.timeout)
-        .send()
+    let result = inference_port
+        .generate_with_model(text, &parameters, Some(&config.model), None)
         .await
         .map_err(|e| {
-            let msg = format!("HMem extractor HTTP error: {e}");
+            let msg = format!("HMem extractor inference error: {e}");
             ServiceError::Domain {
                 domain: DomainKind::Wallet,
                 kind: ErrorKind::ServiceUnavailable,
@@ -600,35 +545,7 @@ async fn extract_triples_one(
             }
         })?;
 
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        return Err(ServiceError::Domain {
-            domain: DomainKind::Wallet,
-            kind: ErrorKind::ServiceUnavailable,
-            source: None,
-            message: format!(
-                "HMem extractor error {status}: {}",
-                body.chars().take(200).collect::<String>()
-            ),
-        });
-    }
-
-    let chat: ChatResponse = resp.json().await.map_err(|e| {
-        let msg = format!("HMem extractor JSON parse error: {e}");
-        ServiceError::Domain {
-            domain: DomainKind::Wallet,
-            kind: ErrorKind::ServiceUnavailable,
-            source: None,
-            message: msg,
-        }
-    })?;
-
-    let content = chat
-        .choices
-        .first()
-        .map(|c| c.message.content.as_str())
-        .unwrap_or("");
+    let content = result.text.as_str();
 
     // P3.1: mandatory output guard — scan model output before parsing
     let output_scan = GUARD.scan_output(content);
