@@ -11,7 +11,6 @@ use super::types::{
 use super::utils::strip_provider_prefix;
 use crate::corpus::embed::Entity;
 use crate::runtime::TripleExtraction;
-use hkask_inference::{InferenceConfig, InferenceRouter};
 use hkask_memory::SemanticMemory;
 use hkask_memory::salience::{self, EntityTags};
 use hkask_services_core::{DomainKind, ErrorKind, HkaskSettings, ServiceError};
@@ -37,7 +36,7 @@ impl EmbedService {
         db_passphrase: &str,
         cache_dir: Option<&Path>,
         progress: Option<ProgressFn>,
-        inference_port: &dyn hkask_types::InferencePort,
+        inference_port: std::sync::Arc<dyn hkask_types::InferencePort>,
     ) -> Result<EmbedResult, ServiceError> {
         // P9: Regulation span
         tracing::info!(target: "hkask.embed", operation = "embed_corpus", config = %config_path.display(), "REG");
@@ -410,14 +409,16 @@ impl EmbedService {
                     "Starting fusion-routed h_mem extraction"
                 );
 
-                let inference_config = InferenceConfig::from_env();
-                let router = std::sync::Arc::new(InferenceRouter::new(inference_config));
+                // Use the shared inference port (routes through zed's
+                // LanguageModelRegistry via the IPC bridge). The fusion
+                // config in LLMParameters is forwarded to zed, which has
+                // its own FusionLanguageModel provider.
                 let semaphore =
                     std::sync::Arc::new(tokio::sync::Semaphore::new(classifier_config.concurrency));
 
                 let mut handles = Vec::with_capacity(texts.len());
                 for (i, text) in texts.iter().enumerate() {
-                    let router = router.clone();
+                    let inference_port = inference_port.clone();
                     let fusion = fusion.clone();
                     let system_prompt = classifier_config.system_prompt.clone();
                     let permit = semaphore.clone();
@@ -442,7 +443,7 @@ impl EmbedService {
                             system_prompt: Some(system_prompt),
                             ..Default::default()
                         };
-                        let result = router.generate(&prompt, &params, None).await;
+                        let result = inference_port.generate(&prompt, &params, None).await;
                         (i, result)
                     }));
                 }
