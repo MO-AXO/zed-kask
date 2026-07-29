@@ -32,10 +32,12 @@ use std::sync::Arc;
 
 use hkask_types::inference_ipc::{
     InferenceErrorPayload, InferenceMethod, InferenceOutcome, InferenceRequest, InferenceResponse,
+    ModelListEntry,
 };
 use hkask_types::{InferenceError, InferencePort, InferenceResult};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
+use tokio::sync::oneshot;
 
 use crate::inference::LanguageModelEmbeddingPort;
 
@@ -153,6 +155,7 @@ async fn handle_connection(
     stream: tokio::net::UnixStream,
     port: Arc<dyn InferencePort>,
     embedding_port: Option<LanguageModelEmbeddingPort>,
+    async_cx: gpui::AsyncApp,
 ) {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -190,7 +193,7 @@ async fn handle_connection(
         };
 
         let id = request.id;
-        let outcome = dispatch(&port, embedding_port.as_ref(), request).await;
+        let outcome = dispatch(&port, embedding_port.as_ref(), &async_cx, request).await;
 
         let response = InferenceResponse { id, outcome };
         let response_json = match serde_json::to_string(&response) {
@@ -236,6 +239,7 @@ async fn handle_connection(
 async fn dispatch(
     port: &Arc<dyn InferencePort>,
     embedding_port: Option<&LanguageModelEmbeddingPort>,
+    async_cx: &gpui::AsyncApp,
     request: InferenceRequest,
 ) -> InferenceOutcome {
     let params = request.params;
@@ -265,6 +269,29 @@ async fn dispatch(
                 },
             },
         };
+    }
+
+    // ListModels requests are dispatched via the GPUI context — they read
+    // zed's `LanguageModelRegistry` directly (not through InferencePort).
+    if matches!(request.method, InferenceMethod::ListModels) {
+        let models = async_cx.update(|cx| {
+            let registry = language_model::LanguageModelRegistry::read_global(cx);
+            registry
+                .providers()
+                .into_iter()
+                .flat_map(|provider| {
+                    let provider_id = provider.id().0.clone();
+                    provider.provided_models(cx).into_iter().map(move |model| {
+                        hkask_types::inference_ipc::ModelListEntry {
+                            name: format!("{}/{}", provider_id, model.name().0),
+                            provider: provider_id.to_string(),
+                            supports_vision: model.supports_images(),
+                        }
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        return InferenceOutcome::ModelList { models };
     }
 
     let result: Result<InferenceResult, InferenceError> = match request.method {
@@ -307,7 +334,7 @@ async fn dispatch(
             .await
         }
         // Already handled above — unreachable.
-        InferenceMethod::Embed => unreachable!(),
+        InferenceMethod::Embed | InferenceMethod::ListModels => unreachable!(),
     };
 
     match result {
