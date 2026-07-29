@@ -439,8 +439,8 @@ impl LanguageModelEmbeddingPort {
                         ))
                     })?;
 
-                    // Strip the provider prefix (case-insensitive, both
-                    // long-form and 2-letter). The API expects the bare model id.
+                    // Strip the provider prefix (case-insensitive). The
+                    // API expects the bare model id.
                     let model_id = strip_provider_prefix(&req.model);
 
                     // Build and send the OpenAI-compatible /embeddings request.
@@ -556,11 +556,10 @@ impl LanguageModelEmbeddingPort {
 
 /// Strip the provider prefix from a model string, case-insensitive.
 ///
-/// Accepts both long-form (`DeepInfra/`, `OpenRouter/`, `fal.ai/`,
-/// `Together AI/`, `RunPod/`, `KiloCode/`, `ollama/`, `Cline/`) and
-/// 2-letter (`DI/`, `OR/`, etc.) prefixes. Returns the bare model id.
-/// If no prefix is recognized, returns the string unchanged (the API
-/// will reject it, which surfaces a clear error).
+/// Accepts long-form prefixes (`DeepInfra/`, `OpenRouter/`, `fal.ai/`,
+/// `Together AI/`, `RunPod/`, `KiloCode/`, `ollama/`, `Cline/`).
+/// Returns the bare model id. If no prefix is recognized, returns the
+/// string unchanged (the API will reject it, which surfaces a clear error).
 fn strip_provider_prefix(model: &str) -> String {
     // Long-form prefixes (case-insensitive). Order matters only for
     // overlapping prefixes; none overlap here.
@@ -581,45 +580,6 @@ fn strip_provider_prefix(model: &str) -> String {
         // Case-insensitive match (e.g. "deepinfra/..." or "DEEPINFRA/...").
         if model.len() >= prefix.len() && model[..prefix.len()].eq_ignore_ascii_case(prefix) {
             return model[prefix.len()..].to_string();
-        }
-    }
-
-    // 2-letter shorthand (`DI/`, `FA/`, …) — deprecated. Kept as a
-    // backward-compat shim for user configs that still use the old prefix
-    // format. The inference router (`parse_from_model`) no longer accepts
-    // 2-letter prefixes, so this path only fires for embedding model strings
-    // from pre-migration settings files.
-    let bytes = model.as_bytes();
-    if model.len() >= 4 && bytes[2] == b'/' {
-        let prefix = &model[..2];
-        let rest = &model[3..];
-        let recognized = matches!(
-            prefix,
-            "DI" | "FA"
-                | "TG"
-                | "RP"
-                | "OR"
-                | "KC"
-                | "OM"
-                | "CL"
-                | "di"
-                | "fa"
-                | "tg"
-                | "rp"
-                | "or"
-                | "kc"
-                | "om"
-                | "cl"
-        );
-        if recognized && !rest.is_empty() {
-            tracing::warn!(
-                target: "hkask.inference",
-                model = %model,
-                prefix = %prefix,
-                "Embedding model uses deprecated 2-letter prefix; \
-                 update to full name (e.g. 'DeepInfra/...') — 2-letter support will be removed"
-            );
-            return rest.to_string();
         }
     }
 
@@ -664,22 +624,6 @@ mod embedding_tests {
         assert_eq!(
             strip_provider_prefix("DEEPINFRA/Qwen/Qwen3-Embedding-0.6B"),
             "Qwen/Qwen3-Embedding-0.6B"
-        );
-    }
-
-    #[test]
-    fn strip_prefix_two_letter() {
-        assert_eq!(
-            strip_provider_prefix("DI/Qwen/Qwen3-Embedding-0.6B"),
-            "Qwen/Qwen3-Embedding-0.6B"
-        );
-        assert_eq!(
-            strip_provider_prefix("di/Qwen/Qwen3-Embedding-0.6B"),
-            "Qwen/Qwen3-Embedding-0.6B"
-        );
-        assert_eq!(
-            strip_provider_prefix("OR/qwen/qwen3-embedding-0.6b"),
-            "qwen/qwen3-embedding-0.6b"
         );
     }
 
