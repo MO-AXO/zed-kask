@@ -56,6 +56,36 @@ impl From<RouterModelEntry> for ModelInfo {
     }
 }
 
+impl From<hkask_types::ModelEntry> for ModelInfo {
+    fn from(entry: hkask_types::ModelEntry) -> Self {
+        // Parse the provider from the prefixed name (e.g. "deepinfra/qwen/..." → DeepInfra).
+        let provider_str = entry
+            .prefixed_name
+            .split('/')
+            .next()
+            .unwrap_or("openrouter");
+        let provider = match provider_str.to_lowercase().as_str() {
+            "deepinfra" | "di" => ProviderId::DeepInfra,
+            "fal" | "fa" | "fal.ai" => ProviderId::Fal,
+            "together" | "tg" => ProviderId::Together,
+            "runpod" | "rp" => ProviderId::Runpod,
+            "openrouter" | "or" => ProviderId::OpenRouter,
+            "kilocode" | "kc" => ProviderId::KiloCode,
+            "ollama" | "om" => ProviderId::Ollama,
+            "cline" | "cl" => ProviderId::Cline,
+            _ => ProviderId::OpenRouter,
+        };
+        Self {
+            name: entry.prefixed_name,
+            provider,
+            family: None,
+            parameter_size: None,
+            quantization_level: None,
+            size_bytes: None,
+        }
+    }
+}
+
 pub struct InferenceService;
 
 impl InferenceService {
