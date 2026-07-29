@@ -584,7 +584,11 @@ fn strip_provider_prefix(model: &str) -> String {
         }
     }
 
-    // 2-letter shorthand (`DI/`, `FA/`, …). Requires the `XX/` shape.
+    // 2-letter shorthand (`DI/`, `FA/`, …) — deprecated. Kept as a
+    // backward-compat shim for user configs that still use the old prefix
+    // format. The inference router (`parse_from_model`) no longer accepts
+    // 2-letter prefixes, so this path only fires for embedding model strings
+    // from pre-migration settings files.
     let bytes = model.as_bytes();
     if model.len() >= 4 && bytes[2] == b'/' {
         let prefix = &model[..2];
@@ -608,6 +612,13 @@ fn strip_provider_prefix(model: &str) -> String {
                 | "cl"
         );
         if recognized && !rest.is_empty() {
+            tracing::warn!(
+                target: "hkask.inference",
+                model = %model,
+                prefix = %prefix,
+                "Embedding model uses deprecated 2-letter prefix; \
+                 update to full name (e.g. 'DeepInfra/...') — 2-letter support will be removed"
+            );
             return rest.to_string();
         }
     }

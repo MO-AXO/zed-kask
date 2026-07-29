@@ -2235,7 +2235,10 @@ fn embedding_provider_id(embedding_model: &str) -> Option<&str> {
             return Some(id);
         }
     }
-    // 2-letter shorthand.
+    // 2-letter shorthand — deprecated. Kept as a backward-compat shim for
+    // user configs that still use the old prefix format. The inference router
+    // (`parse_from_model`) no longer accepts 2-letter prefixes, so this path
+    // only fires for embedding model strings from pre-migration settings files.
     let bytes = embedding_model.as_bytes();
     if embedding_model.len() >= 4 && bytes[2] == b'/' {
         let prefix = &embedding_model[..2];
@@ -2250,6 +2253,10 @@ fn embedding_provider_id(embedding_model: &str) -> Option<&str> {
             "CL" | "cl" => "cline",
             _ => return None,
         };
+        log::warn!(
+            "Embedding model '{embedding_model}' uses deprecated 2-letter prefix '{prefix}'; \
+             update to full name (e.g. 'DeepInfra/...') — 2-letter support will be removed"
+        );
         return Some(id);
     }
     None
