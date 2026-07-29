@@ -1014,7 +1014,7 @@ fn main() {
             let tool_port_for_deferred = tool_port;
             let a2a_secret_for_deferred = a2a_secret;
             let cybernetics_loop_for_panel_deferred = cybernetics_loop_for_panel;
-            let panel_regulation_ledger_deferred = panel_regulation_ledger;
+            let _panel_regulation_ledger_deferred = panel_regulation_ledger;
             let app_state_for_deferred = app_state.clone();
             cx.spawn(async move |cx| {
                 let mut current_user = user_store.read_with(cx, |store, _| store.watch_current_user());
@@ -1145,6 +1145,58 @@ fn main() {
                                     "hKask memory port upgraded to RealMemoryPort \
                                      (agent: {agent_name}, db: {db_path})"
                                 );
+
+                                // Set env vars for the curator MCP server so it
+                                // reads from the same `agents/curator/pod.db` the
+                                // agent writes curator copies to. These are read
+                                // by `open_curator_stores` in the curator MCP
+                                // server and by `open_curator_semantic` in
+                                // `RealMemoryPort::new`.
+                                //
+                                // `HKASK_CURATOR_DB` — the curator's sovereign DB
+                                // path. `HKASK_WEBID` — the curator's WebID, set
+                                // to `from_persona(b"curator")` to match the
+                                // persona used by `RealMemoryPort` when writing
+                                // curator copies. `HKASK_DATA_DIR` — so the
+                                // curator server resolves paths under the same
+                                // root as the agent.
+                                let curator_db = hkask_types::agent_paths::resolve_under_data_dir(
+                                    &hkask_types::agent_paths::agent_pod_db("curator"),
+                                );
+                                // SAFETY: These env vars are set during the deferred task
+                                // (post-login, before any MCP server reads them). The curator
+                                // MCP server reads them at process start. Setting them here
+                                // before `sync_kask_mcp_servers` ensures the curator server
+                                // picks them up. The race window is acceptable — the vars are
+                                // only read by the curator server, which is restarted by the
+                                // sync below.
+                                let curator_webid = hkask_types::WebID::from_persona(b"curator");
+                                // SAFETY: These env vars are set during the deferred task
+                                // (post-login, before any MCP server reads them). The curator
+                                // MCP server reads them at process start. Setting them here
+                                // before `sync_kask_mcp_servers` ensures the curator server
+                                // picks them up. The race window is acceptable — the vars are
+                                // only read by the curator server, which is restarted by the
+                                // sync below.
+                                unsafe {
+                                    std::env::set_var(
+                                        "HKASK_CURATOR_DB",
+                                        curator_db.to_string_lossy().as_ref(),
+                                    );
+                                    std::env::set_var(
+                                        "HKASK_WEBID",
+                                        curator_webid.to_string().as_str(),
+                                    );
+                                }
+                                log::info!(
+                                    "Curator env injected — DB: {}, WebID: {}",
+                                    curator_db.display(),
+                                    curator_webid.redacted_display(),
+                                );
+                                // Re-sync MCP servers so the curator server picks
+                                // up the new env vars. The ContextServerStore
+                                // re-evaluates descriptors on notify.
+                                cx.update(|cx| sync_kask_mcp_servers(cx));
 
                                 // D11: Wire the context injector now that the real memory port exists.
                                 // The injector shares the same memory port as the ingestion path.
@@ -1434,26 +1486,10 @@ fn main() {
                         executor: cx.background_executor().clone(),
                     });
                     kask_panel::set_tool_invoker(Some(panel_tool_invoker));
-
-                    let panel_curator_factory = std::sync::Arc::new(PanelCuratorSessionFactory {
-                        inference: guarded_lazy_inference.clone(),
-                        tool_port: tool_port_for_deferred.clone(),
-                        a2a_secret: a2a_secret_for_deferred.clone(),
-                        executor: cx.background_executor().clone(),
-                        tokio_handle: gpui_tokio::Tokio::handle(cx),
-                    });
-                    kask_panel::set_curator_session_factory(Some(panel_curator_factory));
-
-                    let panel_status = std::sync::Arc::new(PanelRegulationStatus {
-                        cybernetics_loop: cybernetics_loop_for_panel_deferred.clone(),
-                        ledger: panel_regulation_ledger_deferred.clone(),
-                        webid: hkask_types::WebID::from_persona(b"kask-panel"),
-                        executor: cx.background_executor().clone(),
-                    });
-                    kask_panel::set_regulation_status(Some(panel_status));
                     log::info!(
-                        "Kask panel tool invoker + curator session factory + regulation status wired \
-                         (curator uses LazyInferencePort — turns will route through the resolved model)"
+                        "Kask panel tool invoker wired \
+                         (curator turns now route through NativeAgent — \
+                         the ConversationView handles streaming + tool dispatch)"
                     );
 
                     // ── Condenser wiring: unconditional ───────────────────────
@@ -1678,29 +1714,12 @@ fn main() {
                         }
 
                         let panel_tool_invoker = std::sync::Arc::new(PanelToolInvoker {
-                            tool_port: panel_tool_port.clone(),
+                            tool_port: tool_port_for_deferred.clone(),
                             a2a_secret: a2a_secret_for_deferred.clone(),
                             executor: cx.background_executor().clone(),
                         });
                         kask_panel::set_tool_invoker(Some(panel_tool_invoker));
-
-                        let panel_curator_factory = std::sync::Arc::new(PanelCuratorSessionFactory {
-                            inference: panel_inference_port,
-                            tool_port: panel_tool_port,
-                            a2a_secret: a2a_secret_for_deferred.clone(),
-                            executor: cx.background_executor().clone(),
-                            tokio_handle: gpui_tokio::Tokio::handle(cx),
-                        });
-                        kask_panel::set_curator_session_factory(Some(panel_curator_factory));
-
-                        let panel_status = std::sync::Arc::new(PanelRegulationStatus {
-                            cybernetics_loop: cybernetics_loop_for_panel_deferred.clone(),
-                            ledger: panel_regulation_ledger_deferred.clone(),
-                            webid: hkask_types::WebID::from_persona(b"kask-panel"),
-                            executor: cx.background_executor().clone(),
-                        });
-                        kask_panel::set_regulation_status(Some(panel_status));
-                        log::info!("Kask panel tool invoker + curator session factory + regulation status wired");
+                        log::info!("Kask panel tool invoker wired");
                     } else {
                         // Body injection is disabled in zed-kask: with no manifest
                         // executor wired, the `skill` tool returns the no-op envelope
@@ -2370,11 +2389,15 @@ fn resolve_embedding_port(
 
 // ── D10: Kask panel adapters ───────────────────────────────────────────────
 //
-// These adapters implement kask_panel's ToolInvoker and CuratorSessionFactory
-// traits by delegating to the bridge's BridgeToolPort and GuardedInferencePort.
-// They're defined here (in the zed binary crate) because kask_bridge can't
-// depend on kask_panel (circular dependency), and the composition root is the
-// natural place for adapter construction.
+// This adapter implements kask_panel's ToolInvoker trait by delegating to the
+// bridge's BridgeToolPort. It's defined here (in the zed binary crate) because
+// kask_bridge can't depend on kask_panel (circular dependency), and the
+// composition root is the natural place for adapter construction.
+//
+// The chat panel itself no longer uses ToolInvoker — it routes through
+// NativeAgent's ToolRouter via the ConversationView. This adapter remains for
+// the per-server visualization views (KanbanBoardView, PortfolioDashboardView,
+// ScenariosView), which fetch data via direct MCP tool calls.
 
 /// Adapter implementing `kask_panel::ToolInvoker` via `BridgeToolPort`.
 struct PanelToolInvoker {
@@ -2445,9 +2468,6 @@ impl kask_panel::ToolInvoker for PanelToolInvoker {
                 })
                 .collect())
         })
-    }
-}
-
     }
 }
 
