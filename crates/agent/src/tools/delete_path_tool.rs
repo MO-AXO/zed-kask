@@ -21,7 +21,7 @@ use util::markdown::MarkdownInlineCode;
 
 /// Deletes the file or directory (and the directory's contents, recursively) at the specified path in the project, and returns confirmation of the deletion.
 ///
-/// The only supported paths outside the project are descendants of `~/.agents/skills`, for global agent skills.
+/// The only supported paths outside the project are descendants of the global skills directory, for global agent skills.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct DeletePathToolInput {
     /// The path of the file or directory to delete.

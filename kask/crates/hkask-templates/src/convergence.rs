@@ -331,6 +331,8 @@ impl ConvergenceTracker {
                 "improvement_pct": improvement_pct,
                 "improvement_target": self.improvement_ratio,
                 "baseline_quality": self.baseline_quality,
+                "quality_history": self.quality_history,
+                "stability_epsilon": self.stability_epsilon,
                 "gas_used": gas_used as f64,
                 "gas_cap": gas_cap as f64,
                 "gas_remaining": (gas_cap as f64 - gas_used as f64).max(0.0),
@@ -364,6 +366,8 @@ impl ConvergenceTracker {
                 "exit_reason": null,
                 "improvement_target": self.improvement_ratio,
                 "baseline_quality": self.baseline_quality,
+                "quality_history": self.quality_history,
+                "stability_epsilon": self.stability_epsilon,
                 "gas_cap": gas_cap,
                 "gas_used": gas_used,
                 "gas_remaining": gas_cap.saturating_sub(gas_used),
@@ -405,6 +409,7 @@ mod tests {
             threshold,
             improvement_ratio: 0.0,
             improvement_gate: "threshold_only".to_string(),
+            stability_epsilon: 0.05,
             max_iterations: max_iter,
             min_iterations: min_iter,
             convergence_field: field.to_string(),
@@ -513,6 +518,101 @@ mod tests {
         ctx.insert("composite".to_string(), json!(0.20));
         tracker.capture_baseline(&ctx); // should not overwrite
         assert_eq!(tracker.baseline_quality, first_baseline);
+    }
+
+    // ── Trajectory stability gates ──
+
+    #[test]
+    fn push_quality_records_history() {
+        let cfg = config(0.15, "composite", 3, 0);
+        let mut tracker = ConvergenceTracker::new(&cfg);
+        let mut ctx = HashMap::new();
+        ctx.insert("composite".to_string(), json!(0.50));
+        tracker.push_quality(&ctx);
+        ctx.insert("composite".to_string(), json!(0.30));
+        tracker.push_quality(&ctx);
+        assert_eq!(tracker.quality_history(), &[0.50, 0.30]);
+    }
+
+    #[test]
+    fn push_quality_records_nan_when_metric_missing() {
+        let cfg = config(0.15, "composite", 3, 0);
+        let mut tracker = ConvergenceTracker::new(&cfg);
+        let ctx = HashMap::new(); // no metric
+        tracker.push_quality(&ctx);
+        assert_eq!(tracker.quality_history().len(), 1);
+        assert!(tracker.quality_history()[0].is_nan());
+    }
+
+    #[test]
+    fn stability_gate_returns_false_with_fewer_than_two_readings() {
+        let mut cfg = config(0.15, "composite", 3, 0);
+        cfg.improvement_gate = "stability".to_string();
+        let mut tracker = ConvergenceTracker::new(&cfg);
+        let mut ctx = HashMap::new();
+        ctx.insert("composite".to_string(), json!(0.10));
+        tracker.push_quality(&ctx); // only 1 reading
+        // Cannot be stable with 1 reading — trajectory convergence undefined
+        assert!(!tracker.check_met(&ctx, 2));
+    }
+
+    #[test]
+    fn stability_gate_converges_when_last_two_readings_within_epsilon() {
+        let mut cfg = config(0.15, "composite", 3, 0);
+        cfg.improvement_gate = "stability".to_string();
+        cfg.stability_epsilon = 0.05;
+        let mut tracker = ConvergenceTracker::new(&cfg);
+        let mut ctx = HashMap::new();
+        ctx.insert("composite".to_string(), json!(0.50));
+        tracker.push_quality(&ctx);
+        ctx.insert("composite".to_string(), json!(0.52)); // delta 0.02 < 0.05
+        tracker.push_quality(&ctx);
+        assert!(tracker.check_met(&ctx, 2));
+    }
+
+    #[test]
+    fn stability_gate_rejects_oscillation() {
+        let mut cfg = config(0.15, "composite", 3, 0);
+        cfg.improvement_gate = "stability".to_string();
+        cfg.stability_epsilon = 0.05;
+        let mut tracker = ConvergenceTracker::new(&cfg);
+        let mut ctx = HashMap::new();
+        ctx.insert("composite".to_string(), json!(0.10));
+        tracker.push_quality(&ctx);
+        ctx.insert("composite".to_string(), json!(0.50)); // delta 0.40 >> 0.05
+        tracker.push_quality(&ctx);
+        assert!(!tracker.check_met(&ctx, 2));
+    }
+
+    #[test]
+    fn threshold_and_stability_gate_requires_both() {
+        let mut cfg = config(0.15, "composite", 3, 0);
+        cfg.improvement_gate = "threshold_and_stability".to_string();
+        cfg.stability_epsilon = 0.05;
+        let mut tracker = ConvergenceTracker::new(&cfg);
+        let mut ctx = HashMap::new();
+        // Threshold met but not stable (delta 0.40)
+        ctx.insert("composite".to_string(), json!(0.10));
+        tracker.push_quality(&ctx);
+        ctx.insert("composite".to_string(), json!(0.10));
+        tracker.push_quality(&ctx);
+        // delta 0.00 < 0.05 AND 0.10 <= 0.15 → both met
+        assert!(tracker.check_met(&ctx, 2));
+        // Now make it unstable — threshold met but delta large
+        ctx.insert("composite".to_string(), json!(0.50));
+        tracker.push_quality(&ctx);
+        // 0.50 > 0.15 threshold not met, and delta 0.40 not stable
+        assert!(!tracker.check_met(&ctx, 3));
+    }
+
+    #[test]
+    fn stability_enabled_reports_gate_correctly() {
+        let mut cfg = config(0.15, "composite", 3, 0);
+        assert!(!ConvergenceTracker::new(&cfg).stability_enabled());
+        cfg.improvement_gate = "stability".to_string();
+        assert!(ConvergenceTracker::new(&cfg).stability_enabled());
+        cfg.improvement_gate = "threshold_and_stability".to_string();
+        assert!(ConvergenceTracker::new(&cfg).stability_enabled());
     }
 
     #[test]
