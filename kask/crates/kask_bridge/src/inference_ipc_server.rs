@@ -460,9 +460,7 @@ async fn dispatch_media(
         }
         "upscale" => {
             let image_url = params.media_image_url.as_deref().unwrap_or("");
-            // The IPC params don't carry a scale field; pass `None` to let
-            // the backend pick its default.
-            media.upscale(image_url, None).await
+            media.upscale(image_url, params.media_scale).await
         }
         "generate_video" => {
             let prompt = params.media_prompt.as_deref().unwrap_or("");

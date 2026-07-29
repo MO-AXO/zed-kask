@@ -76,6 +76,7 @@ impl MediaServer {
             validate_tool_url(&image_url)?;
             let media_params = hkask_types::MediaGenerateParams {
                 image_url: Some(image_url.clone()),
+                scale,
                 ..Default::default()
             };
             self.vision_port

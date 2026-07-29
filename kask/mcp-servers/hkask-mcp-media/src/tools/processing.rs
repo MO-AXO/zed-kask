@@ -634,7 +634,7 @@ impl MediaServer {
             let (vision_model, _vision_label) = self.require_vision().await?;
             let params = hkask_types::template::LLMParameters::default();
             let result = self
-                .inference
+                .vision_port
                 .generate_vision(&prompt, &image_urls, &params, Some(vision_model))
                 .await;
 

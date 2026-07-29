@@ -115,6 +115,8 @@ pub struct InferenceParams {
     pub media_count: Option<u32>,
     /// Strength for image-to-image.
     pub media_strength: Option<f32>,
+    /// Scale factor for upscaling.
+    pub media_scale: Option<u32>,
     /// Duration for video generation.
     pub media_duration: Option<f32>,
     /// Object description for segmentation.

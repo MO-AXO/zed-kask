@@ -55,6 +55,8 @@ pub struct MediaGenerateParams {
     pub count: Option<u32>,
     /// Strength for image-to-image.
     pub strength: Option<f32>,
+    /// Scale factor for upscaling.
+    pub scale: Option<u32>,
     /// Duration for video generation.
     pub duration: Option<f32>,
     /// Object description for segmentation.
