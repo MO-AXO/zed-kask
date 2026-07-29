@@ -1157,45 +1157,6 @@ fn parse_args(args: &str) -> Value {
     }
 }
 
-/// Format a JSON tool result for display. Pretty-prints objects/arrays,
-/// parses stringified-JSON strings, caps recursion at depth 5, and truncates
-/// output at 5000 chars on a UTF-8-safe boundary.
-///
-/// Ported from the deleted hKask TUI `mcp_scoped.rs::format_json_result`.
-fn format_json_result(value: &Value) -> String {
-    format_json_result_depth(value, 0)
-}
-
-fn format_json_result_depth(value: &Value, depth: u8) -> String {
-    if depth > 5 {
-        return "[...]".to_string();
-    }
-    let result = match value {
-        Value::String(s) => {
-            if depth < 5 {
-                if let Ok(inner) = serde_json::from_str::<Value>(s) {
-                    return format_json_result_depth(&inner, depth + 1);
-                }
-            }
-            s.clone()
-        }
-        Value::Object(_) | Value::Array(_) => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        _ => value.to_string(),
-    };
-    const MAX_LEN: usize = 5000;
-    if result.len() > MAX_LEN {
-        let mut end = MAX_LEN;
-        while !result.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…", &result[..end])
-    } else {
-        result
-    }
-}
-
 impl Focusable for KaskPanel {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()

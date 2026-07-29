@@ -239,7 +239,7 @@ fn format_json(value: &Value) -> String {
 }
 
 /// Get a muted background color from the current theme.
-fn cx_theme_muted_bg() -> Hsla {
+fn cx_theme_muted_bg() -> gpui::Hsla {
     // Use a slightly transparent version of the editor background for the
     // input/output panels. This is a simple heuristic; the agent panel uses
     // `colors().editor_background` with opacity. We use `ghost_element`
