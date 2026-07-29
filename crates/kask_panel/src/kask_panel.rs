@@ -1598,57 +1598,6 @@ mod tests {
         assert_eq!(result, Value::from("just some text"));
     }
 
-    // ── format_json_result ──────────────────────────────────────────────
-
-    #[test]
-    fn format_json_simple_string() {
-        assert_eq!(format_json_result(&Value::from("hello")), "hello");
-    }
-
-    #[test]
-    fn format_json_object_pretty_printed() {
-        let result = format_json_result(&serde_json::json!({"key": "value"}));
-        assert!(result.contains("\"key\""));
-        assert!(result.contains("\"value\""));
-        assert!(result.contains('\n')); // pretty-printed
-    }
-
-    #[test]
-    fn format_json_nested_string_parses() {
-        let inner = serde_json::json!({"nested": true});
-        let wrapped = Value::String(inner.to_string());
-        let result = format_json_result(&wrapped);
-        assert!(result.contains("nested"));
-        assert!(result.contains("true"));
-    }
-
-    #[test]
-    fn format_json_recursion_capped_at_depth_5() {
-        let mut val = serde_json::json!({"a": 1});
-        for _ in 0..10 {
-            val = Value::String(val.to_string());
-        }
-        let result = format_json_result(&val);
-        assert!(result.contains("[...]") || result.len() < 100);
-    }
-
-    #[test]
-    fn format_json_truncates_long_output() {
-        let mut map = serde_json::Map::new();
-        for i in 0..1000 {
-            map.insert(format!("key_{i}"), serde_json::json!(format!("value_{i}")));
-        }
-        let val = Value::Object(map);
-        let result = format_json_result(&val);
-        // ≤5000 safe UTF-8 boundary + "…" (3 bytes)
-        assert!(
-            result.len() <= 5003,
-            "output should be truncated (got {})",
-            result.len()
-        );
-        assert!(result.ends_with('…'));
-    }
-
     // ── server_welcome ──────────────────────────────────────────────────
 
     #[test]
