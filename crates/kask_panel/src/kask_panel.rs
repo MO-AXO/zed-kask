@@ -55,6 +55,7 @@ mod markdown_render;
 mod panel_button;
 mod portfolio_view;
 mod scenarios_view;
+mod system_prompt;
 mod tool_call_card;
 
 pub use curator_session::{
@@ -227,66 +228,16 @@ fn server_description(server: &str) -> &'static str {
     }
 }
 
-/// Build a context-aware system prompt for scoped inference.
+/// Build a context-aware system prompt for the active tab via Jinja2.
 ///
-/// The prompt tells the LLM which MCP server it is acting as, what that
-/// server does, what tools it has (names + descriptions), and how to
-/// interact with the user. For the curator server, it additionally instructs
-/// the LLM to remember issues raised in the panel so they can be surfaced
-/// in future sessions.
-///
-/// This is the single source of truth for the panel's system prompt — the
-/// bridge's `PanelCuratorSession` adapter receives it via the
-/// `CuratorSession::send` trait method and passes it to the inference port
-/// as the leading `system` message.
-fn build_system_prompt(server: &str, tools: &[ToolDescriptor]) -> String {
+/// Delegates to `system_prompt::render_tab_system_prompt`, which renders
+/// the `panel-tab-system.j2` template with the server, description, tools,
+/// task, and shared curator guidance. The bridge's `PanelCuratorSession`
+/// adapter receives it via the `CuratorSession::send` trait method and
+/// passes it to the inference port as the leading `system` message.
+fn build_system_prompt(server: &str, tools: &[ToolDescriptor], task: &str) -> String {
     let description = server_description(server);
-    let mut prompt = format!(
-        "You are the {server} MCP server — {description}.\n\
-         You are interacting with the user through the kask panel. The user's \
-         messages are scoped to your server's tools only.\n\n\
-         ## Your capabilities\n\
-         You have access to the following tools:"
-    );
-
-    if tools.is_empty() {
-        prompt.push_str("\n  (no tools discovered — the server may not be connected)");
-    } else {
-        for tool in tools {
-            prompt.push_str(&format!("\n  - /{} — {}", tool.name, tool.description));
-        }
-    }
-
-    prompt.push_str(
-        "\n\n\
-         ## Interaction model\n\
-         - The user can type natural language messages (you respond using \
-           your tools as needed) or `/tool_name args` (direct tool invocation \
-           that bypasses you).\n\
-         - When the user asks you to do something, call the relevant tool(s) \
-           and explain the result.\n\
-         - If the user's request is outside your server's scope, say so \
-           clearly and suggest which other server might handle it.\n",
-    );
-
-    // The curator is the default server and has a special role: it remembers
-    // issues raised in the panel so they can be surfaced in future sessions.
-    // This is the panel-side instruction; the curator MCP server itself
-    // persists issues via its own regulation cascade.
-    if server == "curator" {
-        prompt.push_str(
-            "\n\
-             ## Curator-specific guidance\n\
-             You are the curator — the regulation cascade and algedonic \
-             signal hub. Remember any issues, obstacles, or feedback the \
-             user raises about the kask panel itself (UX, missing features, \
-             bugs, configuration problems) so you can surface them in future \
-             sessions. When the user reports an issue, acknowledge it and \
-             note that it has been recorded for follow-up.\n",
-        );
-    }
-
-    prompt
+    system_prompt::render_tab_system_prompt(server, description, tools, task)
 }
 
 /// The index of the default selected server in `BUILT_IN_MCP_SERVERS`.
