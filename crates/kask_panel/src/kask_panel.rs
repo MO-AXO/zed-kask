@@ -603,13 +603,17 @@ impl KaskPanel {
                 .map(|d| d.as_millis())
                 .unwrap_or(0)
         );
-        let entry =
-            tool_call_card::ToolCallEntry::new(call_id.clone(), tool.clone(), args_value.clone());
+        // Push the user message first (borrows `tool` + `args`).
+        let user_msg_content = format!("/{tool} {args}");
+        let task =
+            tool_invoker().map(|invoker| invoker.invoke_tool(&server, &tool, args_value.clone()));
+        // Now move `tool` + `args_value` into the card entry.
+        let entry = tool_call_card::ToolCallEntry::new(call_id, tool, args_value);
         let card = cx.new(|cx| tool_call_card::ToolCallCard::new(entry, cx));
 
         self.current_messages().push(KaskMessage {
             role: KaskMessageRole::User,
-            content: format!("/{tool} {args}"),
+            content: user_msg_content,
             markdown: None,
             tool_calls: vec![card.clone()],
         });
@@ -618,8 +622,7 @@ impl KaskPanel {
         self.scroll_messages_to_bottom(cx);
         cx.notify();
 
-        if let Some(invoker) = tool_invoker() {
-            let task = invoker.invoke_tool(&server, &tool, args_value);
+        if let Some(task) = task {
             cx.spawn(async move |this, cx| {
                 let result = task.await;
                 this.update(cx, |this, cx| {
