@@ -1562,10 +1562,10 @@ fn main() {
 
                         let panel_curator_factory = std::sync::Arc::new(PanelCuratorSessionFactory {
                             inference: panel_inference_port,
-                            tool_port: panel_tool_port.clone(),
+                            tool_port: panel_tool_port,
                             a2a_secret: a2a_secret_for_deferred.clone(),
                             executor: cx.background_executor().clone(),
-                            tokio_handle: gpui_tokio::Tokio::handle(cx).clone(),
+                            tokio_handle: gpui_tokio::Tokio::handle(cx),
                         });
                         kask_panel::set_curator_session_factory(Some(panel_curator_factory));
 
@@ -2315,13 +2315,12 @@ impl kask_panel::CuratorSession for PanelCuratorSession {
             // Spawn the streaming turn on the tokio handle so it can run
             // independently of the GPUI foreground. The channel forwards
             // events back to the panel.
-            let tx_clone = tx.clone();
             let history_for_turn = history_arc.clone();
             let cancel_for_turn = cancel_flag.clone();
             let tokio_handle_clone = tokio_handle.clone();
             tokio_handle_clone.spawn(async move {
                 run_curator_turn(
-                    tx_clone,
+                    tx,
                     history_for_turn,
                     inference,
                     tool_port,
@@ -2379,13 +2378,12 @@ impl kask_panel::CuratorSession for PanelCuratorSession {
             cancel_flag.store(false, std::sync::atomic::Ordering::SeqCst);
 
             let scope_server = server.clone();
-            let tx_clone = tx.clone();
             let history_for_turn = history.clone();
             let cancel_for_turn = cancel_flag.clone();
             let tokio_handle_clone = tokio_handle.clone();
             tokio_handle_clone.spawn(async move {
                 run_curator_turn(
-                    tx_clone,
+                    tx,
                     history_for_turn,
                     inference,
                     tool_port,

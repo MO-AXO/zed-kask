@@ -859,11 +859,6 @@ impl ManifestExecutor {
                 break 'cascade;
             }
 
-            // Capture baseline quality on first full pass
-            if improvement_enabled {
-                convergence.capture_baseline(&context);
-            }
-
             // Compute compound quality from nested skill reports
             if manifest.convergence.aggregation != "none"
                 && !manifest.convergence.aggregation_sources.is_empty()
@@ -874,6 +869,16 @@ impl ManifestExecutor {
                     &manifest.convergence.aggregation_sources,
                 );
                 context.insert(field.clone(), serde_json::json!(compound));
+            }
+
+            // Capture baseline quality on first full pass. Done AFTER compound
+            // quality computation so the baseline is in the same value space as
+            // subsequent readings (compound if aggregation is enabled, raw
+            // field value otherwise). Capturing before compound computation
+            // would mix pre-compound and compound values in the improvement
+            // ratio, producing nonsense.
+            if improvement_enabled {
+                convergence.capture_baseline(&context);
             }
 
             // Record this iteration's quality metric in the trajectory history

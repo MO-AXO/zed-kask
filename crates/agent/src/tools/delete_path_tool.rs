@@ -305,9 +305,7 @@ mod tests {
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
         let tool = Arc::new(DeletePathTool::new(project, action_log));
-        let input_path = PathBuf::from("~")
-            .join(".agents")
-            .join("skills")
+        let input_path = agent_skills::global_skills_dir()
             .join("my-skill")
             .to_string_lossy()
             .into_owned();
@@ -364,9 +362,7 @@ mod tests {
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
         let tool = Arc::new(DeletePathTool::new(project, action_log));
-        let input_path = PathBuf::from("~")
-            .join(".agents")
-            .join("skills")
+        let input_path = agent_skills::global_skills_dir()
             .join("my-skill")
             .join("references")
             .join("notes.md")
@@ -408,9 +404,7 @@ mod tests {
 
         let action_log = cx.new(|_| ActionLog::new(project.clone()));
         let tool = Arc::new(DeletePathTool::new(project, action_log));
-        let input_path = PathBuf::from("~")
-            .join(".agents")
-            .join("skills")
+        let input_path = agent_skills::global_skills_dir()
             .to_string_lossy()
             .into_owned();
 
