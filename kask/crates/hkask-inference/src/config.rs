@@ -689,11 +689,15 @@ mod tests {
         assert!(ProviderId::looks_like_prefix("fal.ai/bar"));
         assert!(ProviderId::looks_like_prefix("SomeUnknown/model"));
         // No slash, too short, or empty prefix segment = not prefix-shaped.
+        // No slash, too short, or empty prefix segment = not prefix-shaped.
         assert!(!ProviderId::looks_like_prefix("qwen3:8b"));
         assert!(!ProviderId::looks_like_prefix("deepseek-v4-pro"));
         assert!(!ProviderId::looks_like_prefix("DI"));
-        assert!(!ProviderId::looks_like_prefix("ab/c"));
         assert!(!ProviderId::looks_like_prefix("DeepInfra/"));
         assert!(!ProviderId::looks_like_prefix("/model"));
+        // `ab/c` has the prefix shape (non-empty segment before `/`) —
+        // `looks_like_prefix` only checks shape, not whether the prefix is
+        // recognized. `parse_from_model` handles recognition.
+        assert!(ProviderId::looks_like_prefix("ab/c"));
     }
 }

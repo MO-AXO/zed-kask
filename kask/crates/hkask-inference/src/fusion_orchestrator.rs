@@ -2059,20 +2059,21 @@ mod tests {
 
     #[test]
     fn compute_pressure_zero_when_no_latency_recorded() {
-        // Reset the static to 0 by storing 0.
         super::ROLLING_LATENCY_MS.store(0, std::sync::atomic::Ordering::Relaxed);
         let p = super::compute_pressure();
         assert_eq!(p, 0.0, "no latency recorded → zero pressure");
+        // Reset to 0 so concurrent pressure tests don't see a stale value.
+        super::ROLLING_LATENCY_MS.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[test]
     fn compute_pressure_scales_with_latency() {
-        // Reset first — other pressure tests may have left a value in the
-        // shared static. Without this, parallel test execution causes flakes.
         super::ROLLING_LATENCY_MS.store(5000, std::sync::atomic::Ordering::Relaxed);
         let p = super::compute_pressure();
         // 5000ms → (5000 - 2000) / 6000 = 0.5
         assert!((p - 0.5).abs() < 1e-6, "5000ms → pressure 0.5, got {}", p);
+        // Reset so concurrent pressure tests don't see a stale value.
+        super::ROLLING_LATENCY_MS.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[test]
@@ -2080,6 +2081,8 @@ mod tests {
         super::ROLLING_LATENCY_MS.store(20000, std::sync::atomic::Ordering::Relaxed);
         let p = super::compute_pressure();
         assert_eq!(p, 1.0, "20000ms → pressure clamped to 1.0");
+        // Reset so concurrent pressure tests don't see a stale value.
+        super::ROLLING_LATENCY_MS.store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[test]
