@@ -1004,6 +1004,19 @@ mod tests {
         let embedding_store = EmbeddingStore::from_driver(driver, 1024);
         let semantic = Arc::new(SemanticMemory::new(h_mem_store2, embedding_store));
 
+        // Curator store — a separate in-memory driver so the curator copy
+        // lands in a different DB, mirroring production where the curator
+        // has its own `pod.db`.
+        let curator_driver: Arc<dyn hkask_storage::DatabaseDriver> =
+            SqliteDriver::in_memory_driver();
+        let curator_h_mem_store =
+            HMemStore::from_driver(Arc::clone(&curator_driver)).expect("curator hmem store init");
+        let curator_embedding_store = EmbeddingStore::from_driver(curator_driver, 1024);
+        let curator_semantic = Arc::new(SemanticMemory::new(
+            curator_h_mem_store,
+            curator_embedding_store,
+        ));
+
         // Tests don't call embed — use a stub port with no backing task.
         let embedding_port = LanguageModelEmbeddingPort::for_tests();
 
@@ -1023,7 +1036,7 @@ mod tests {
         RealMemoryPort {
             episodic,
             semantic,
-            curator_semantic: Some(Arc::clone(&semantic)),
+            curator_semantic: Some(curator_semantic),
             embedding_port,
             embedding_model: "test-model".to_string(),
             user_webid: test_webid(),
