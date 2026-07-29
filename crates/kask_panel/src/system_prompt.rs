@@ -40,9 +40,7 @@ const CURATOR_GUIDANCE_TEMPLATE: &str =
 pub fn render_curator_guidance() -> String {
     let mut env = Environment::new();
     env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
-    env.add_template("guidance", CURATOR_GUIDANCE_TEMPLATE)
-        .expect("curator guidance template must be valid");
-    env.render("guidance", ())
+    env.render_str(CURATOR_GUIDANCE_TEMPLATE, ())
         .expect("curator guidance template must render with empty context")
         .trim()
         .to_string()
@@ -87,9 +85,7 @@ pub fn render_tab_system_prompt(
 
     let mut env = Environment::new();
     env.set_undefined_behavior(minijinja::UndefinedBehavior::Lenient);
-    env.add_template("tab", TAB_SYSTEM_TEMPLATE)
-        .expect("tab system prompt template must be valid");
-    env.render("tab", &context)
+    env.render_str(TAB_SYSTEM_TEMPLATE, &context)
         .expect("tab system prompt template must render")
         .trim()
         .to_string()

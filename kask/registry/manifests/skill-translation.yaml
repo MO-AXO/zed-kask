@@ -65,7 +65,7 @@ steps:
   - ordinal: 2
     action: compute
     compute_ref: kata.convergence_check
-    description: CHECK CONVERGENCE: Cauchy criterion. Deterministic.
+    description: "CHECK CONVERGENCE: Cauchy criterion. Deterministic."
     input_mapping:
       hypotenuse: 0.0
       hypotenuse_epsilon: "{{ _convergence.hypotenuse_epsilon | default(0.05) }}"
