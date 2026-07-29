@@ -53,6 +53,7 @@ mod curator_session;
 mod kanban_view;
 mod markdown_render;
 mod panel_button;
+mod persistence;
 mod portfolio_view;
 mod scenarios_view;
 mod system_prompt;
@@ -353,6 +354,8 @@ impl KaskPanel {
         // Wire the completion provider now that we have a weak handle.
         let weak = panel.downgrade();
         panel.update(cx, |panel, cx| {
+            // Load persisted conversations from the KVP store.
+            panel.load_tabs(cx);
             panel.input_editor.update(cx, |editor, cx| {
                 editor
                     .set_completion_provider(Some(Rc::new(KaskToolCompletionProvider::new(weak))));
@@ -397,6 +400,34 @@ impl KaskPanel {
     /// visible. Called after every message push and on server switch.
     fn scroll_messages_to_bottom(&self, _cx: &mut Context<Self>) {
         self.messages_scroll_handle.scroll_to_bottom();
+    }
+
+    /// Save the active tab's conversation to the KVP store (best-effort).
+    fn save_current_tab(&self, cx: &mut Context<Self>) {
+        let index = self.selected_server;
+        if let Some(tab) = self.tabs.get(&index) {
+            persistence::save_tab(index, &tab.messages, cx);
+        }
+    }
+
+    /// Load all tabs from the KVP store on panel construction.
+    fn load_tabs(&mut self, cx: &mut Context<Self>) {
+        for index in 0..BUILT_IN_MCP_SERVERS.len() {
+            if let Some(messages) = persistence::load_tab_sync(index, cx) {
+                if !messages.is_empty() {
+                    self.tabs.insert(
+                        index,
+                        TabState {
+                            messages,
+                            session: None,
+                            busy: false,
+                            spinner_frame: 0,
+                            cached_tools: None,
+                        },
+                    );
+                }
+            }
+        }
     }
 
     /// Lazily fetch the selected server's tool list in the background and
@@ -468,7 +499,7 @@ impl KaskPanel {
                 let server = self.selected_server_name().to_string();
                 self.current_tab().messages = vec![KaskMessage::system(format!(
                     "Cleared. {server} conversation reset."
-                )];
+                ))];
                 self.scroll_messages_to_bottom(cx);
                 cx.notify();
             }
@@ -608,6 +639,7 @@ impl KaskPanel {
                         }
                     }
                     this.current_tab().busy = false;
+                    this.save_current_tab(cx);
                     this.scroll_messages_to_bottom(cx);
                     cx.notify();
                 })
@@ -655,17 +687,19 @@ impl KaskPanel {
         // Lazily construct (or reuse) the per-tab CuratorSession. The
         // session owns this tab's conversation history; the panel never
         // inspects it. See `kask-panel-redesign.md` §2.1.
-        let session = self
+        let session: Arc<dyn CuratorSession> = self
             .current_tab()
             .session
-            .get_or_insert_with(|| factory.session_for(&server));
+            .get_or_insert_with(|| factory.session_for(&server))
+            .clone();
 
         // Build the system prompt from the cached tool list. If the cache
         // is empty or stale, the system prompt will note that no tools were
         // discovered — the LLM can still respond, just without tool
         // awareness. The cache is populated by `/tools` or the lazy fetch
         // below.
-        let tools: Vec<ToolDescriptor> = self.current_tab().cached_tools.clone().unwrap_or_default();
+        let tools: Vec<ToolDescriptor> =
+            self.current_tab().cached_tools.clone().unwrap_or_default();
         let system_prompt = build_system_prompt(&server, &tools, prompt);
         let tool_scope = ToolScope::Server(server.clone());
 
@@ -801,6 +835,7 @@ impl KaskPanel {
                     }
                 }
                 this.current_tab().busy = false;
+                this.save_current_tab(cx);
                 this.scroll_messages_to_bottom(cx);
                 cx.notify();
             })
@@ -1151,19 +1186,24 @@ impl KaskPanel {
             .child(Icon::new(IconName::Kask).color(Color::Muted))
             .child(gas_label)
             .child(reg_label)
-            .when(self.busy, |this| {
-                this.child(
-                    IconButton::new("cancel-turn", IconName::Stop)
-                        .style(ButtonStyle::Subtle)
-                        .icon_color(Color::Error)
-                        .tooltip(move |window, cx| {
-                            ui::Tooltip::text("Cancel generation")(window, cx)
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.cancel_generation(cx);
-                        })),
-                )
-            })
+            .when(
+                self.tabs
+                    .get(&self.selected_server)
+                    .map_or(false, |t| t.busy),
+                |this| {
+                    this.child(
+                        IconButton::new("cancel-turn", IconName::Stop)
+                            .style(ButtonStyle::Subtle)
+                            .icon_color(Color::Error)
+                            .tooltip(move |window, cx| {
+                                ui::Tooltip::text("Cancel generation")(window, cx)
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.cancel_generation(cx);
+                            })),
+                    )
+                },
+            )
     }
 }
 
@@ -1326,8 +1366,9 @@ impl Render for KaskPanel {
         self.current_messages();
 
         // Animate the spinner while busy.
-        if self.busy {
-            self.spinner_frame = self.spinner_frame.wrapping_add(1);
+        if self.current_tab().busy {
+            let tab = self.current_tab();
+            tab.spinner_frame = tab.spinner_frame.wrapping_add(1);
             // Schedule a re-render to keep the spinner animating.
             cx.notify();
         }
@@ -1335,7 +1376,7 @@ impl Render for KaskPanel {
         // Refresh the regulation/gas snapshot on each render when not busy
         // and no fetch is in flight. The fetch is on a background task; the
         // result triggers a re-render via `cx.notify()`.
-        if !self.busy {
+        if !self.current_tab().busy {
             self.refresh_status(cx);
         }
 
@@ -1489,13 +1530,10 @@ impl CompletionProvider for KaskToolCompletionProvider {
             // Read the cached tools from the panel.
             let tools = panel
                 .read_with(cx, |panel, _| {
-                    let (server_index, tools) = panel.cached_tools.as_ref()?;
-                    // Only offer completions if the cache is for the currently
-                    // selected server.
-                    if *server_index != panel.selected_server {
-                        return None;
-                    }
-                    Some(tools.clone())
+                    panel
+                        .tabs
+                        .get(&panel.selected_server)
+                        .and_then(|t| t.cached_tools.clone())
                 })
                 .ok()
                 .flatten();
