@@ -81,6 +81,12 @@ pub(crate) fn render_economic_guardrails_page(
         .aria_label("Max Output Price (USD per Million Tokens)")
         .confirm_on_focus_out()
         .on_confirm(move |value, _window, cx| {
+            // Only write when the filter is enabled; editing the threshold while
+            // the toggle is off does not silently enable the filter. The toggle
+            // controls enable/disable; this field controls the value.
+            if !enabled {
+                return;
+            }
             if let Some(text) = value {
                 let trimmed = text.trim();
                 // Empty input disables the filter.

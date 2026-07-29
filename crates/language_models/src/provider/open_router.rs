@@ -35,9 +35,11 @@ const MAX_OPEN_ROUTER_SESSION_ID_LENGTH: usize = 256;
 ///
 /// - `None` threshold disables the filter (everything passes).
 /// - Models with no reported price (`output_price_per_token` is `None`) pass — this
-///   covers `openrouter/auto` (which reports a `-1` sentinel that fails to parse)
-///   and user-configured models.
-/// - Negative or non-finite prices pass (treated as sentinel/unknown).
+///   covers models whose `pricing.completion` field is absent, and user-configured
+///   models (which always have `output_price_per_token: None`).
+/// - Negative or non-finite prices pass (treated as sentinel/unknown). OpenRouter
+///   uses `-1` for router models like `openrouter/auto`; it parses to `-1.0` and is
+///   treated as "no price" here rather than dropped.
 /// - Otherwise the model passes iff its per-token output price is `<=` the threshold.
 pub(crate) fn passes_output_price_filter(
     model: &open_router::Model,
