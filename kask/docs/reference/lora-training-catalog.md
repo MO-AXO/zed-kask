@@ -122,6 +122,13 @@ Only apply if QLoRA mode selected (G2).
 |------|----|-----------|--------|
 | Harness-method compatibility | G-H1 | Selected harness supports the selected method/trainer. axolotl=SFT/DPO/KTO/ORPO/GRPO/GDPO/RM/FullFT (via rl:); trl=SFT/DPO/KTO/ORPO/Reward; ludwig=SFT/DPO/KTO/ORPO/GRPO + advanced PEFT initializers (PiSSA, EVA, CorDA, LoftQ). trl_trainer is TRL-specific — warn (not refuse) when set with axolotl or ludwig. | Axolotl — https://docs.axolotl.ai/docs/rlhf.html; TRL — huggingface.co/docs/trl/index; Ludwig — ludwig.ai/latest/configuration/ |
 
+### Runtime Gates (v0.32.0 — runtime alert + persistence preflight)
+
+| Gate | ID | Assertion | Source |
+|------|----|-----------|--------|
+| Runtime alert | G-R1 | Consumes `runtime_metrics` from the completion manifest (loss, grad_norm, alerts) during `training_status`. Flags loss spikes, NaN gradients, vanishing loss. `deferred` when `runtime_metrics` absent; `not_applicable` in preflight. | PEFT training diagnostics; hKask v0.32.0 |
+| Persistence preflight | G-P1 | Verifies HuggingFace artifact persistence is configured before training starts. Checks `HF_TOKEN` presence and write access to the target repo. Refuses if persistence is required but unconfigured. | HuggingFace Hub API; hKask v0.32.0 |
+
 ## Convergence Metric Weights
 
 Computed by the `convergence-check` phase. Metric ∈ [0, 1] where 0 =

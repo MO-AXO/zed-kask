@@ -929,9 +929,19 @@ impl KaskSettings {
     ) -> std::collections::HashMap<String, String> {
         let mut env = self.mcp_env();
         for (env_var, url) in credential_urls {
-            // Don't override env vars already set in the process environment —
-            // the operator's shell takes precedence.
-            if std::env::var(env_var).is_ok() {
+            // The operator's shell takes precedence — but only when it carries
+            // a meaningful (non-empty) value. An empty env var (e.g. `FOO=` in
+            // the parent shell) is not a meaningful override: it would leave
+            // the child process with no key while suppressing the keychain
+            // injection, silently breaking inference with an "API key not
+            // configured" error that the operator cannot trace back to this
+            // skip. This was the polarity inversion in the credential-injection
+            // feedback loop: the very condition that should trigger injection
+            // (key missing from the child) suppressed it.
+            if std::env::var(env_var)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+            {
                 continue;
             }
             if let Ok(Some((_username, password))) =
