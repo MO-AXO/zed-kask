@@ -102,10 +102,18 @@ pub struct RealMemoryPort {
     embedding_model: String,
     user_webid: WebID,
     curator_webid: WebID,
-    /// Consolidation service — promotes episodic h_mems to semantic memory.
-    /// `None` when consolidation is disabled (`consolidation_cadence_secs == 0`).
+    /// Consolidation service — promotes the user's episodic h_mems to the
+    /// user's semantic memory. `None` when consolidation is disabled
+    /// (`consolidation_cadence_secs == 0`).
     consolidation: Option<Arc<ConsolidationService>>,
-    /// Consolidation cadence in seconds. `0` disables the trigger.
+    /// Consolidation service for the curator's stores — promotes the
+    /// curator's episodic h_mems (curator-perspective first-person turns) to
+    /// the curator's semantic memory, mirroring the user's consolidation loop.
+    /// `None` when consolidation is disabled OR when the curator stores are
+    /// unavailable (`curator_episodic` / `curator_semantic` is `None`).
+    curator_consolidation: Option<Arc<ConsolidationService>>,
+    /// Consolidation cadence in seconds. `0` disables the trigger for both
+    /// the user and curator consolidation services.
     consolidation_cadence_secs: u64,
     /// Confidence floor for semantic cleanup during consolidation.
     confidence_floor: f64,
@@ -250,6 +258,30 @@ impl RealMemoryPort {
             None
         };
 
+        // Curator consolidation service — promotes the curator's episodic
+        // h_mems (curator-perspective first-person turns) to the curator's
+        // semantic memory, mirroring the user's consolidation loop. Without
+        // this, the curator's episodic store grows unbounded and the curator
+        // never learns consolidated facts from its own experience — the
+        // asymmetry flagged in the curator-memory audit. Skipped when the
+        // cadence is zero OR when the curator stores are unavailable (graceful
+        // degradation — the curator runs without consolidation, not errors).
+        let curator_consolidation = if consolidation_cadence_secs > 0
+            && let (Some(curator_episodic), Some(curator_semantic)) =
+                (&curator_episodic, &curator_semantic)
+        {
+            let bridge = Arc::new(ConsolidationBridge::new(
+                Arc::clone(curator_episodic),
+                Arc::clone(curator_semantic),
+            ));
+            Some(Arc::new(ConsolidationService::new(
+                bridge,
+                Arc::clone(curator_semantic),
+            )))
+        } else {
+            None
+        };
+
         Ok(Self {
             episodic,
             semantic,
@@ -260,6 +292,7 @@ impl RealMemoryPort {
             user_webid,
             curator_webid,
             consolidation,
+            curator_consolidation,
             consolidation_cadence_secs,
             confidence_floor,
             last_consolidation: Mutex::new(None),
@@ -378,7 +411,7 @@ impl RealMemoryPort {
             target: "reg.memory",
             cadence_secs = self.consolidation_cadence_secs,
             confidence_floor = self.confidence_floor,
-            "Consolidation cadence elapsed — firing curator consolidation"
+            "Consolidation cadence elapsed — firing consolidation"
         );
 
         let request = hkask_types::ConsolidationRequest {
@@ -387,22 +420,47 @@ impl RealMemoryPort {
             max_semantic_triples: None,
         };
 
-        match consolidation.consolidate(&self.user_webid, request) {
+        match consolidation.consolidate(&self.user_webid, request.clone()) {
             Ok(outcome) => {
                 tracing::info!(
                     target: "reg.memory",
                     consolidated = outcome.consolidated_count,
                     deleted = outcome.deleted_count,
                     failed = outcome.failed_count,
-                    "Consolidation pass complete"
+                    "User consolidation pass complete"
                 );
             }
             Err(e) => {
                 tracing::warn!(
                     target: "reg.memory",
                     error = %e,
-                    "Consolidation pass failed"
+                    "User consolidation pass failed"
                 );
+            }
+        }
+
+        // Fire the curator consolidation pass too — promotes the curator's
+        // episodic turns to the curator's semantic memory. Skipped silently
+        // when `curator_consolidation` is `None` (cadence 0 or curator stores
+        // unavailable).
+        if let Some(curator_consolidation) = &self.curator_consolidation {
+            match curator_consolidation.consolidate(&self.curator_webid, request) {
+                Ok(outcome) => {
+                    tracing::info!(
+                        target: "reg.memory",
+                        consolidated = outcome.consolidated_count,
+                        deleted = outcome.deleted_count,
+                        failed = outcome.failed_count,
+                        "Curator consolidation pass complete"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "reg.memory",
+                        error = %e,
+                        "Curator consolidation pass failed"
+                    );
+                }
             }
         }
     }
@@ -427,7 +485,9 @@ impl RealMemoryPort {
             return None;
         }
         let consolidation = self.consolidation.clone()?;
+        let curator_consolidation = self.curator_consolidation.clone();
         let user_webid = self.user_webid;
+        let curator_webid = self.curator_webid;
         let confidence_floor = self.confidence_floor;
         let last_consolidation = self.last_consolidation.lock().ok().and_then(|guard| *guard);
         let cadence = self.consolidation_cadence_secs;
@@ -489,22 +549,47 @@ impl RealMemoryPort {
                     confidence_floor,
                     "Consolidation timer fired"
                 );
-                match consolidation.consolidate(&user_webid, request) {
+                match consolidation.consolidate(&user_webid, request.clone()) {
                     Ok(outcome) => {
                         tracing::info!(
                             target: "reg.memory",
                             consolidated = outcome.consolidated_count,
                             deleted = outcome.deleted_count,
                             failed = outcome.failed_count,
-                            "Consolidation timer pass complete"
+                            "User consolidation timer pass complete"
                         );
                     }
                     Err(e) => {
                         tracing::warn!(
                             target: "reg.memory",
                             error = %e,
-                            "Consolidation timer pass failed"
+                            "User consolidation timer pass failed"
                         );
+                    }
+                }
+                // Fire the curator consolidation pass on the same cadence —
+                // promotes the curator's episodic turns to the curator's
+                // semantic memory, mirroring the user pass. Skipped silently
+                // when `curator_consolidation` is `None` (curator stores
+                // unavailable).
+                if let Some(curator_consolidation) = &curator_consolidation {
+                    match curator_consolidation.consolidate(&curator_webid, request) {
+                        Ok(outcome) => {
+                            tracing::info!(
+                                target: "reg.memory",
+                                consolidated = outcome.consolidated_count,
+                                deleted = outcome.deleted_count,
+                                failed = outcome.failed_count,
+                                "Curator consolidation timer pass complete"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "reg.memory",
+                                error = %e,
+                                "Curator consolidation timer pass failed"
+                            );
+                        }
                     }
                 }
             }
@@ -731,21 +816,40 @@ impl MemoryPort for RealMemoryPort {
                     })
                     .await;
 
-                if let Ok(Ok(vectors)) = vectors
-                    && let Some(vector) = vectors.into_iter().next()
-                    && let Some(ref curator_semantic) = self.curator_semantic
-                    && let Err(e) = curator_semantic.store_embedding(
-                        &embedding_entity,
-                        &vector,
-                        &self.embedding_model,
-                    )
-                {
-                    tracing::warn!(
-                        target: "reg.memory",
-                        thread_id = %thread_id,
-                        error = %e,
-                        "Failed to store curator prompt embedding"
-                    );
+                match vectors {
+                    Ok(Ok(vectors)) => {
+                        if let Some(vector) = vectors.into_iter().next()
+                            && let Some(ref curator_semantic) = self.curator_semantic
+                            && let Err(e) = curator_semantic.store_embedding(
+                                &embedding_entity,
+                                &vector,
+                                &self.embedding_model,
+                            )
+                        {
+                            tracing::warn!(
+                                target: "reg.memory",
+                                thread_id = %thread_id,
+                                error = %e,
+                                "Failed to store curator prompt embedding"
+                            );
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            target: "reg.memory",
+                            thread_id = %thread_id,
+                            error = %e,
+                            "Failed to embed curator prompt — embedding-based recall will not work for this turn"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "reg.memory",
+                            thread_id = %thread_id,
+                            error = %e,
+                            "Curator embedding task panicked — embedding-based recall will not work for this turn"
+                        );
+                    }
                 }
 
                 tracing::info!(
@@ -909,6 +1013,125 @@ impl MemoryPort for RealMemoryPort {
         limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a>> {
         Box::pin(async move {
+            self.recall_from(
+                Some(&self.episodic),
+                &self.semantic,
+                self.user_webid,
+                query,
+                limit,
+                "recall_context",
+            )
+            .await
+        })
+    }
+
+    fn recall_thread<'a>(
+        &'a self,
+        thread_id: &'a str,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.recall_thread_from(
+                Some(&self.episodic),
+                &self.semantic,
+                self.user_webid,
+                thread_id,
+                limit,
+                "recall_thread",
+            )
+            .await
+        })
+    }
+}
+
+impl RealMemoryPort {
+    /// Recall memory snippets from the **curator's** sovereign stores.
+    ///
+    /// This mirrors `recall_context` but reads from `curator_semantic` and
+    /// `curator_episodic` (both in `agents/curator/pod.db`) using the
+    /// curator's WebID for perspective-scoped episodic queries. Used by the
+    /// curator context injector (`BridgeCuratorContextInjector`) so the
+    /// Curator recalls its own memory — a parallel of the user agent's
+    /// `BridgeContextInjector`.
+    ///
+    /// Returns `Ok(vec![])` when the curator stores are not available
+    /// (graceful degradation — the curator runs without recall instead of
+    /// erroring).
+    pub fn recall_context_curator<'a>(
+        &'a self,
+        query: &'a str,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(ref curator_semantic) = self.curator_semantic else {
+                return Ok(Vec::new());
+            };
+            // Curator episodic is optional (graceful degradation). The helper
+            // accepts an `Option<&EpisodicMemory>` so the episodic keyword
+            // search is skipped when the store is unavailable.
+            let curator_episodic = self.curator_episodic.as_ref();
+            self.recall_from(
+                curator_episodic,
+                curator_semantic,
+                self.curator_webid,
+                query,
+                limit,
+                "recall_context_curator",
+            )
+            .await
+        })
+    }
+
+    /// Recall all memory snippets from the **curator's** sovereign stores for
+    /// a specific thread — the entity-scoped parallel of `recall_thread`.
+    ///
+    /// Used by the curator context injector's `inject_static_context` to load
+    /// the curator's prior turns on this thread into the system prompt once
+    /// per session. Returns `Ok(vec![])` when the curator stores are not
+    /// available (graceful degradation).
+    pub fn recall_thread_curator<'a>(
+        &'a self,
+        thread_id: &'a str,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(ref curator_semantic) = self.curator_semantic else {
+                return Ok(Vec::new());
+            };
+            let curator_episodic = self.curator_episodic.as_ref();
+            self.recall_thread_from(
+                curator_episodic,
+                curator_semantic,
+                self.curator_webid,
+                thread_id,
+                limit,
+                "recall_thread_curator",
+            )
+            .await
+        })
+    }
+
+    /// Shared recall implementation for both the user and curator stores.
+    ///
+    /// `episodic` is `Option` so the curator path (where `curator_episodic`
+    /// may be `None`) can call the same helper without a separate branch.
+    /// `perspective` scopes the episodic keyword search to the owning agent's
+    /// WebID. `log_label` is used in tracing so the user and curator paths
+    /// are distinguishable in logs.
+    ///
+    /// This was previously duplicated verbatim between `recall_context` and
+    /// `recall_context_curator`; the duplication was a maintenance hazard
+    /// (a fix to one had to be manually mirrored in the other).
+    fn recall_from<'a>(
+        &'a self,
+        episodic: Option<&'a Arc<EpisodicMemory>>,
+        semantic: &'a Arc<SemanticMemory>,
+        perspective: WebID,
+        query: &'a str,
+        limit: usize,
+        log_label: &'static str,
+    ) -> impl Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a {
+        async move {
             // Collect (snippet, h_mem_id, source) triples so we can sort,
             // truncate, and touch the correct store for each survivor.
             // Tracking the source alongside the id avoids double-touching
@@ -943,14 +1166,14 @@ impl MemoryPort for RealMemoryPort {
             if let Ok(Ok(vectors)) = vectors
                 && let Some(query_vector) = vectors.into_iter().next()
             {
-                match self.semantic.search_similar(&query_vector, limit) {
+                match semantic.search_similar(&query_vector, limit) {
                     Ok(results) => {
                         for result in results {
                             // Retrieve the h_mem associated with this embedding
                             // to get the full text content. Use the untouched
                             // variant — we touch only the injected ones below.
                             let entity_ref = &result.embedding.entity_ref;
-                            if let Ok(h_mems) = self.semantic.query_deduped_untouched(entity_ref) {
+                            if let Ok(h_mems) = semantic.query_deduped_untouched(entity_ref) {
                                 for h_mem in h_mems {
                                     let text = h_mem.value.as_str().unwrap_or("").to_string();
                                     if !text.is_empty() {
@@ -973,6 +1196,7 @@ impl MemoryPort for RealMemoryPort {
                         tracing::warn!(
                             target: "reg.memory",
                             error = %e,
+                            label = log_label,
                             "Semantic search failed during recall"
                         );
                     }
@@ -981,7 +1205,7 @@ impl MemoryPort for RealMemoryPort {
 
             // ── 2. Episodic search (keyword overlap) ─────────────────────
             //
-            // Load episodic h_mems for the user's chat threads ONCE, then
+            // Load episodic h_mems for the agent's chat threads ONCE, then
             // filter by keyword overlap in memory. The previous implementation
             // re-queried the store for each query word (5x) using the same
             // fixed entity string "chat:thread:" — a redundant N+1 scan that
@@ -996,7 +1220,9 @@ impl MemoryPort for RealMemoryPort {
                 .map(|w| w.to_lowercase())
                 .collect();
 
-            if !query_words.is_empty() {
+            if !query_words.is_empty()
+                && let Some(episodic) = episodic
+            {
                 // Use a prefix query to load all chat:thread:* episodic h_mems
                 // in a single SQL call. The previous implementation queried
                 // the exact entity "chat:thread:" (no thread_id suffix), which
@@ -1012,9 +1238,9 @@ impl MemoryPort for RealMemoryPort {
                 // reasonable pool to filter from without unbounded loading.
                 let entity_prefix = "chat:thread:".to_string();
                 let recall_budget = limit.saturating_mul(10).max(50);
-                if let Ok(h_mems) = self.episodic.query_for_deduped_untouched_by_prefix(
+                if let Ok(h_mems) = episodic.query_for_deduped_untouched_by_prefix(
                     &entity_prefix,
-                    self.user_webid,
+                    perspective,
                     recall_budget,
                 ) {
                     for h_mem in h_mems {
@@ -1063,10 +1289,14 @@ impl MemoryPort for RealMemoryPort {
             for c in &candidates {
                 let result: Result<(), Box<dyn std::error::Error>> = match c.source {
                     RecallSource::Episodic => {
-                        self.episodic.touch_recall(&c.h_mem_id).map_err(Into::into)
+                        if let Some(episodic) = episodic {
+                            episodic.touch_recall(&c.h_mem_id).map_err(Into::into)
+                        } else {
+                            Ok(())
+                        }
                     }
                     RecallSource::Semantic => {
-                        self.semantic.touch_recall(&c.h_mem_id).map_err(Into::into)
+                        semantic.touch_recall(&c.h_mem_id).map_err(Into::into)
                     }
                 };
                 if let Err(e) = result {
@@ -1074,7 +1304,8 @@ impl MemoryPort for RealMemoryPort {
                         target: "reg.memory.decay",
                         triple_id = %c.h_mem_id.as_uuid(),
                         error = %e,
-                        "Failed to touch_recall h_mem during recall_context"
+                        label = log_label,
+                        "Failed to touch_recall h_mem during recall"
                     );
                 }
             }
@@ -1087,38 +1318,35 @@ impl MemoryPort for RealMemoryPort {
                 query_len = query.len(),
                 recalled = snippets.len(),
                 touched,
+                label = log_label,
                 "Recalled memory snippets for context injection"
             );
 
             Ok(snippets)
-        })
+        }
     }
-}
 
-impl RealMemoryPort {
-    /// Recall memory snippets from the **curator's** sovereign stores.
+    /// Shared thread-scoped recall implementation for both the user and curator
+    /// stores. Mirrors `recall_from` but uses exact-entity queries instead of
+    /// content-similarity / keyword overlap.
     ///
-    /// This mirrors `recall_context` but reads from `curator_semantic` and
-    /// `curator_episodic` (both in `agents/curator/pod.db`) using the
-    /// curator's WebID for perspective-scoped episodic queries. Used by the
-    /// curator context injector (`BridgeCuratorContextInjector`) so the
-    /// Curator recalls its own memory — a parallel of the user agent's
-    /// `BridgeContextInjector`.
-    ///
-    /// Returns `Ok(vec![])` when the curator stores are not available
-    /// (graceful degradation — the curator runs without recall instead of
-    /// erroring).
-    pub fn recall_context_curator<'a>(
+    /// The episodic entity is `chat:thread:{thread_id}` (scoped by `perspective`),
+    /// and the semantic entity is `curator:thread:{thread_id}`. This is the
+    /// correct recall path for `inject_static_context` — the previous
+    /// implementation passed the `thread_id` UUID as the query to
+    /// `recall_context`, which never matched stored turn text (the stored
+    /// embeddings are of `user_input`, not the thread_id), so static context
+    /// injection was dead code for both the user and curator injectors.
+    fn recall_thread_from<'a>(
         &'a self,
-        query: &'a str,
+        episodic: Option<&'a Arc<EpisodicMemory>>,
+        semantic: &'a Arc<SemanticMemory>,
+        perspective: WebID,
+        thread_id: &'a str,
         limit: usize,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a>> {
-        Box::pin(async move {
-            let Some(ref curator_semantic) = self.curator_semantic else {
-                return Ok(Vec::new());
-            };
-            let curator_episodic = self.curator_episodic.as_ref();
-
+        log_label: &'static str,
+    ) -> impl Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a {
+        async move {
             enum RecallSource {
                 Episodic,
                 Semantic,
@@ -1130,80 +1358,15 @@ impl RealMemoryPort {
             }
             let mut candidates: Vec<Candidate> = Vec::new();
 
-            // ── 1. Semantic search (embedding KNN) on the curator's store ──
-            let embedding_model = self.embedding_model.clone();
-            let embedding_port = self.embedding_port.clone();
-            let query_owned = query.to_string();
-            let vectors = self
-                .tokio_handle
-                .spawn(async move { embedding_port.embed(&embedding_model, &[query_owned]).await })
-                .await;
-
-            if let Ok(Ok(vectors)) = vectors
-                && let Some(query_vector) = vectors.into_iter().next()
-            {
-                match curator_semantic.search_similar(&query_vector, limit) {
-                    Ok(results) => {
-                        for result in results {
-                            let entity_ref = &result.embedding.entity_ref;
-                            if let Ok(h_mems) = curator_semantic.query_deduped_untouched(entity_ref)
-                            {
-                                for h_mem in h_mems {
-                                    let text = h_mem.value.as_str().unwrap_or("").to_string();
-                                    if !text.is_empty() {
-                                        candidates.push(Candidate {
-                                            snippet: MemorySnippet {
-                                                text,
-                                                source: "semantic".to_string(),
-                                                confidence: h_mem.confidence.value(),
-                                                relevance_score: 1.0 - result.distance,
-                                            },
-                                            h_mem_id: h_mem.id,
-                                            source: RecallSource::Semantic,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "reg.memory",
-                            error = %e,
-                            "Curator semantic search failed during recall"
-                        );
-                    }
-                }
-            }
-
-            // ── 2. Episodic search (keyword overlap) on the curator's store ──
-            let query_words: Vec<String> = query
-                .split_whitespace()
-                .filter(|w| w.len() > 3)
-                .take(5)
-                .map(|w| w.to_lowercase())
-                .collect();
-
-            if !query_words.is_empty()
-                && let Some(curator_episodic) = curator_episodic
-            {
-                let entity_prefix = "chat:thread:".to_string();
-                let recall_budget = limit.saturating_mul(10).max(50);
-                if let Ok(h_mems) = curator_episodic.query_for_deduped_untouched_by_prefix(
-                    &entity_prefix,
-                    self.curator_webid,
-                    recall_budget,
-                ) {
+            // ── 1. Episodic: exact entity match, perspective-scoped ─────
+            let episodic_entity = format!("chat:thread:{thread_id}");
+            if let Some(episodic) = episodic {
+                if let Ok(h_mems) =
+                    episodic.query_for_deduped_untouched(&episodic_entity, perspective)
+                {
                     for h_mem in h_mems {
                         let text = h_mem.value.as_str().unwrap_or("").to_string();
                         if text.is_empty() {
-                            continue;
-                        }
-                        let text_lower = text.to_lowercase();
-                        if !query_words.iter().any(|w| text_lower.contains(w)) {
-                            continue;
-                        }
-                        if candidates.iter().any(|c| c.snippet.text == text) {
                             continue;
                         }
                         candidates.push(Candidate {
@@ -1211,7 +1374,7 @@ impl RealMemoryPort {
                                 text,
                                 source: "episodic".to_string(),
                                 confidence: h_mem.confidence.value(),
-                                relevance_score: 0.5,
+                                relevance_score: 1.0,
                             },
                             h_mem_id: h_mem.id,
                             source: RecallSource::Episodic,
@@ -1220,37 +1383,58 @@ impl RealMemoryPort {
                 }
             }
 
-            // ── 3. Sort by relevance and truncate ─────────────────────────
-            candidates.sort_by(|a, b| {
-                b.snippet
-                    .relevance_score
-                    .partial_cmp(&a.snippet.relevance_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            // ── 2. Semantic: exact entity match (curator shared copy) ───
+            let semantic_entity = format!("curator:thread:{thread_id}");
+            if let Ok(h_mems) = semantic.query_deduped_untouched(&semantic_entity) {
+                for h_mem in h_mems {
+                    let text = h_mem.value.as_str().unwrap_or("").to_string();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    // Dedup against episodic by text
+                    if candidates.iter().any(|c| c.snippet.text == text) {
+                        continue;
+                    }
+                    candidates.push(Candidate {
+                        snippet: MemorySnippet {
+                            text,
+                            source: "semantic".to_string(),
+                            confidence: h_mem.confidence.value(),
+                            relevance_score: 1.0,
+                        },
+                        h_mem_id: h_mem.id,
+                        source: RecallSource::Semantic,
+                    });
+                }
+            }
+
+            // ── 3. Sort by recency (stable) and truncate ────────────────
+            // `query_for_deduped_untouched` and `query_deduped_untouched`
+            // both return most-recent-first, so a stable sort preserves that
+            // order within equal-relevance candidates.
             candidates.truncate(limit);
 
             // ── 4. Touch only the injected h_mems ────────────────────────
             for c in &candidates {
                 let result: Result<(), Box<dyn std::error::Error>> = match c.source {
                     RecallSource::Episodic => {
-                        if let Some(curator_episodic) = curator_episodic {
-                            curator_episodic
-                                .touch_recall(&c.h_mem_id)
-                                .map_err(Into::into)
+                        if let Some(episodic) = episodic {
+                            episodic.touch_recall(&c.h_mem_id).map_err(Into::into)
                         } else {
                             Ok(())
                         }
                     }
-                    RecallSource::Semantic => curator_semantic
-                        .touch_recall(&c.h_mem_id)
-                        .map_err(Into::into),
+                    RecallSource::Semantic => {
+                        semantic.touch_recall(&c.h_mem_id).map_err(Into::into)
+                    }
                 };
                 if let Err(e) = result {
                     tracing::warn!(
                         target: "reg.memory.decay",
                         triple_id = %c.h_mem_id.as_uuid(),
                         error = %e,
-                        "Failed to touch_recall curator h_mem during recall_context_curator"
+                        label = log_label,
+                        "Failed to touch_recall h_mem during thread recall"
                     );
                 }
             }
@@ -1260,14 +1444,15 @@ impl RealMemoryPort {
 
             tracing::info!(
                 target: "reg.memory",
-                query_len = query.len(),
+                thread_id_len = thread_id.len(),
                 recalled = snippets.len(),
                 touched,
-                "Recalled curator memory snippets for context injection"
+                label = log_label,
+                "Recalled thread memory snippets for static context injection"
             );
 
             Ok(snippets)
-        })
+        }
     }
 }
 
@@ -1367,6 +1552,22 @@ mod tests {
             None
         };
 
+        // Curator consolidation service — mirrors the production construction
+        // in `RealMemoryPort::new`. Skipped when cadence is 0 (matches
+        // production). The curator stores are always `Some` in tests.
+        let curator_consolidation = if consolidation_cadence_secs > 0 {
+            let bridge = Arc::new(ConsolidationBridge::new(
+                Arc::clone(&curator_episodic),
+                Arc::clone(&curator_semantic),
+            ));
+            Some(Arc::new(ConsolidationService::new(
+                bridge,
+                Arc::clone(&curator_semantic),
+            )))
+        } else {
+            None
+        };
+
         RealMemoryPort {
             episodic,
             semantic,
@@ -1377,6 +1578,7 @@ mod tests {
             user_webid: test_webid(),
             curator_webid: WebID::from_persona(b"curator"),
             consolidation,
+            curator_consolidation,
             consolidation_cadence_secs,
             confidence_floor,
             last_consolidation: Mutex::new(None),

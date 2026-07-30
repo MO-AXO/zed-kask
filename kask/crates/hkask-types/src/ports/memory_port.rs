@@ -129,4 +129,23 @@ pub trait MemoryPort: Send + Sync {
     ) -> MemoryFuture<'a, Result<Vec<MemorySnippet>, MemoryError>> {
         Box::pin(async { Ok(Vec::new()) })
     }
+
+    /// Recall all memory snippets associated with a specific thread.
+    ///
+    /// Unlike `recall_context` (which recalls by content similarity / keyword
+    /// overlap), this recalls by exact entity match — returning every h_mem
+    /// stored under the thread's entity (`chat:thread:{thread_id}` for episodic,
+    /// `curator:thread:{thread_id}` for the semantic copy). Used by the
+    /// context injector's `inject_static_context` to load a thread's prior
+    /// turns into the system prompt once per session.
+    ///
+    /// The default implementation returns an empty vec — graceful degradation
+    /// when no memory store is configured.
+    fn recall_thread<'a>(
+        &'a self,
+        _thread_id: &'a str,
+        _limit: usize,
+    ) -> MemoryFuture<'a, Result<Vec<MemorySnippet>, MemoryError>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
 }

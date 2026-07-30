@@ -153,13 +153,13 @@ impl ContextInjector for BridgeContextInjector {
         let static_min_confidence = (self.recall_min_confidence + 0.1).min(1.0);
 
         Box::pin(async move {
-            let snippets = match memory_port.recall_context(&thread_id, static_limit).await {
+            let snippets = match memory_port.recall_thread(&thread_id, static_limit).await {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(
                         target: "reg.memory",
                         error = %e,
-                        "Static context recall failed"
+                        "Static context thread recall failed"
                     );
                     Vec::new()
                 }
@@ -313,7 +313,7 @@ impl ContextInjector for BridgeCuratorContextInjector {
 
         Box::pin(async move {
             let snippets = match memory_port
-                .recall_context_curator(&thread_id, static_limit)
+                .recall_thread_curator(&thread_id, static_limit)
                 .await
             {
                 Ok(s) => s,
@@ -321,7 +321,7 @@ impl ContextInjector for BridgeCuratorContextInjector {
                     tracing::warn!(
                         target: "reg.memory",
                         error = %e,
-                        "Curator static context recall failed"
+                        "Curator static context thread recall failed"
                     );
                     Vec::new()
                 }
