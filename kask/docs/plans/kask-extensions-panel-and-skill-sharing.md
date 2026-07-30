@@ -162,7 +162,7 @@ Each phase is independently shippable. Phases 1–3 land client-side without any
 **Goal:** the data model exists and parses correctly. No UI, no network.
 
 **Tasks:**
-1. Add `SkillVisibility` enum to `crates/agent_skills/src/agent_skills.rs`:
+1. Add `SkillVisibility` enum to `crates/agent_skills/agent_skills.rs` (note: no `src/` prefix — the lib root is `agent_skills.rs` directly):
    ```rust
    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
    #[serde(rename_all = "lowercase")]
@@ -182,8 +182,8 @@ Each phase is independently shippable. Phases 1–3 land client-side without any
 9. **Tests:** pin the precedence ordering (`ProjectLocal > Global > Public > BuiltIn`); pin that a missing `visibility` field defaults to `Private`; pin that `Public` skills match the empty scope.
 
 **Files touched:**
-- `crates/agent_skills/src/agent_skills.rs`
-- `crates/agent_skills/src/agent_skills.rs` (tests module)
+- `crates/agent_skills/agent_skills.rs`
+- `crates/agent_skills/agent_skills.rs` (tests module)
 
 **Acceptance:** `cargo check -p agent_skills` passes; new tests pass; existing skill loading is unaffected (every skill defaults to `Private`).
 
@@ -404,7 +404,7 @@ Each phase is independently shippable. Phases 1–3 land client-side without any
 - `crates/kask_extensions_ui/src/publish.rs` (new)
 - `crates/kask_extensions_ui/src/kask_extensions_ui.rs` (install/uninstall/update/vote)
 - `crates/settings_ui/src/pages/skills_visibility.rs` (wire drain to pipelines + window-close/debounce triggers)
-- `crates/agent_skills/src/agent_skills.rs` (register `Public` skills in `SkillIndex`)
+- `crates/agent_skills/agent_skills.rs` (register `Public` skills in `SkillIndex`)
 
 **Acceptance:** a user on one machine can toggle a skill to Public, and a user on another machine can see it in the Kask Extensions Panel and install it. The installed skill loads and executes via the existing `ManifestExecutor` cascade. Voting works. End-to-end test passes.
 

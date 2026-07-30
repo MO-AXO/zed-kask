@@ -2,7 +2,7 @@
 title: "LoRA Training — Method & Gate Catalog"
 audience: [developers, ml-engineers]
 last_updated: 2026-07-29
-version: "0.32.0"
+version: "0.32.1"
 status: "Active"
 domain: "Training"
 mds_categories: [domain, trust]
@@ -63,9 +63,7 @@ recommendation. The runtime enforces harness-method compatibility via G-H1.
 
 ## Gate Catalog
 
-17 quality gates enforced by the `audit-config` phase, plus the 8-gate
-recommendation refinement in `select-method` (G0, G-D0, G1-G6). Each gate is a
-single assertion with a citation.
+19 phase-aware contract gates enforced across the `select-method` and `audit-config` phases, plus the 8-gate recommendation refinement in `select-method` (G0, G-D0, G1-G6). Each gate is a single assertion with a citation.
 
 ### Recommendation Gates (select-method phase)
 
