@@ -704,16 +704,16 @@ impl MemoryPort for RealMemoryPort {
                 )
                 .with_visibility(Visibility::Shared);
 
-                if let Some(ref curator_semantic) = self.curator_semantic {
-                    if let Err(e) = curator_semantic.store(curator_h_mem) {
-                        tracing::warn!(
-                            target: "reg.memory",
-                            thread_id = %thread_id,
-                            error = %e,
-                            "Failed to store curator semantic h_mem — \
-                             curator memory will not include this turn"
-                        );
-                    }
+                if let Some(ref curator_semantic) = self.curator_semantic
+                    && let Err(e) = curator_semantic.store(curator_h_mem)
+                {
+                    tracing::warn!(
+                        target: "reg.memory",
+                        thread_id = %thread_id,
+                        error = %e,
+                        "Failed to store curator semantic h_mem — \
+                         curator memory will not include this turn"
+                    );
                 }
 
                 // Embed the curator's prompt for the curator's semantic store
@@ -1185,7 +1185,7 @@ impl RealMemoryPort {
                 .collect();
 
             if !query_words.is_empty()
-                && let Some(ref curator_episodic) = curator_episodic
+                && let Some(curator_episodic) = curator_episodic
             {
                 let entity_prefix = "chat:thread:".to_string();
                 let recall_budget = limit.saturating_mul(10).max(50);
@@ -1233,7 +1233,7 @@ impl RealMemoryPort {
             for c in &candidates {
                 let result: Result<(), Box<dyn std::error::Error>> = match c.source {
                     RecallSource::Episodic => {
-                        if let Some(ref curator_episodic) = curator_episodic {
+                        if let Some(curator_episodic) = curator_episodic {
                             curator_episodic
                                 .touch_recall(&c.h_mem_id)
                                 .map_err(Into::into)
