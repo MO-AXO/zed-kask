@@ -642,19 +642,131 @@ impl MemoryPort for RealMemoryPort {
             let agent_response = record.agent_response.clone();
             let model = record.model.clone();
             let title = record.thread_title.clone();
+            let agent_id = record.agent_id.clone();
+            let is_curator_turn = agent_id.as_deref() == Some("Curator");
 
-            // ── 1. Store episodic h_mem (Private, user perspective) ───────
-            //
-            // The episodic record stores the full turn as a JSON value under
-            // the "chatted" attribute. This is the user's first-person
-            // experience — only the owning agent can recall it.
-            let entity = format!("chat:thread:{thread_id}");
             let turn_value = serde_json::json!({
                 "user_input": user_input,
                 "agent_response": agent_response,
                 "model": model,
                 "title": title,
             });
+
+            if is_curator_turn {
+                // ── Curator turn: ingest into the curator's sovereign DB ──
+                //
+                // The curator's own turns are stored as curator-perspective
+                // episodic h_mems (Private, `curator_webid`) in
+                // `agents/curator/pod.db`, mirroring the user agent's episodic
+                // loop. The semantic copy is also written to the curator's DB
+                // so `curator_memory_recall` and `curator_semantic_search`
+                // can see the curator's own turns.
+                //
+                // When `curator_episodic` or `curator_semantic` is `None`
+                // (curator DB couldn't be opened), the corresponding write is
+                // silently skipped — graceful degradation.
+                let entity = format!("chat:thread:{thread_id}");
+                let episodic_h_mem = HMem::new(
+                    &entity,
+                    "chatted",
+                    serde_json::Value::String(turn_value.to_string()),
+                    self.curator_webid,
+                )
+                .with_perspective(self.curator_webid)
+                .with_visibility(Visibility::Private);
+
+                if let Some(ref curator_episodic) = self.curator_episodic {
+                    if let Err(e) = curator_episodic.store(episodic_h_mem) {
+                        tracing::warn!(
+                            target: "reg.memory",
+                            thread_id = %thread_id,
+                            error = %e,
+                            "Failed to store curator episodic h_mem — \
+                             curator will not recall this turn as experience"
+                        );
+                        // Non-fatal — fall through to semantic copy.
+                    }
+                } else {
+                    tracing::debug!(
+                        target: "reg.memory",
+                        thread_id = %thread_id,
+                        "Curator episodic store not available — \
+                         skipping curator-perspective episodic write"
+                    );
+                }
+
+                let curator_entity = format!("curator:thread:{thread_id}");
+                let curator_h_mem = HMem::new(
+                    &curator_entity,
+                    "turn",
+                    serde_json::Value::String(turn_value.to_string()),
+                    self.curator_webid,
+                )
+                .with_visibility(Visibility::Shared);
+
+                if let Some(ref curator_semantic) = self.curator_semantic {
+                    if let Err(e) = curator_semantic.store(curator_h_mem) {
+                        tracing::warn!(
+                            target: "reg.memory",
+                            thread_id = %thread_id,
+                            error = %e,
+                            "Failed to store curator semantic h_mem — \
+                             curator memory will not include this turn"
+                        );
+                    }
+                }
+
+                // Embed the curator's prompt for the curator's semantic store
+                // so the curator can recall its own turns by similarity.
+                let embedding_entity = format!("embedding:thread:{thread_id}:user_input");
+                let embedding_model = self.embedding_model.clone();
+                let embedding_port = self.embedding_port.clone();
+                let user_input_owned = user_input.clone();
+                let vectors = self
+                    .tokio_handle
+                    .spawn(async move {
+                        embedding_port
+                            .embed(&embedding_model, &[user_input_owned])
+                            .await
+                    })
+                    .await;
+
+                if let Ok(Ok(vectors)) = vectors
+                    && let Some(vector) = vectors.into_iter().next()
+                    && let Some(ref curator_semantic) = self.curator_semantic
+                    && let Err(e) = curator_semantic.store_embedding(
+                        &embedding_entity,
+                        &vector,
+                        &self.embedding_model,
+                    )
+                {
+                    tracing::warn!(
+                        target: "reg.memory",
+                        thread_id = %thread_id,
+                        error = %e,
+                        "Failed to store curator prompt embedding"
+                    );
+                }
+
+                tracing::info!(
+                    target: "reg.memory",
+                    thread_id = %thread_id,
+                    model = %model,
+                    "Curator turn ingested into curator episodic + semantic memory"
+                );
+                return Ok(());
+            }
+
+            // ── User turn: ingest into the user's DB + curator semantic copy
+            //
+            // 1. Episodic h_mem (Private, user perspective) — the user's
+            //    first-person experience, in the user's `memory.db`.
+            // 2. Semantic h_mem (Shared) — a curator-accessible copy written
+            //    to the curator's sovereign `pod.db`.
+            // 3. Embedding of the user prompt — for future semantic retrieval.
+
+            // ── 1. Store episodic h_mem (Private, user perspective) ───────
+            let entity = format!("chat:thread:{thread_id}");
 
             let episodic_h_mem = HMem::new(
                 &entity,
@@ -976,6 +1088,180 @@ impl MemoryPort for RealMemoryPort {
                 recalled = snippets.len(),
                 touched,
                 "Recalled memory snippets for context injection"
+            );
+
+            Ok(snippets)
+        })
+    }
+
+    /// Recall memory snippets from the **curator's** sovereign stores.
+    ///
+    /// This mirrors `recall_context` but reads from `curator_semantic` and
+    /// `curator_episodic` (both in `agents/curator/pod.db`) using the
+    /// curator's WebID for perspective-scoped episodic queries. Used by the
+    /// curator context injector (`BridgeCuratorContextInjector`) so the
+    /// Curator recalls its own memory — a parallel of the user agent's
+    /// `BridgeContextInjector`.
+    ///
+    /// Returns `Ok(vec![])` when the curator stores are not available
+    /// (graceful degradation — the curator runs without recall instead of
+    /// erroring).
+    pub fn recall_context_curator<'a>(
+        &'a self,
+        query: &'a str,
+        limit: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(ref curator_semantic) = self.curator_semantic else {
+                return Ok(Vec::new());
+            };
+            let curator_episodic = self.curator_episodic.as_ref();
+
+            enum RecallSource {
+                Episodic,
+                Semantic,
+            }
+            struct Candidate {
+                snippet: MemorySnippet,
+                h_mem_id: hkask_storage::HMemId,
+                source: RecallSource,
+            }
+            let mut candidates: Vec<Candidate> = Vec::new();
+
+            // ── 1. Semantic search (embedding KNN) on the curator's store ──
+            let embedding_model = self.embedding_model.clone();
+            let embedding_port = self.embedding_port.clone();
+            let query_owned = query.to_string();
+            let vectors = self
+                .tokio_handle
+                .spawn(async move { embedding_port.embed(&embedding_model, &[query_owned]).await })
+                .await;
+
+            if let Ok(Ok(vectors)) = vectors
+                && let Some(query_vector) = vectors.into_iter().next()
+            {
+                match curator_semantic.search_similar(&query_vector, limit) {
+                    Ok(results) => {
+                        for result in results {
+                            let entity_ref = &result.embedding.entity_ref;
+                            if let Ok(h_mems) = curator_semantic.query_deduped_untouched(entity_ref)
+                            {
+                                for h_mem in h_mems {
+                                    let text = h_mem.value.as_str().unwrap_or("").to_string();
+                                    if !text.is_empty() {
+                                        candidates.push(Candidate {
+                                            snippet: MemorySnippet {
+                                                text,
+                                                source: "semantic".to_string(),
+                                                confidence: h_mem.confidence.value(),
+                                                relevance_score: 1.0 - result.distance,
+                                            },
+                                            h_mem_id: h_mem.id,
+                                            source: RecallSource::Semantic,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "reg.memory",
+                            error = %e,
+                            "Curator semantic search failed during recall"
+                        );
+                    }
+                }
+            }
+
+            // ── 2. Episodic search (keyword overlap) on the curator's store ──
+            let query_words: Vec<String> = query
+                .split_whitespace()
+                .filter(|w| w.len() > 3)
+                .take(5)
+                .map(|w| w.to_lowercase())
+                .collect();
+
+            if !query_words.is_empty()
+                && let Some(ref curator_episodic) = curator_episodic
+            {
+                let entity_prefix = "chat:thread:".to_string();
+                let recall_budget = limit.saturating_mul(10).max(50);
+                if let Ok(h_mems) = curator_episodic.query_for_deduped_untouched_by_prefix(
+                    &entity_prefix,
+                    self.curator_webid,
+                    recall_budget,
+                ) {
+                    for h_mem in h_mems {
+                        let text = h_mem.value.as_str().unwrap_or("").to_string();
+                        if text.is_empty() {
+                            continue;
+                        }
+                        let text_lower = text.to_lowercase();
+                        if !query_words.iter().any(|w| text_lower.contains(w)) {
+                            continue;
+                        }
+                        if candidates.iter().any(|c| c.snippet.text == text) {
+                            continue;
+                        }
+                        candidates.push(Candidate {
+                            snippet: MemorySnippet {
+                                text,
+                                source: "episodic".to_string(),
+                                confidence: h_mem.confidence.value(),
+                                relevance_score: 0.5,
+                            },
+                            h_mem_id: h_mem.id,
+                            source: RecallSource::Episodic,
+                        });
+                    }
+                }
+            }
+
+            // ── 3. Sort by relevance and truncate ─────────────────────────
+            candidates.sort_by(|a, b| {
+                b.snippet
+                    .relevance_score
+                    .partial_cmp(&a.snippet.relevance_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            candidates.truncate(limit);
+
+            // ── 4. Touch only the injected h_mems ────────────────────────
+            for c in &candidates {
+                let result: Result<(), Box<dyn std::error::Error>> = match c.source {
+                    RecallSource::Episodic => {
+                        if let Some(ref curator_episodic) = curator_episodic {
+                            curator_episodic
+                                .touch_recall(&c.h_mem_id)
+                                .map_err(Into::into)
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    RecallSource::Semantic => curator_semantic
+                        .touch_recall(&c.h_mem_id)
+                        .map_err(Into::into),
+                };
+                if let Err(e) = result {
+                    tracing::warn!(
+                        target: "reg.memory.decay",
+                        triple_id = %c.h_mem_id.as_uuid(),
+                        error = %e,
+                        "Failed to touch_recall curator h_mem during recall_context_curator"
+                    );
+                }
+            }
+
+            let touched = candidates.len();
+            let snippets: Vec<MemorySnippet> = candidates.into_iter().map(|c| c.snippet).collect();
+
+            tracing::info!(
+                target: "reg.memory",
+                query_len = query.len(),
+                recalled = snippets.len(),
+                touched,
+                "Recalled curator memory snippets for context injection"
             );
 
             Ok(snippets)
