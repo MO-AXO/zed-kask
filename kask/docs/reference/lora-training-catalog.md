@@ -132,7 +132,9 @@ Only apply if QLoRA mode selected (G2).
 ## Convergence Metric Weights
 
 Computed by the `convergence-check` phase. Metric ∈ [0, 1] where 0 =
-fully converged (training-ready).
+fully converged (training-ready). The convergence threshold is ≤ 0.10 with
+no hard blockers remaining; convergence is detected deterministically via
+the Cauchy criterion (iterates have stopped moving).
 
 | Dimension | Weight | Pass condition |
 |-----------|--------|----------------|
@@ -142,8 +144,16 @@ fully converged (training-ready).
 | Data/eval gate coverage | 0.10 | All 3 (G-D1..G-D3) pass = +0.00 |
 | Forgetting gate coverage | 0.10 | G-F1 planned = +0.00; G-F2 if CorDA mode |
 | Harness-method gate coverage | 0.10 | G-H1 pass = +0.00; fail/refuse = +0.10 |
+| Runtime gate coverage | — | G-R1 deferred/not_applicable in preflight; assessed during `training_status` from completion manifest metrics |
+| Persistence gate coverage | — | G-P1 pass = no blocker; fail = hard blocker (refuse training start) |
 
-Converged: metric ≤ 0.10 AND ≥5% relative improvement from previous cycle.
+> **Weight provenance:** the six weighted dimensions (0.35–0.10) are the
+> documented scoring rubric. G-R1 and G-P1 are pass/blocker gates outside
+> the weighted metric — G-R1 is `deferred` until runtime metrics exist, G-P1
+> is a preflight refuse gate. Convergence is Cauchy-detected (iterates stop
+> moving within `cauchy_epsilon: 0.03` over `cauchy_window: 3` iterations).
+
+Converged: metric ≤ 0.10 AND no hard blockers AND Cauchy criterion met.
 
 ## Source References
 

@@ -3,7 +3,7 @@ title: "Dokkodo Mindset — User Guide and Research Companion"
 audience: [agents, developers, curators, architects]
 last_updated: 2026-07-29
 version: "0.31.0"
-status: "Historical"
+status: "Active"
 domain: "Metacognition"
 mds_categories: [domain, composition, curation, trust]
 ---

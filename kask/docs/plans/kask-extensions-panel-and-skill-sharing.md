@@ -2,7 +2,7 @@
 title: "Kask Extensions Panel & Skill Sharing — Build Plan"
 audience: [zed-kask integrators, hKask architects]
 last_updated: 2026-07-29
-version: "0.4.0"
+version: "0.5.0"
 status: "Active"
 domain: "composition"
 mds_categories: [composition, trust, lifecycle, curation]
@@ -417,7 +417,7 @@ Each phase is independently shippable. Phases 1–3 land client-side without any
 **Goal:** the marketplace enforces the dependency contract at publish and install time.
 
 **Implementation status (verified 2026-07-29):** PARTIAL.
-- **Install-time dependency check (client):** implemented as **notify-only**, not blocking. `KaskExtensionsPage::install_kask_skill` (`crates/kask_extensions_ui/src/kask_extensions_ui.rs:485`) checks installed skill names against `manifest.dependencies`, logs a `warn!` listing missing deps, but proceeds with the install. The plan called for a blocking modal with per-dependency checkboxes; the implementation chose notify-only (simpler, the skill fails loudly at runtime via `ManifestExecutor` if a dep is missing).
+- **Install-time dependency check (client):** implemented as **notify-only**, not blocking. `KaskExtensionsPage::install_kask_skill` (`crates/kask_extensions_ui/src/kask_extensions_ui.rs:453`) checks installed skill names against `manifest.dependencies`, logs a `warn!` listing missing deps, but proceeds with the install. The plan called for a blocking modal with per-dependency checkboxes; the implementation chose notify-only (simpler, the skill fails loudly at runtime via `ManifestExecutor` if a dep is missing).
 - **Publish-time dependency validation (server):** NOT implemented. The upload handler (`crates/collab/src/api/kask_skills.rs:upload_kask_skill`) does not reject 409 on missing dependencies. The manifest's `dependencies` field is stored but not validated against existing skills.
 - **Cycle detection:** NOT implemented. No recursive install with cycle refusal exists.
 - **Uninstall-time dependent warning:** eliminated per the plan's essentialist G1 note (a broken dependent fails loudly at load time).
