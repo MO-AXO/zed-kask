@@ -196,12 +196,13 @@ impl ContextInjector for BridgeContextInjector {
 /// Bridge curator context injector — recalls from the curator's sovereign DB.
 ///
 /// Mirrors `BridgeContextInjector` but delegates to
-/// `RealMemoryPort::recall_context_curator` instead of `MemoryPort::recall_context`,
-/// so the Curator recalls its own episodic + semantic memory (stored in
-/// `agents/curator/pod.db`) rather than the user's. This closes the curator
-/// memory loop: the Curator ingests its own turns (D6, curator-perspective
-/// episodic) and recalls them here (D11, curator-scoped recall), exactly
-/// parallel to the user agent's loop.
+/// `RealMemoryPort::recall_context_curator` (per-turn, content-similarity) and
+/// `RealMemoryPort::recall_thread_curator` (static, entity-scoped) instead of
+/// the user-scoped `MemoryPort` methods, so the Curator recalls its own
+/// episodic + semantic memory (stored in `agents/curator/pod.db`) rather than
+/// the user's. This closes the curator memory loop: the Curator ingests its
+/// own turns (D6, curator-perspective episodic) and recalls them here (D11,
+/// curator-scoped recall), exactly parallel to the user agent's loop.
 ///
 /// Wired in the composition root via `agent::set_curator_context_injector`.
 pub struct BridgeCuratorContextInjector {

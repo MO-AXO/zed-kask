@@ -1127,7 +1127,7 @@ impl RealMemoryPort {
     /// This was previously duplicated verbatim between `recall_context` and
     /// `recall_context_curator`; the duplication was a maintenance hazard
     /// (a fix to one had to be manually mirrored in the other).
-    fn recall_from<'a>(
+    async fn recall_from<'a>(
         &'a self,
         episodic: Option<&'a Arc<EpisodicMemory>>,
         semantic: &'a Arc<SemanticMemory>,
@@ -1135,200 +1135,196 @@ impl RealMemoryPort {
         query: &'a str,
         limit: usize,
         log_label: &'static str,
-    ) -> impl Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a {
-        async move {
-            // Collect (snippet, h_mem_id, source) triples so we can sort,
-            // truncate, and touch the correct store for each survivor.
-            // Tracking the source alongside the id avoids double-touching
-            // (episodic + semantic) and keeps id↔snippet correspondence
-            // stable across the sort.
-            enum RecallSource {
-                Episodic,
-                Semantic,
-            }
-            struct Candidate {
-                snippet: MemorySnippet,
-                h_mem_id: hkask_storage::HMemId,
-                source: RecallSource,
-            }
-            let mut candidates: Vec<Candidate> = Vec::new();
+    ) -> Result<Vec<MemorySnippet>, MemoryError> {
+        // Collect (snippet, h_mem_id, source) triples so we can sort,
+        // truncate, and touch the correct store for each survivor.
+        // Tracking the source alongside the id avoids double-touching
+        // (episodic + semantic) and keeps id↔snippet correspondence
+        // stable across the sort.
+        enum RecallSource {
+            Episodic,
+            Semantic,
+        }
+        struct Candidate {
+            snippet: MemorySnippet,
+            h_mem_id: hkask_storage::HMemId,
+            source: RecallSource,
+        }
+        let mut candidates: Vec<Candidate> = Vec::new();
 
-            // ── 1. Semantic search (embedding KNN) ───────────────────────
-            //
-            // Embed the query and search for similar stored embeddings.
-            // This finds turns where the user asked similar questions.
-            // Spawn the embedding HTTP call on the tokio runtime so the
-            // GPUI-side channel task can resolve credentials and make the
-            // HTTP call.
-            let embedding_model = self.embedding_model.clone();
-            let embedding_port = self.embedding_port.clone();
-            let query_owned = query.to_string();
-            let vectors = self
-                .tokio_handle
-                .spawn(async move { embedding_port.embed(&embedding_model, &[query_owned]).await })
-                .await;
+        // ── 1. Semantic search (embedding KNN) ───────────────────────
+        //
+        // Embed the query and search for similar stored embeddings.
+        // This finds turns where the user asked similar questions.
+        // Spawn the embedding HTTP call on the tokio runtime so the
+        // GPUI-side channel task can resolve credentials and make the
+        // HTTP call.
+        let embedding_model = self.embedding_model.clone();
+        let embedding_port = self.embedding_port.clone();
+        let query_owned = query.to_string();
+        let vectors = self
+            .tokio_handle
+            .spawn(async move { embedding_port.embed(&embedding_model, &[query_owned]).await })
+            .await;
 
-            if let Ok(Ok(vectors)) = vectors
-                && let Some(query_vector) = vectors.into_iter().next()
-            {
-                match semantic.search_similar(&query_vector, limit) {
-                    Ok(results) => {
-                        for result in results {
-                            // Retrieve the h_mem associated with this embedding
-                            // to get the full text content. Use the untouched
-                            // variant — we touch only the injected ones below.
-                            let entity_ref = &result.embedding.entity_ref;
-                            if let Ok(h_mems) = semantic.query_deduped_untouched(entity_ref) {
-                                for h_mem in h_mems {
-                                    let text = h_mem.value.as_str().unwrap_or("").to_string();
-                                    if !text.is_empty() {
-                                        candidates.push(Candidate {
-                                            snippet: MemorySnippet {
-                                                text,
-                                                source: "semantic".to_string(),
-                                                confidence: h_mem.confidence.value(),
-                                                relevance_score: 1.0 - result.distance,
-                                            },
-                                            h_mem_id: h_mem.id,
-                                            source: RecallSource::Semantic,
-                                        });
-                                    }
+        if let Ok(Ok(vectors)) = vectors
+            && let Some(query_vector) = vectors.into_iter().next()
+        {
+            match semantic.search_similar(&query_vector, limit) {
+                Ok(results) => {
+                    for result in results {
+                        // Retrieve the h_mem associated with this embedding
+                        // to get the full text content. Use the untouched
+                        // variant — we touch only the injected ones below.
+                        let entity_ref = &result.embedding.entity_ref;
+                        if let Ok(h_mems) = semantic.query_deduped_untouched(entity_ref) {
+                            for h_mem in h_mems {
+                                let text = h_mem.value.as_str().unwrap_or("").to_string();
+                                if !text.is_empty() {
+                                    candidates.push(Candidate {
+                                        snippet: MemorySnippet {
+                                            text,
+                                            source: "semantic".to_string(),
+                                            confidence: h_mem.confidence.value(),
+                                            relevance_score: 1.0 - result.distance,
+                                        },
+                                        h_mem_id: h_mem.id,
+                                        source: RecallSource::Semantic,
+                                    });
                                 }
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "reg.memory",
-                            error = %e,
-                            label = log_label,
-                            "Semantic search failed during recall"
-                        );
-                    }
                 }
-            }
-
-            // ── 2. Episodic search (keyword overlap) ─────────────────────
-            //
-            // Load episodic h_mems for the agent's chat threads ONCE, then
-            // filter by keyword overlap in memory. The previous implementation
-            // re-queried the store for each query word (5x) using the same
-            // fixed entity string "chat:thread:" — a redundant N+1 scan that
-            // also fired touch_recall on every row per iteration, turning
-            // recall into a write storm under multi-thread load.
-            //
-            // We use the untouched variant and touch only the injected h_mems.
-            let query_words: Vec<String> = query
-                .split_whitespace()
-                .filter(|w| w.len() > 3)
-                .take(5)
-                .map(|w| w.to_lowercase())
-                .collect();
-
-            if !query_words.is_empty()
-                && let Some(episodic) = episodic
-            {
-                // Use a prefix query to load all chat:thread:* episodic h_mems
-                // in a single SQL call. The previous implementation queried
-                // the exact entity "chat:thread:" (no thread_id suffix), which
-                // never matched stored entities "chat:thread:<thread_id>" —
-                // so the episodic keyword search was dead code. Combined with
-                // the N+1 loop (one query per query word), this was both broken
-                // and a write storm.
-                //
-                // The recall budget caps the number of rows loaded — without
-                // it, a session with thousands of past turns would load all of
-                // them into memory on every recall call. We load 10x the
-                // recall limit (most recent first) to give the keyword filter a
-                // reasonable pool to filter from without unbounded loading.
-                let entity_prefix = "chat:thread:".to_string();
-                let recall_budget = limit.saturating_mul(10).max(50);
-                if let Ok(h_mems) = episodic.query_for_deduped_untouched_by_prefix(
-                    &entity_prefix,
-                    perspective,
-                    recall_budget,
-                ) {
-                    for h_mem in h_mems {
-                        let text = h_mem.value.as_str().unwrap_or("").to_string();
-                        if text.is_empty() {
-                            continue;
-                        }
-                        let text_lower = text.to_lowercase();
-                        // Check if ANY query word appears in the text
-                        if !query_words.iter().any(|w| text_lower.contains(w)) {
-                            continue;
-                        }
-                        // Skip if already in candidates (dedup by text)
-                        if candidates.iter().any(|c| c.snippet.text == text) {
-                            continue;
-                        }
-                        candidates.push(Candidate {
-                            snippet: MemorySnippet {
-                                text,
-                                source: "episodic".to_string(),
-                                confidence: h_mem.confidence.value(),
-                                relevance_score: 0.5, // Base relevance for keyword match
-                            },
-                            h_mem_id: h_mem.id,
-                            source: RecallSource::Episodic,
-                        });
-                    }
-                }
-            }
-
-            // ── 3. Sort by relevance and truncate ─────────────────────────
-            candidates.sort_by(|a, b| {
-                b.snippet
-                    .relevance_score
-                    .partial_cmp(&a.snippet.relevance_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            candidates.truncate(limit);
-
-            // ── 4. Touch only the injected h_mems ────────────────────────
-            //
-            // Resets the decay clock on h_mems that actually got used. This
-            // is the “memory that gets used stays fresh” semantics, applied
-            // post-filter instead of pre-filter — avoids the write storm.
-            // Touch via the correct store for each candidate's source.
-            for c in &candidates {
-                let result: Result<(), Box<dyn std::error::Error>> = match c.source {
-                    RecallSource::Episodic => {
-                        if let Some(episodic) = episodic {
-                            episodic.touch_recall(&c.h_mem_id).map_err(Into::into)
-                        } else {
-                            Ok(())
-                        }
-                    }
-                    RecallSource::Semantic => {
-                        semantic.touch_recall(&c.h_mem_id).map_err(Into::into)
-                    }
-                };
-                if let Err(e) = result {
+                Err(e) => {
                     tracing::warn!(
-                        target: "reg.memory.decay",
-                        triple_id = %c.h_mem_id.as_uuid(),
+                        target: "reg.memory",
                         error = %e,
                         label = log_label,
-                        "Failed to touch_recall h_mem during recall"
+                        "Semantic search failed during recall"
                     );
                 }
             }
-
-            let touched = candidates.len();
-            let snippets: Vec<MemorySnippet> = candidates.into_iter().map(|c| c.snippet).collect();
-
-            tracing::info!(
-                target: "reg.memory",
-                query_len = query.len(),
-                recalled = snippets.len(),
-                touched,
-                label = log_label,
-                "Recalled memory snippets for context injection"
-            );
-
-            Ok(snippets)
         }
+
+        // ── 2. Episodic search (keyword overlap) ─────────────────────
+        //
+        // Load episodic h_mems for the agent's chat threads ONCE, then
+        // filter by keyword overlap in memory. The previous implementation
+        // re-queried the store for each query word (5x) using the same
+        // fixed entity string "chat:thread:" — a redundant N+1 scan that
+        // also fired touch_recall on every row per iteration, turning
+        // recall into a write storm under multi-thread load.
+        //
+        // We use the untouched variant and touch only the injected h_mems.
+        let query_words: Vec<String> = query
+            .split_whitespace()
+            .filter(|w| w.len() > 3)
+            .take(5)
+            .map(|w| w.to_lowercase())
+            .collect();
+
+        if !query_words.is_empty()
+            && let Some(episodic) = episodic
+        {
+            // Use a prefix query to load all chat:thread:* episodic h_mems
+            // in a single SQL call. The previous implementation queried
+            // the exact entity "chat:thread:" (no thread_id suffix), which
+            // never matched stored entities "chat:thread:<thread_id>" —
+            // so the episodic keyword search was dead code. Combined with
+            // the N+1 loop (one query per query word), this was both broken
+            // and a write storm.
+            //
+            // The recall budget caps the number of rows loaded — without
+            // it, a session with thousands of past turns would load all of
+            // them into memory on every recall call. We load 10x the
+            // recall limit (most recent first) to give the keyword filter a
+            // reasonable pool to filter from without unbounded loading.
+            let entity_prefix = "chat:thread:".to_string();
+            let recall_budget = limit.saturating_mul(10).max(50);
+            if let Ok(h_mems) = episodic.query_for_deduped_untouched_by_prefix(
+                &entity_prefix,
+                perspective,
+                recall_budget,
+            ) {
+                for h_mem in h_mems {
+                    let text = h_mem.value.as_str().unwrap_or("").to_string();
+                    if text.is_empty() {
+                        continue;
+                    }
+                    let text_lower = text.to_lowercase();
+                    // Check if ANY query word appears in the text
+                    if !query_words.iter().any(|w| text_lower.contains(w)) {
+                        continue;
+                    }
+                    // Skip if already in candidates (dedup by text)
+                    if candidates.iter().any(|c| c.snippet.text == text) {
+                        continue;
+                    }
+                    candidates.push(Candidate {
+                        snippet: MemorySnippet {
+                            text,
+                            source: "episodic".to_string(),
+                            confidence: h_mem.confidence.value(),
+                            relevance_score: 0.5, // Base relevance for keyword match
+                        },
+                        h_mem_id: h_mem.id,
+                        source: RecallSource::Episodic,
+                    });
+                }
+            }
+        }
+
+        // ── 3. Sort by relevance and truncate ─────────────────────────
+        candidates.sort_by(|a, b| {
+            b.snippet
+                .relevance_score
+                .partial_cmp(&a.snippet.relevance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        candidates.truncate(limit);
+
+        // ── 4. Touch only the injected h_mems ────────────────────────
+        //
+        // Resets the decay clock on h_mems that actually got used. This
+        // is the “memory that gets used stays fresh” semantics, applied
+        // post-filter instead of pre-filter — avoids the write storm.
+        // Touch via the correct store for each candidate's source.
+        for c in &candidates {
+            let result: Result<(), Box<dyn std::error::Error>> = match c.source {
+                RecallSource::Episodic => {
+                    if let Some(episodic) = episodic {
+                        episodic.touch_recall(&c.h_mem_id).map_err(Into::into)
+                    } else {
+                        Ok(())
+                    }
+                }
+                RecallSource::Semantic => semantic.touch_recall(&c.h_mem_id).map_err(Into::into),
+            };
+            if let Err(e) = result {
+                tracing::warn!(
+                    target: "reg.memory.decay",
+                    triple_id = %c.h_mem_id.as_uuid(),
+                    error = %e,
+                    label = log_label,
+                    "Failed to touch_recall h_mem during recall"
+                );
+            }
+        }
+
+        let touched = candidates.len();
+        let snippets: Vec<MemorySnippet> = candidates.into_iter().map(|c| c.snippet).collect();
+
+        tracing::info!(
+            target: "reg.memory",
+            query_len = query.len(),
+            recalled = snippets.len(),
+            touched,
+            label = log_label,
+            "Recalled memory snippets for context injection"
+        );
+
+        Ok(snippets)
     }
 
     /// Shared thread-scoped recall implementation for both the user and curator
@@ -1342,7 +1338,7 @@ impl RealMemoryPort {
     /// `recall_context`, which never matched stored turn text (the stored
     /// embeddings are of `user_input`, not the thread_id), so static context
     /// injection was dead code for both the user and curator injectors.
-    fn recall_thread_from<'a>(
+    async fn recall_thread_from<'a>(
         &'a self,
         episodic: Option<&'a Arc<EpisodicMemory>>,
         semantic: Option<&'a Arc<SemanticMemory>>,
@@ -1350,123 +1346,121 @@ impl RealMemoryPort {
         thread_id: &'a str,
         limit: usize,
         log_label: &'static str,
-    ) -> impl Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a {
-        async move {
-            enum RecallSource {
-                Episodic,
-                Semantic,
-            }
-            struct Candidate {
-                snippet: MemorySnippet,
-                h_mem_id: hkask_storage::HMemId,
-                source: RecallSource,
-            }
-            let mut candidates: Vec<Candidate> = Vec::new();
-
-            // ── 1. Episodic: exact entity match, perspective-scoped ─────
-            let episodic_entity = format!("chat:thread:{thread_id}");
-            if let Some(episodic) = episodic
-                && let Ok(h_mems) =
-                    episodic.query_for_deduped_untouched(&episodic_entity, perspective)
-            {
-                for h_mem in h_mems {
-                    let text = h_mem.value.as_str().unwrap_or("").to_string();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    candidates.push(Candidate {
-                        snippet: MemorySnippet {
-                            text,
-                            source: "episodic".to_string(),
-                            confidence: h_mem.confidence.value(),
-                            relevance_score: 1.0,
-                        },
-                        h_mem_id: h_mem.id,
-                        source: RecallSource::Episodic,
-                    });
-                }
-            }
-
-            // ── 2. Semantic: exact entity match (shared copy in curator DB) ─
-            // The `curator:thread:{thread_id}` entity is written to the
-            // curator's sovereign DB by both user and curator ingestion paths.
-            // `semantic` here is `curator_semantic` for both callers — see the
-            // `recall_thread` and `recall_thread_curator` wrappers.
-            let semantic_entity = format!("curator:thread:{thread_id}");
-            if let Some(semantic) = semantic
-                && let Ok(h_mems) = semantic.query_deduped_untouched(&semantic_entity)
-            {
-                for h_mem in h_mems {
-                    let text = h_mem.value.as_str().unwrap_or("").to_string();
-                    if text.is_empty() {
-                        continue;
-                    }
-                    // Dedup against episodic by text
-                    if candidates.iter().any(|c| c.snippet.text == text) {
-                        continue;
-                    }
-                    candidates.push(Candidate {
-                        snippet: MemorySnippet {
-                            text,
-                            source: "semantic".to_string(),
-                            confidence: h_mem.confidence.value(),
-                            relevance_score: 1.0,
-                        },
-                        h_mem_id: h_mem.id,
-                        source: RecallSource::Semantic,
-                    });
-                }
-            }
-
-            // ── 3. Sort by recency (stable) and truncate ────────────────
-            // `query_for_deduped_untouched` and `query_deduped_untouched`
-            // both return most-recent-first, so a stable sort preserves that
-            // order within equal-relevance candidates.
-            candidates.truncate(limit);
-
-            // ── 4. Touch only the injected h_mems ────────────────────────
-            for c in &candidates {
-                let result: Result<(), Box<dyn std::error::Error>> = match c.source {
-                    RecallSource::Episodic => {
-                        if let Some(episodic) = episodic {
-                            episodic.touch_recall(&c.h_mem_id).map_err(Into::into)
-                        } else {
-                            Ok(())
-                        }
-                    }
-                    RecallSource::Semantic => {
-                        if let Some(semantic) = semantic {
-                            semantic.touch_recall(&c.h_mem_id).map_err(Into::into)
-                        } else {
-                            Ok(())
-                        }
-                    }
-                };
-                if let Err(e) = result {
-                    tracing::warn!(
-                        target: "reg.memory.decay",
-                        triple_id = %c.h_mem_id.as_uuid(),
-                        error = %e,
-                        label = log_label,
-                        "Failed to touch_recall h_mem during thread recall"
-                    );
-                }
-            }
-
-            let touched = candidates.len();
-            let snippets: Vec<MemorySnippet> = candidates.into_iter().map(|c| c.snippet).collect();
-
-            tracing::info!(
-                target: "reg.memory",
-                thread_id_len = thread_id.len(),
-                recalled = snippets.len(),
-                touched,
-                label = log_label,
-                "Recalled thread memory snippets for static context injection"
-            );
-
-            Ok(snippets)
+    ) -> Result<Vec<MemorySnippet>, MemoryError> {
+        enum RecallSource {
+            Episodic,
+            Semantic,
         }
+        struct Candidate {
+            snippet: MemorySnippet,
+            h_mem_id: hkask_storage::HMemId,
+            source: RecallSource,
+        }
+        let mut candidates: Vec<Candidate> = Vec::new();
+
+        // ── 1. Episodic: exact entity match, perspective-scoped ─────
+        let episodic_entity = format!("chat:thread:{thread_id}");
+        if let Some(episodic) = episodic
+            && let Ok(h_mems) = episodic.query_for_deduped_untouched(&episodic_entity, perspective)
+        {
+            for h_mem in h_mems {
+                let text = h_mem.value.as_str().unwrap_or("").to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                candidates.push(Candidate {
+                    snippet: MemorySnippet {
+                        text,
+                        source: "episodic".to_string(),
+                        confidence: h_mem.confidence.value(),
+                        relevance_score: 1.0,
+                    },
+                    h_mem_id: h_mem.id,
+                    source: RecallSource::Episodic,
+                });
+            }
+        }
+
+        // ── 2. Semantic: exact entity match (shared copy in curator DB) ─
+        // The `curator:thread:{thread_id}` entity is written to the
+        // curator's sovereign DB by both user and curator ingestion paths.
+        // `semantic` here is `curator_semantic` for both callers — see the
+        // `recall_thread` and `recall_thread_curator` wrappers.
+        let semantic_entity = format!("curator:thread:{thread_id}");
+        if let Some(semantic) = semantic
+            && let Ok(h_mems) = semantic.query_deduped_untouched(&semantic_entity)
+        {
+            for h_mem in h_mems {
+                let text = h_mem.value.as_str().unwrap_or("").to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                // Dedup against episodic by text
+                if candidates.iter().any(|c| c.snippet.text == text) {
+                    continue;
+                }
+                candidates.push(Candidate {
+                    snippet: MemorySnippet {
+                        text,
+                        source: "semantic".to_string(),
+                        confidence: h_mem.confidence.value(),
+                        relevance_score: 1.0,
+                    },
+                    h_mem_id: h_mem.id,
+                    source: RecallSource::Semantic,
+                });
+            }
+        }
+
+        // ── 3. Truncate to limit ────────────────────────────────────
+        // `query_for_deduped_untouched` and `query_deduped_untouched`
+        // both return most-recent-first, so the candidates are already in
+        // recency order. All candidates have relevance_score 1.0 (exact
+        // entity match), so no sort is needed — just truncate.
+        candidates.truncate(limit);
+
+        // ── 4. Touch only the injected h_mems ────────────────────────
+        for c in &candidates {
+            let result: Result<(), Box<dyn std::error::Error>> = match c.source {
+                RecallSource::Episodic => {
+                    if let Some(episodic) = episodic {
+                        episodic.touch_recall(&c.h_mem_id).map_err(Into::into)
+                    } else {
+                        Ok(())
+                    }
+                }
+                RecallSource::Semantic => {
+                    if let Some(semantic) = semantic {
+                        semantic.touch_recall(&c.h_mem_id).map_err(Into::into)
+                    } else {
+                        Ok(())
+                    }
+                }
+            };
+            if let Err(e) = result {
+                tracing::warn!(
+                    target: "reg.memory.decay",
+                    triple_id = %c.h_mem_id.as_uuid(),
+                    error = %e,
+                    label = log_label,
+                    "Failed to touch_recall h_mem during thread recall"
+                );
+            }
+        }
+
+        let touched = candidates.len();
+        let snippets: Vec<MemorySnippet> = candidates.into_iter().map(|c| c.snippet).collect();
+
+        tracing::info!(
+            target: "reg.memory",
+            thread_id_len = thread_id.len(),
+            recalled = snippets.len(),
+            touched,
+            label = log_label,
+            "Recalled thread memory snippets for static context injection"
+        );
+
+        Ok(snippets)
     }
 }
 
