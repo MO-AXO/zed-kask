@@ -1093,7 +1093,9 @@ impl MemoryPort for RealMemoryPort {
             Ok(snippets)
         })
     }
+}
 
+impl RealMemoryPort {
     /// Recall memory snippets from the **curator's** sovereign stores.
     ///
     /// This mirrors `recall_context` but reads from `curator_semantic` and
@@ -1338,11 +1340,14 @@ mod tests {
         // has its own `pod.db`.
         let curator_driver: Arc<dyn hkask_storage::DatabaseDriver> =
             SqliteDriver::in_memory_driver();
-        let curator_h_mem_store =
+        let curator_h_mem_store_episodic =
+            HMemStore::from_driver(Arc::clone(&curator_driver)).expect("curator hmem store init");
+        let curator_episodic = Arc::new(EpisodicMemory::new(curator_h_mem_store_episodic));
+        let curator_h_mem_store_semantic =
             HMemStore::from_driver(Arc::clone(&curator_driver)).expect("curator hmem store init");
         let curator_embedding_store = EmbeddingStore::from_driver(curator_driver, 1024);
         let curator_semantic = Arc::new(SemanticMemory::new(
-            curator_h_mem_store,
+            curator_h_mem_store_semantic,
             curator_embedding_store,
         ));
 
@@ -1366,6 +1371,7 @@ mod tests {
             episodic,
             semantic,
             curator_semantic: Some(curator_semantic),
+            curator_episodic: Some(curator_episodic),
             embedding_port,
             embedding_model: "test-model".to_string(),
             user_webid: test_webid(),
@@ -1791,5 +1797,144 @@ mod tests {
             .expect("query succeeds");
         assert_eq!(h1.len(), 1, "first turn should be stored");
         assert_eq!(h2.len(), 1, "second turn should be stored");
+    }
+
+    /// Curator turns must be ingested into the curator's sovereign DB with the
+    /// curator's WebID (Private, curator perspective), mirroring the user
+    /// agent's episodic loop. This is the core of the curator memory mirror —
+    /// without it, the curator has no first-person experiential memory.
+    #[tokio::test]
+    async fn ingest_curator_turn_stores_curator_perspective_episodic() {
+        let port = in_memory_port();
+        let curator_webid = port.curator_webid;
+        let record = TurnRecord {
+            thread_id: "curator-thread-1".to_string(),
+            user_input: "What is the regulation status?".to_string(),
+            agent_response: "All systems nominal.".to_string(),
+            model: "test-model".to_string(),
+            thread_title: None,
+            agent_id: Some("Curator".to_string()),
+        };
+
+        let result = port.ingest_turn(record).await;
+        assert!(result.is_ok(), "curator turn ingestion should succeed");
+
+        // The curator's episodic store should have the turn, tagged with the
+        // curator's WebID (Private, curator perspective).
+        let curator_episodic = port
+            .curator_episodic
+            .as_ref()
+            .expect("curator episodic store");
+        let h_mems = curator_episodic
+            .query_for_deduped_untouched("chat:thread:curator-thread-1", curator_webid)
+            .expect("curator episodic query should succeed");
+        assert_eq!(
+            h_mems.len(),
+            1,
+            "one curator-perspective episodic h_mem should be stored"
+        );
+        assert_eq!(h_mems[0].attribute, "chatted");
+
+        // The user's episodic store should NOT contain the curator's turn —
+        // curator turns are private to the curator, not the user.
+        let user_h_mems = port
+            .episodic
+            .query_for_deduped_untouched("chat:thread:curator-thread-1", port.user_webid)
+            .expect("user episodic query should succeed");
+        assert_eq!(
+            user_h_mems.len(),
+            0,
+            "curator turn must not leak into the user's episodic store"
+        );
+
+        // The curator's semantic store should also have the turn (Shared copy).
+        let curator_semantic = port
+            .curator_semantic
+            .as_ref()
+            .expect("curator semantic store");
+        let semantic_h_mems = curator_semantic
+            .query_deduped("curator:thread:curator-thread-1")
+            .expect("curator semantic query should succeed");
+        assert_eq!(
+            semantic_h_mems.len(),
+            1,
+            "one curator semantic h_mem should be stored"
+        );
+        assert_eq!(semantic_h_mems[0].attribute, "turn");
+    }
+
+    /// Curator turns should NOT write to the user's episodic or semantic stores.
+    /// This pins the isolation invariant: the curator's memory is sovereign.
+    #[tokio::test]
+    async fn ingest_curator_turn_does_not_touch_user_stores() {
+        let port = in_memory_port();
+        let record = TurnRecord {
+            thread_id: "curator-isolation-test".to_string(),
+            user_input: "Check the guard layer".to_string(),
+            agent_response: "Guard layer is healthy.".to_string(),
+            model: "test-model".to_string(),
+            thread_title: None,
+            agent_id: Some("Curator".to_string()),
+        };
+
+        port.ingest_turn(record)
+            .await
+            .expect("ingestion should succeed");
+
+        // User episodic — should be empty for the curator's thread.
+        let user_episodic = port
+            .episodic
+            .query_for_deduped_untouched("chat:thread:curator-isolation-test", port.user_webid)
+            .expect("user episodic query should succeed");
+        assert_eq!(
+            user_episodic.len(),
+            0,
+            "curator turn must not write to the user's episodic store"
+        );
+
+        // User semantic — should not have the curator entity.
+        let user_semantic = port
+            .semantic
+            .query_deduped("curator:thread:curator-isolation-test")
+            .expect("user semantic query should succeed");
+        assert_eq!(
+            user_semantic.len(),
+            0,
+            "curator semantic copy must not leak into the user's semantic store"
+        );
+    }
+
+    /// `recall_context_curator` should recall from the curator's stores, not
+    /// the user's. This pins the curator recall path that the
+    /// `BridgeCuratorContextInjector` delegates to.
+    #[tokio::test]
+    async fn recall_context_curator_reads_curator_store() {
+        let port = in_memory_port();
+
+        // Ingest a curator turn.
+        let record = TurnRecord {
+            thread_id: "curator-recall-test".to_string(),
+            user_input: "regulation_status_check_keyword".to_string(),
+            agent_response: "All regulation systems are operational.".to_string(),
+            model: "test-model".to_string(),
+            thread_title: None,
+            agent_id: Some("Curator".to_string()),
+        };
+        port.ingest_turn(record)
+            .await
+            .expect("ingestion should succeed");
+
+        // Recall from the curator's store — the keyword should match.
+        let snippets = port
+            .recall_context_curator("regulation_status_check_keyword", 5)
+            .await
+            .expect("curator recall should succeed");
+        assert!(
+            !snippets.is_empty(),
+            "curator recall should find the ingested curator turn"
+        );
+
+        // The recalled snippet should come from the curator's episodic store.
+        assert_eq!(snippets[0].source, "episodic");
     }
 }

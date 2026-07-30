@@ -354,6 +354,8 @@ impl ContextInjector for BridgeCuratorContextInjector {
         })
     }
 }
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use hkask_types::{MemoryError, MemorySnippet};
