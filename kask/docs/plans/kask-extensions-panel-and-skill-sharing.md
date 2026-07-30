@@ -216,7 +216,7 @@ Each phase is independently shippable. Phases 1–3 land client-side without any
 **Files touched:**
 - `crates/settings_ui/src/pages/skills_setup.rs`
 - `crates/settings_ui/src/pages/skills_visibility.rs` (new)
-- `crates/settings_ui/src/settings_window.rs` (add queue field + drain trigger)
+- `crates/settings_ui/src/settings_ui.rs` (add queue field + drain trigger — not `settings_window.rs`, which does not exist)
 
 **Acceptance:** user can toggle a skill's visibility; the frontmatter is updated on disk; the queue accumulates; navigating away from the page triggers the (no-op) drain. `cargo check -p settings_ui` passes.
 
