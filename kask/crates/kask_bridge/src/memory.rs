@@ -1360,26 +1360,25 @@ impl RealMemoryPort {
 
             // ── 1. Episodic: exact entity match, perspective-scoped ─────
             let episodic_entity = format!("chat:thread:{thread_id}");
-            if let Some(episodic) = episodic {
-                if let Ok(h_mems) =
+            if let Some(episodic) = episodic
+                && let Ok(h_mems) =
                     episodic.query_for_deduped_untouched(&episodic_entity, perspective)
-                {
-                    for h_mem in h_mems {
-                        let text = h_mem.value.as_str().unwrap_or("").to_string();
-                        if text.is_empty() {
-                            continue;
-                        }
-                        candidates.push(Candidate {
-                            snippet: MemorySnippet {
-                                text,
-                                source: "episodic".to_string(),
-                                confidence: h_mem.confidence.value(),
-                                relevance_score: 1.0,
-                            },
-                            h_mem_id: h_mem.id,
-                            source: RecallSource::Episodic,
-                        });
+            {
+                for h_mem in h_mems {
+                    let text = h_mem.value.as_str().unwrap_or("").to_string();
+                    if text.is_empty() {
+                        continue;
                     }
+                    candidates.push(Candidate {
+                        snippet: MemorySnippet {
+                            text,
+                            source: "episodic".to_string(),
+                            confidence: h_mem.confidence.value(),
+                            relevance_score: 1.0,
+                        },
+                        h_mem_id: h_mem.id,
+                        source: RecallSource::Episodic,
+                    });
                 }
             }
 
@@ -2138,5 +2137,71 @@ mod tests {
 
         // The recalled snippet should come from the curator's episodic store.
         assert_eq!(snippets[0].source, "episodic");
+    }
+
+    /// `recall_thread` should recall a thread's prior turns by exact entity
+    /// match, not by content similarity. This pins the static-context fix —
+    /// the previous `inject_static_context` passed the `thread_id` UUID as the
+    /// query to `recall_context`, which never matched stored turn text (the
+    /// stored embeddings are of `user_input`, not the thread_id), so static
+    /// context injection was dead code.
+    #[tokio::test]
+    async fn recall_thread_recalls_thread_by_entity() {
+        let port = in_memory_port();
+        let thread_id = "user-thread-recall-test";
+
+        // Ingest a user turn.
+        let record = TurnRecord {
+            thread_id: thread_id.to_string(),
+            user_input: "how do I configure the embedding model".to_string(),
+            agent_response: "Set kask.corpus.embedding_dim in settings.json.".to_string(),
+            model: "test-model".to_string(),
+            thread_title: None,
+            agent_id: None,
+        };
+        port.ingest_turn(record)
+            .await
+            .expect("ingestion should succeed");
+
+        // Recall by thread_id — should find the turn via exact entity match.
+        let snippets = port
+            .recall_thread(thread_id, 10)
+            .await
+            .expect("thread recall should succeed");
+        assert!(
+            !snippets.is_empty(),
+            "recall_thread should find the ingested turn by entity, not content"
+        );
+    }
+
+    /// `recall_thread_curator` should recall the curator's prior turns on a
+    /// thread from the curator's sovereign stores. Mirrors the user-side test.
+    #[tokio::test]
+    async fn recall_thread_curator_recalls_curator_thread() {
+        let port = in_memory_port();
+        let thread_id = "curator-thread-recall-test";
+
+        // Ingest a curator turn.
+        let record = TurnRecord {
+            thread_id: thread_id.to_string(),
+            user_input: "regulation status check".to_string(),
+            agent_response: "All regulation systems are operational.".to_string(),
+            model: "test-model".to_string(),
+            thread_title: None,
+            agent_id: Some("Curator".to_string()),
+        };
+        port.ingest_turn(record)
+            .await
+            .expect("ingestion should succeed");
+
+        // Recall by thread_id from the curator's stores.
+        let snippets = port
+            .recall_thread_curator(thread_id, 10)
+            .await
+            .expect("curator thread recall should succeed");
+        assert!(
+            !snippets.is_empty(),
+            "recall_thread_curator should find the ingested curator turn by entity"
+        );
     }
 }
