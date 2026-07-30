@@ -37,6 +37,14 @@ pub struct TurnRecord {
     pub model: String,
     /// Optional thread title (if available).
     pub thread_title: Option<String>,
+    /// The agent ID that produced this turn (e.g., "Curator", "zed"),
+    /// when the host runtime tags threads with their owning agent. `None`
+    /// for upstream-zed threads that have no agent identity, or when the
+    /// caller has no agent-awareness. The memory port uses this to route
+    /// ingestion to the correct perspective-scoped store — e.g., Curator
+    /// turns are written to the curator's sovereign DB with the curator's
+    /// WebID, not the user's.
+    pub agent_id: Option<String>,
 }
 
 impl TurnRecord {
@@ -44,11 +52,17 @@ impl TurnRecord {
     ///
     /// This is the value stored in the h_mem `value` field. The `thread_id`
     /// becomes the h_mem `entity`, and `"chatted"` is the h_mem `attribute`.
+    /// `agent_id` is included when set so the stored record identifies which
+    /// agent produced the turn — useful for the curator's own memory recall.
     pub fn to_chat_turn_value(&self) -> serde_json::Value {
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "user_input": self.user_input,
             "agent_response": self.agent_response,
-        })
+        });
+        if let Some(ref agent_id) = self.agent_id {
+            v["agent_id"] = serde_json::Value::String(agent_id.clone());
+        }
+        v
     }
 }
 

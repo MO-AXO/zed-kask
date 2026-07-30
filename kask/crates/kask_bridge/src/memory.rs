@@ -90,6 +90,14 @@ pub struct RealMemoryPort {
     /// DB cannot be opened (graceful degradation — the curator copy is skipped
     /// but the user's episodic + semantic records still persist).
     curator_semantic: Option<Arc<SemanticMemory>>,
+    /// Curator's sovereign episodic store — written to `agents/curator/pod.db`,
+    /// mirroring `curator_semantic`. Used when `ingest_turn` receives a
+    /// `TurnRecord` whose `agent_id` is the Curator: the turn is stored as a
+    /// curator-perspective episodic h_mem (Private, `curator_webid`) so the
+    /// curator can recall its own first-person experience. `None` when the
+    /// curator DB cannot be opened — curator-perspective episodic ingestion is
+    /// skipped but the curator semantic copy (if available) still persists.
+    curator_episodic: Option<Arc<EpisodicMemory>>,
     embedding_port: LanguageModelEmbeddingPort,
     embedding_model: String,
     user_webid: WebID,
@@ -206,19 +214,24 @@ impl RealMemoryPort {
         let curator_webid = WebID::from_persona(b"curator");
 
         // Open the curator's sovereign DB (`agents/curator/pod.db`) and
-        // construct a separate SemanticMemory pointed at it. The curator MCP
-        // server reads from the same DB, so h_mems written here are visible to
-        // `curator_memory_recall` and `curator_semantic_search`.
+        // construct both episodic and semantic stores pointed at it. The
+        // curator MCP server reads from the same DB, so h_mems written here
+        // are visible to `curator_memory_recall` and `curator_semantic_search`.
+        //
+        // The episodic store holds curator-perspective first-person records
+        // (Curator turns, Private, `curator_webid`) — the curator's own
+        // experiential memory, mirroring the user agent's episodic loop. The
+        // semantic store holds the curator-accessible shared copy.
         //
         // The curator DB uses the same passphrase as the user's DB — both are
         // SQLCipher databases under the same hKask data directory, and the
         // passphrase is provisioned by `provision_agent` / the keychain.
         //
         // When the curator DB cannot be opened (missing dir, wrong
-        // passphrase, disk error), `curator_semantic` is `None` — the curator
-        // copy is silently skipped but the user's episodic + semantic records
-        // still persist. This is graceful degradation, not a hard failure.
-        let curator_semantic = open_curator_semantic(passphrase, embedding_dim);
+        // passphrase, disk error), both are `None` — curator copies are
+        // silently skipped but the user's episodic + semantic records still
+        // persist. This is graceful degradation, not a hard failure.
+        let (curator_episodic, curator_semantic) = open_curator_stores(passphrase, embedding_dim);
 
         // Consolidation service — episodic → semantic promotion.
         // Only constructed when the cadence is non-zero; a zero cadence disables
@@ -241,6 +254,7 @@ impl RealMemoryPort {
             episodic,
             semantic,
             curator_semantic,
+            curator_episodic,
             embedding_port,
             embedding_model,
             user_webid,
@@ -499,15 +513,25 @@ impl RealMemoryPort {
     }
 }
 
-/// Open the curator's sovereign `pod.db` and construct a `SemanticMemory`
-/// pointed at it. Returns `None` on any failure — the caller treats this as
-/// graceful degradation (curator copy is skipped, user memory still persists).
+/// Open the curator's sovereign `pod.db` and construct both an
+/// `EpisodicMemory` and a `SemanticMemory` pointed at it. Returns
+/// `(None, None)` on any failure — the caller treats this as graceful
+/// degradation (curator copies are skipped, user memory still persists).
 ///
 /// The DB path defaults to `agents/curator/pod.db` under the hKask data
 /// directory, matching the path the curator MCP server reads from in
 /// `open_curator_stores`. The passphrase is the same as the user's DB —
 /// both are provisioned by `provision_agent` / the keychain.
-fn open_curator_semantic(passphrase: &str, embedding_dim: usize) -> Option<Arc<SemanticMemory>> {
+///
+/// The episodic store is used for curator-perspective first-person records
+/// (Curator turns ingested with `curator_webid` + `Visibility::Private`),
+/// mirroring the user agent's episodic loop. The semantic store is the
+/// curator-accessible shared copy that `curator_memory_recall` and
+/// `curator_semantic_search` read from.
+fn open_curator_stores(
+    passphrase: &str,
+    embedding_dim: usize,
+) -> (Option<Arc<EpisodicMemory>>, Option<Arc<SemanticMemory>>) {
     let curator_db_path = std::env::var("HKASK_CURATOR_DB").unwrap_or_else(|_| {
         let p = hkask_types::agent_paths::agent_pod_db("curator");
         let resolved = hkask_types::agent_paths::resolve_under_data_dir(&p);
@@ -524,11 +548,11 @@ fn open_curator_semantic(passphrase: &str, embedding_dim: usize) -> Option<Arc<S
                 target: "reg.memory",
                 error = %e,
                 db_path = %curator_db_path,
-                "Failed to open curator DB — curator copy will be skipped. \
+                "Failed to open curator DB — curator copies will be skipped. \
                  Set HKASK_CURATOR_DB to override the path, or ensure the \
                  curator agent directory exists under the hKask data dir."
             );
-            return None;
+            return (None, None);
         }
     };
     let pool = match db.sqlite_pool() {
@@ -539,30 +563,48 @@ fn open_curator_semantic(passphrase: &str, embedding_dim: usize) -> Option<Arc<S
                 error = %e,
                 "Failed to get SQLite pool for curator DB"
             );
-            return None;
+            return (None, None);
         }
     };
     let driver: Arc<dyn hkask_storage::DatabaseDriver> =
         Arc::new(hkask_storage::database::sqlite::SqliteDriver::new(pool));
-    let h_mem_store = match HMemStore::from_driver(Arc::clone(&driver)) {
+    // HMem store for the curator's episodic memory (first-person, Private).
+    let h_mem_store_episodic = match HMemStore::from_driver(Arc::clone(&driver)) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(
                 target: "reg.memory",
                 error = %e,
-                "Failed to create HMemStore for curator DB"
+                "Failed to create HMemStore for curator episodic DB"
             );
-            return None;
+            return (None, None);
+        }
+    };
+    // HMem store for the curator's semantic memory (shared, with embeddings).
+    let h_mem_store_semantic = match HMemStore::from_driver(Arc::clone(&driver)) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                target: "reg.memory",
+                error = %e,
+                "Failed to create HMemStore for curator semantic DB"
+            );
+            return (
+                Some(Arc::new(EpisodicMemory::new(h_mem_store_episodic))),
+                None,
+            );
         }
     };
     let embedding_store = EmbeddingStore::from_driver(driver, embedding_dim);
-    let semantic = Arc::new(SemanticMemory::new(h_mem_store, embedding_store));
+    let episodic = Arc::new(EpisodicMemory::new(h_mem_store_episodic));
+    let semantic = Arc::new(SemanticMemory::new(h_mem_store_semantic, embedding_store));
     tracing::info!(
         target: "reg.memory",
         db_path = %curator_db_path,
-        "Curator semantic store opened — turns will be mirrored to curator memory"
+        "Curator episodic + semantic stores opened — \
+         curator turns will be ingested into curator memory (perspective = curator)"
     );
-    Some(semantic)
+    (Some(episodic), Some(semantic))
 }
 
 impl MemoryPort for RealMemoryPort {
@@ -972,6 +1014,7 @@ impl agent::ThreadMemoryPort for BridgeMemoryPort {
                     agent_response: record.agent_response,
                     model: record.model,
                     thread_title: record.thread_title,
+                    agent_id: record.agent_id.map(|id| id.to_string()),
                 })
                 .await
                 .map_err(|e| e.to_string())
@@ -1060,6 +1103,7 @@ mod tests {
             agent_response: "Rust is a systems programming language.".to_string(),
             model: "test-model".to_string(),
             thread_title: Some("Rust Discussion".to_string()),
+            agent_id: None,
         };
 
         let result = port.ingest_turn(record).await;
@@ -1083,6 +1127,7 @@ mod tests {
             agent_response: "Async Rust uses tokio.".to_string(),
             model: "test-model".to_string(),
             thread_title: None,
+            agent_id: None,
         };
 
         let result = port.ingest_turn(record).await;
@@ -1127,6 +1172,7 @@ mod tests {
             agent_response: "Memory is persistence across time.".to_string(),
             model: "test-model".to_string(),
             thread_title: None,
+            agent_id: None,
         };
 
         let result = port.ingest_turn(record).await;
@@ -1153,6 +1199,7 @@ mod tests {
             agent_response: "Response".to_string(),
             model: "test".to_string(),
             thread_title: None,
+            agent_id: None,
         };
 
         let result = port.ingest_turn(record).await;
@@ -1178,6 +1225,7 @@ mod tests {
             agent_response: "Consolidation promotes episodic to semantic.".to_string(),
             model: "test-model".to_string(),
             thread_title: None,
+            agent_id: None,
         };
         let result = port.ingest_turn(record).await;
         assert!(result.is_ok(), "ingest_turn should succeed");
@@ -1203,6 +1251,7 @@ mod tests {
             agent_response: "Consolidation promotes episodic to semantic.".to_string(),
             model: "test-model".to_string(),
             thread_title: None,
+            agent_id: None,
         })
         .await
         .expect("ingest succeeds");
@@ -1256,6 +1305,7 @@ mod tests {
             agent_response: "Hi".to_string(),
             model: "test-model".to_string(),
             thread_title: None,
+            agent_id: None,
         };
         let result = port.ingest_turn(record).await;
         assert!(result.is_ok());
@@ -1293,6 +1343,7 @@ mod tests {
                 agent_response: "Rust is a systems language.".to_string(),
                 model: "test-model".to_string(),
                 thread_title: None,
+                agent_id: None,
             },
             TurnRecord {
                 thread_id: "t-python".to_string(),
@@ -1300,6 +1351,7 @@ mod tests {
                 agent_response: "Python is a scripting language.".to_string(),
                 model: "test-model".to_string(),
                 thread_title: None,
+                agent_id: None,
             },
         ];
         for record in records {
@@ -1347,6 +1399,7 @@ mod tests {
             agent_response: "response".to_string(),
             model: "test-model".to_string(),
             thread_title: None,
+            agent_id: None,
         })
         .await
         .expect("ingest succeeds");
@@ -1420,6 +1473,7 @@ mod tests {
             agent_response: "response1".to_string(),
             model: "test-model".to_string(),
             thread_title: None,
+            agent_id: None,
         };
         let record2 = TurnRecord {
             thread_id: "sem-2".to_string(),
@@ -1427,6 +1481,7 @@ mod tests {
             agent_response: "response2".to_string(),
             model: "test-model".to_string(),
             thread_title: None,
+            agent_id: None,
         };
 
         // Spawn both ingestions concurrently.
