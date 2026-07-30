@@ -11092,6 +11092,7 @@ dependencies = [
  "futures 0.3.33",
  "gpui",
  "kask_bridge",
+ "log",
  "project",
  "serde",
  "serde_json",

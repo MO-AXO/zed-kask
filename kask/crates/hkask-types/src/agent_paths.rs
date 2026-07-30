@@ -227,12 +227,8 @@ pub(crate) fn publish_artifact(
         }
     }
 
-    let json = serde_json::to_string_pretty(&manifest).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to serialize manifest: {e}"),
-        )
-    })?;
+    let json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| std::io::Error::other(format!("Failed to serialize manifest: {e}")))?;
     std::fs::write(&manifest_path, json)
 }
 
