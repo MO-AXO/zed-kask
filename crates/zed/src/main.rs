@@ -3817,9 +3817,16 @@ mod tests {
         // Use a non-existent path — env-var resolution returns it verbatim
         // without checking existence (the operator asserted it exists).
         let fake_path = "/tmp/hkask-mcp-codegraph-test-override";
-        std::env::set_var("HKASK_MCP_CODEGRAPH_BIN", fake_path);
+        // SAFETY: this test runs single-threaded; no other thread reads or writes
+        // `HKASK_MCP_CODEGRAPH_BIN` while this block executes.
+        unsafe {
+            std::env::set_var("HKASK_MCP_CODEGRAPH_BIN", fake_path);
+        }
         let resolved = resolve_mcp_binary("codegraph", "hkask-mcp-codegraph");
-        std::env::remove_var("HKASK_MCP_CODEGRAPH_BIN");
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var("HKASK_MCP_CODEGRAPH_BIN");
+        }
         assert_eq!(
             resolved, fake_path,
             "HKASK_MCP_{{ID}}_BIN env var must take precedence over all other resolution paths"
@@ -3832,7 +3839,11 @@ mod tests {
     /// produce a clear "binary not found" error rather than a silent wrong path.
     #[test]
     fn resolve_mcp_binary_falls_back_to_bare_name() {
-        std::env::remove_var("HKASK_MCP_NONEXISTENT_BIN");
+        // SAFETY: this test runs single-threaded; no other thread reads or writes
+        // `HKASK_MCP_NONEXISTENT_BIN` while this block executes.
+        unsafe {
+            std::env::remove_var("HKASK_MCP_NONEXISTENT_BIN");
+        }
         let resolved = resolve_mcp_binary("nonexistent", "hkask-mcp-nonexistent");
         assert_eq!(
             resolved, "hkask-mcp-nonexistent",
