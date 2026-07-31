@@ -6413,6 +6413,84 @@ mod internal_tests {
     }
 
     #[gpui::test]
+    async fn test_refresh_list_drops_models_that_fail_the_model_filter(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(paths::settings_file().parent().unwrap())
+            .await
+            .unwrap();
+        fs.insert_file(paths::settings_file(), b"{}".to_vec()).await;
+        let _project = Project::test(fs.clone(), [], cx).await;
+
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        let agent =
+            cx.update(|cx| NativeAgent::new(thread_store, Templates::new(), fs.clone(), cx));
+
+        // Register a second provider with an "expensive" model.
+        cx.update(|cx| {
+            let expensive_model = Arc::new(FakeLanguageModel::with_id_and_thinking(
+                "fake-corp",
+                "expensive-model",
+                "Expensive Model",
+                false,
+            ));
+            let provider = Arc::new(
+                FakeLanguageModelProvider::new(
+                    LanguageModelProviderId::from("fake-corp".to_string()),
+                    LanguageModelProviderName::from("Fake Corp".to_string()),
+                )
+                .with_models(vec![expensive_model]),
+            );
+            LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.register_provider(provider, cx);
+            });
+        });
+
+        // Before the filter is installed, the expensive model appears in the list.
+        agent.update(cx, |agent, cx| agent.models.refresh_list(cx));
+        let list = cx.update(|cx| agent.read(cx).models.model_list.clone());
+        let model_ids = collect_model_ids(&list);
+        assert!(
+            model_ids.iter().any(|id| id == "fake-corp/expensive-model"),
+            "expensive model should appear before filter is installed: {model_ids:?}"
+        );
+
+        // Install a cross-provider filter that de-lists the expensive model.
+        cx.update(|cx| {
+            LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
+                registry.set_model_filter_fn(Box::new(|model: &dyn LanguageModel| {
+                    model.id().0.as_ref() != "expensive-model"
+                }));
+                cx.notify();
+            });
+        });
+
+        // After the filter is installed, refresh_list must drop the expensive model.
+        agent.update(cx, |agent, cx| agent.models.refresh_list(cx));
+        let list = cx.update(|cx| agent.read(cx).models.model_list.clone());
+        let model_ids = collect_model_ids(&list);
+        assert!(
+            !model_ids.iter().any(|id| id == "fake-corp/expensive-model"),
+            "expensive model must be de-listed after filter is installed: {model_ids:?}"
+        );
+        // The default fake model (from init_test) must still be present.
+        assert!(
+            model_ids.iter().any(|id| id == "fake/fake"),
+            "non-expensive model must still appear: {model_ids:?}"
+        );
+    }
+
+    fn collect_model_ids(list: &acp_thread::AgentModelList) -> Vec<String> {
+        let acp_thread::AgentModelList::Grouped(groups) = list else {
+            return Vec::new();
+        };
+        groups
+            .values()
+            .flat_map(|models| models.iter().map(|m| m.id.as_ref().to_string()))
+            .collect()
+    }
+
+    #[gpui::test]
     async fn test_summarization_model_survives_transient_registry_clearing(
         cx: &mut TestAppContext,
     ) {
