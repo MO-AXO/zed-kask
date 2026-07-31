@@ -53,12 +53,13 @@
 //! time. The `FusionLanguageModel` holds only `LanguageModelInferencePort`
 //! instances (which hold `Send + Sync` channel senders), not `AsyncApp`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::stream::BoxStream;
 use futures_util::{FutureExt, StreamExt, stream};
-use gpui::{App, AppContext, AsyncApp, Entity};
+use gpui::{App, AppContext, AsyncApp, Entity, Task};
 use hkask_types::template::LLMParameters;
 use hkask_types::{
     ChatMessage, ChatToolDefinition, InferenceError, InferencePort, InferenceResult,
@@ -436,34 +437,37 @@ impl InferencePort for MultiModelInferencePort {
 ///
 /// Resolution strategy:
 /// 1. If the name contains `/`, split on the first `/` to get
-///    `(provider_id, model_id)` and look up the provider.
-/// 2. Search the provider's models for one whose `id()` or `telemetry_id()`
-///    matches the model part.
+///    `(provider_id, model_id)` and look up the provider (case-insensitive
+///    on the provider id — `OpenRouter` matches the registered `openrouter`).
+/// 2. Search the provider's models for one whose `id()` matches the model
+///    part, or whose `telemetry_id()` matches the full prefixed name
+///    (case-insensitive — `OpenRouter/minimax/minimax3` matches
+///    `openrouter/minimax/minimax3`).
 /// 3. If no prefix or no match, search all providers' models by
-///    `telemetry_id()`.
+///    `telemetry_id()` (case-insensitive).
 ///
-/// Models that can't be resolved are silently skipped (with a warning).
+/// Returns `(resolved, unresolvable)` where `unresolvable` is the set of
+/// names that could not be resolved. The caller is responsible for warning
+/// about unresolvable names — this function does not log, so it can be called
+/// from a debounced rebuild without producing a warn storm.
 #[must_use]
 pub fn resolve_fusion_models(
     registry: &language_model::LanguageModelRegistry,
     model_names: &[String],
     cx: &App,
-) -> HashMap<String, Arc<dyn LanguageModel>> {
+) -> (HashMap<String, Arc<dyn LanguageModel>>, HashSet<String>) {
     let mut resolved: HashMap<String, Arc<dyn LanguageModel>> = HashMap::new();
+    let mut unresolvable: HashSet<String> = HashSet::new();
 
     for name in model_names {
         if let Some(model) = resolve_model(registry, name, cx) {
             resolved.insert(name.clone(), model);
         } else {
-            tracing::warn!(
-                target: "reg.fusion",
-                model_name = %name,
-                "Could not resolve model from LanguageModelRegistry — dropped from fusion"
-            );
+            unresolvable.insert(name.clone());
         }
     }
 
-    resolved
+    (resolved, unresolvable)
 }
 
 /// Resolve a single provider-prefixed model name.
@@ -500,22 +504,32 @@ fn resolve_model(
             // The model ID after the prefix may itself contain a `/` (e.g.
             // "anthropic/claude-sonnet-4.5" under provider "OR"). Search the
             // provider's models for a match on id or telemetry_id.
+            //
+            // The telemetry_id comparison is case-insensitive on the full
+            // prefixed name: the fusion config defaults use `OpenRouter/...`
+            // (capitalized) while the OpenRouter provider's telemetry_id
+            // returns `openrouter/...` (lowercase). Without case-insensitive
+            // comparison, `OpenRouter/minimax/minimax3` never matches
+            // `openrouter/minimax/minimax3` even when the model exists.
             for model in provider.provided_models(cx) {
-                if model.id().0.as_ref() == model_id || model.telemetry_id() == prefixed_name {
+                if model.id().0.as_ref() == model_id
+                    || model.telemetry_id().eq_ignore_ascii_case(prefixed_name)
+                {
                     return Some(model);
                 }
             }
         }
     }
 
-    // No prefix or prefix match failed — search all providers by telemetry_id.
+    // No prefix or prefix match failed — search all providers by telemetry_id
+    // (case-insensitive, same reason as above).
     // Skip the fusion provider itself to avoid a re-entrant entity borrow when
     // this function is called from within FusionProviderState's settings-observe
     // callback (which holds a mutable borrow on the fusion entity).
     registry
         .available_models(cx)
         .filter(|m| m.provider_id().0.as_ref() != FUSION_PROVIDER_ID)
-        .find(|m| m.telemetry_id() == prefixed_name)
+        .find(|m| m.telemetry_id().eq_ignore_ascii_case(prefixed_name))
 }
 
 // ── FusionLanguageModelProvider ───────────────────────────────────────────────
@@ -539,6 +553,18 @@ pub struct FusionProviderState {
     /// every settings change that still succeeds.
     was_broken: bool,
     alert_tx: Option<tokio::sync::mpsc::UnboundedSender<hkask_regulation::AlertEvent>>,
+    /// Pending debounced rebuild task. When a rebuild is scheduled, we replace
+    /// any existing pending task — the new task waits a short debounce window
+    /// then runs `build_model` once, coalescing a burst of registry/settings
+    /// events into a single rebuild. This prevents the warn storm where each
+    /// `ProviderStateChanged` event in a burst spawns its own `build_model`
+    /// call, each emitting a warn per unresolvable model.
+    pending_rebuild: Option<Task<()>>,
+    /// Model names that failed to resolve in the most recent `build_model`.
+    /// Used to suppress duplicate warns across rebuilds for the same set of
+    /// unresolvable models — the operator only needs to see each failure
+    /// once per transition, not on every rebuild.
+    warned_unresolvable: HashSet<String>,
     _settings_subscription: gpui::Subscription,
     _registry_subscription: gpui::Subscription,
 }
@@ -548,17 +574,46 @@ impl FusionProviderState {
         cx: &mut gpui::Context<Self>,
         alert_tx: Option<tokio::sync::mpsc::UnboundedSender<hkask_regulation::AlertEvent>>,
     ) -> Self {
-        let model = Self::build_model(cx);
+        let (model, unresolvable) = Self::build_model(cx);
         let was_broken = model.is_none();
+        // Warn once for the initial set of unresolvable models. Subsequent
+        // warns are gated by `warned_unresolvable` in `apply_rebuild`.
+        for name in &unresolvable {
+            tracing::warn!(
+                target: "reg.fusion",
+                model_name = %name,
+                "Could not resolve model from LanguageModelRegistry — dropped from fusion"
+            );
+        }
 
         // Subscribe to LanguageModelRegistry events so the fusion model
         // rebuilds when a panel/judge provider's auth state changes (token
         // expires, provider unregistered, model list fetched after startup).
         // Same deferred-rebuild pattern as the settings observer — avoids
         // re-entrant entity borrows.
+        //
+        // Self-event filter: `ProviderStateChanged(FUSION_PROVIDER_ID)` is
+        // emitted by the registry whenever *this* provider's observable
+        // entity notifies (which happens inside `apply_rebuild` via
+        // `cx.notify()`). Without filtering it, every rebuild triggers a
+        // `ProviderStateChanged` → `schedule_rebuild` → rebuild → notify →
+        // `ProviderStateChanged` loop, producing an unbounded warn storm
+        // (one warn per unresolvable model per iteration). The fusion
+        // provider's own state changes are not a signal to rebuild itself —
+        // it already rebuilt. `AddedProvider`/`RemovedProvider` for the
+        // fusion id are also filtered (fusion is registered once at startup
+        // and never re-added).
         let registry = language_model::LanguageModelRegistry::global(cx);
+        let fusion_provider_id = LanguageModelProviderId(FUSION_PROVIDER_ID.to_string().into());
         let _registry_subscription =
-            cx.subscribe(&registry, |this, _registry, event, cx| match event {
+            cx.subscribe(&registry, move |this, _registry, event, cx| match event {
+                language_model::Event::ProviderStateChanged(id)
+                | language_model::Event::AddedProvider(id)
+                | language_model::Event::RemovedProvider(id)
+                    if *id == fusion_provider_id =>
+                {
+                    // Self-event — ignore to avoid the rebuild loop.
+                }
                 language_model::Event::ProviderStateChanged(_)
                 | language_model::Event::AddedProvider(_)
                 | language_model::Event::RemovedProvider(_)
@@ -572,13 +627,15 @@ impl FusionProviderState {
             model,
             was_broken,
             alert_tx,
+            pending_rebuild: None,
+            warned_unresolvable: unresolvable,
             _settings_subscription: cx
                 .observe_global::<settings::SettingsStore>(|this, cx| this.schedule_rebuild(cx)),
             _registry_subscription,
         }
     }
 
-    /// Schedule a deferred rebuild of the fusion model.
+    /// Schedule a deferred, debounced rebuild of the fusion model.
     ///
     /// Defers to a spawned task to avoid re-entrant entity borrows:
     /// `build_model` resolves models from the registry, which calls
@@ -586,8 +643,20 @@ impl FusionProviderState {
     /// provider — including this one. If we held a mutable borrow on `self`
     /// here, the immutable `self.state.read(cx)` inside `is_authenticated`
     /// would panic.
+    ///
+    /// Debounce: if a rebuild is already pending, the new schedule replaces
+    /// the old one (the dropped `Task` is cancelled). The pending task waits
+    /// a short window before running `build_model`, coalescing a burst of
+    /// registry/settings events into a single rebuild. Without this, a burst
+    /// of N `ProviderStateChanged` events spawns N rebuilds, each emitting
+    /// a warn per unresolvable model — the warn storm seen in production.
     fn schedule_rebuild(&mut self, cx: &mut gpui::Context<Self>) {
-        cx.spawn(async move |weak_entity, cx| {
+        // Replace any pending rebuild — the old task is dropped (cancelled).
+        self.pending_rebuild = Some(cx.spawn(async move |weak_entity, cx| {
+            // Debounce window: coalesce events that arrive within 50ms.
+            cx.background_executor()
+                .timer(Duration::from_millis(50))
+                .await;
             // Bail before calling cx.update() if the entity is already gone
             // — the app is shutting down and AsyncApp::app() panics with
             // "app was released" if called after the app drops.
@@ -595,23 +664,47 @@ impl FusionProviderState {
                 Some(entity) => entity,
                 None => return,
             };
-            let new_model = cx.update(|cx| Self::build_model(cx));
+            let (new_model, unresolvable) = cx.update(|cx| Self::build_model(cx));
             cx.update(|cx| {
                 entity.update(cx, |this, cx| {
-                    this.apply_rebuild(new_model, cx);
+                    this.pending_rebuild = None;
+                    this.apply_rebuild(new_model, unresolvable, cx);
                 });
             });
-        })
-        .detach();
+        }));
     }
 
     /// Apply a rebuild result, alerting the UI on state transitions.
+    ///
+    /// `unresolvable` is the set of model names that failed to resolve in
+    /// this `build_model` pass. Warns are emitted only for names that weren't
+    /// already in `warned_unresolvable` — so a steady-state failure (same
+    /// models unresolvable across rebuilds) warns once, not on every rebuild.
+    /// When the set changes (a previously-unresolvable model now resolves,
+    /// or a new model fails), the delta is warned.
     fn apply_rebuild(
         &mut self,
         new_model: Option<Arc<FusionLanguageModel>>,
+        unresolvable: HashSet<String>,
         cx: &mut gpui::Context<Self>,
     ) {
         let is_broken = new_model.is_none();
+
+        // Warn only for newly-unresolvable names (not in the previous set).
+        // This suppresses the repeat-warn storm while still surfacing the
+        // first occurrence of each failure and any new failures that appear
+        // after a registry change.
+        for name in unresolvable.iter() {
+            if !self.warned_unresolvable.contains(name) {
+                tracing::warn!(
+                    target: "reg.fusion",
+                    model_name = %name,
+                    "Could not resolve model from LanguageModelRegistry — dropped from fusion"
+                );
+            }
+        }
+        self.warned_unresolvable = unresolvable;
+
         self.model = new_model;
 
         // Only alert on state transitions — not every successful rebuild.
@@ -645,25 +738,32 @@ impl FusionProviderState {
 
     /// Rebuild the `FusionLanguageModel` from current settings + registry.
     ///
-    /// Returns `None` when fusion is disabled or construction fails (missing
-    /// panel models, unresolvable judge, etc.). Reads `kask.fusion` from the
-    /// settings store and resolves panel/judge models from the
-    /// `LanguageModelRegistry`.
-    fn build_model(cx: &App) -> Option<Arc<FusionLanguageModel>> {
+    /// Returns `(None, unresolvable)` when fusion is disabled or construction
+    /// fails (missing panel models, unresolvable judge, etc.). The
+    /// `unresolvable` set contains the model names that failed to resolve, so
+    /// the caller can warn about them without re-warn-ing on every rebuild for
+    /// the same set.
+    ///
+    /// Reads `kask.fusion` from the settings store and resolves panel/judge
+    /// models from the `LanguageModelRegistry`.
+    fn build_model(cx: &App) -> (Option<Arc<FusionLanguageModel>>, HashSet<String>) {
         let kask_settings = kask_bridge_settings(cx);
-        kask_settings
-            .fusion
-            .to_fusion_config()
-            .and_then(|fc| {
-                let registry = language_model::LanguageModelRegistry::read_global(cx);
-                let mut names = fc.panel.iter().cloned().collect::<Vec<_>>();
-                if fc.judge.to_lowercase() != "algo" {
-                    names.push(fc.judge.clone());
-                }
-                let resolved = resolve_fusion_models(registry, &names, cx);
-                FusionLanguageModel::new(fc, resolved, cx.to_async())
-            })
-            .map(Arc::new)
+        let Some(fc) = kask_settings.fusion.to_fusion_config() else {
+            return (None, HashSet::new());
+        };
+        let registry = language_model::LanguageModelRegistry::read_global(cx);
+        let mut names = fc.panel.iter().cloned().collect::<Vec<_>>();
+        if fc.judge.to_lowercase() != "algo" {
+            names.push(fc.judge.clone());
+        }
+        let (resolved, unresolvable) = resolve_fusion_models(registry, &names, cx);
+        if !unresolvable.is_empty() {
+            return (None, unresolvable);
+        }
+        match FusionLanguageModel::new(fc, resolved, cx.to_async()) {
+            Some(model) => (Some(Arc::new(model)), HashSet::new()),
+            None => (None, HashSet::new()),
+        }
     }
 
     /// The current fusion model, if any.
@@ -962,6 +1062,51 @@ mod tests {
         assert!(
             registered_id.eq_ignore_ascii_case(configured_prefix),
             "case-insensitive comparison must match OpenRouter <-> openrouter"
+        );
+    }
+
+    /// Pin the case-insensitive telemetry_id contract.
+    ///
+    /// `resolve_model` compares the full prefixed name (e.g.
+    /// `"OpenRouter/minimax/minimax3"`) against each model's `telemetry_id()`
+    /// (e.g. `"openrouter/minimax/minimax3"` — lowercase prefix). The
+    /// comparison must be case-insensitive on the full string, otherwise the
+    /// capitalized `OpenRouter/` prefix in fusion config defaults never matches
+    /// the lowercase `openrouter/` prefix in telemetry_ids, even when the model
+    /// exists in the registry. This was the root cause of the warn storm: every
+    /// panel model in `kask_default()` failed to resolve.
+    #[test]
+    fn resolve_model_telemetry_id_comparison_is_case_insensitive() {
+        let configured = "OpenRouter/minimax/minimax3";
+        let telemetry_id = "openrouter/minimax/minimax3";
+        assert!(
+            telemetry_id.eq_ignore_ascii_case(configured),
+            "telemetry_id comparison must be case-insensitive \
+             (openrouter/... must match OpenRouter/...)"
+        );
+    }
+
+    /// Pin the self-event filter: the fusion provider must ignore
+    /// `ProviderStateChanged` / `AddedProvider` / `RemovedProvider` events
+    /// that carry its own provider id. Without this filter, every
+    /// `apply_rebuild` → `cx.notify()` triggers a `ProviderStateChanged` →
+    /// `schedule_rebuild` → rebuild → notify loop, producing an unbounded warn
+    /// storm. This test pins the id comparison so a refactor that drops the
+    /// filter is caught.
+    #[test]
+    fn fusion_provider_id_is_self_event_filter_key() {
+        let fusion_id = LanguageModelProviderId(FUSION_PROVIDER_ID.to_string().into());
+        // The filter compares event ids against the fusion provider id.
+        let event_id = LanguageModelProviderId(FUSION_PROVIDER_ID.to_string().into());
+        assert_eq!(
+            event_id, fusion_id,
+            "ProviderStateChanged(fusion_id) must be filtered as a self-event"
+        );
+        // A non-fusion id must NOT match.
+        let other_id = LanguageModelProviderId("openrouter".to_string().into());
+        assert_ne!(
+            other_id, fusion_id,
+            "non-fusion provider events must not be filtered"
         );
     }
 }

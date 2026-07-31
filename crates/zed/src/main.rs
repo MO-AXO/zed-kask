@@ -1512,11 +1512,17 @@ fn main() {
                         let async_cx_for_closure = async_cx_for_fusion.clone();
                         cx.update(|cx| {
                             let model_registry = language_model::LanguageModelRegistry::read_global(cx);
-                            let resolved = kask_bridge::resolve_fusion_models(
+                            let (resolved, unresolvable) = kask_bridge::resolve_fusion_models(
                                 model_registry,
                                 &names,
                                 cx,
                             );
+                            for name in &unresolvable {
+                                log::warn!(
+                                    "hKask fusion: could not resolve model '{name}' \
+                                     from LanguageModelRegistry — dropped from fusion"
+                                );
+                            }
                             match kask_bridge::FusionLanguageModel::new(
                                 fc.clone(),
                                 resolved,
@@ -1680,7 +1686,7 @@ fn main() {
                                         model_registry,
                                         &[kask_default.to_string()],
                                         cx,
-                                    ).into_values().next() {
+                                    ).0.into_values().next() {
                                         log::info!(
                                             "hKask inference using kask.models.default_model: {}",
                                             kask_default
