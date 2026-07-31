@@ -141,13 +141,9 @@ impl FusionLanguageModel {
             return None;
         }
 
-        let mode_str = config.mode.as_str();
         Some(Self {
             id: LanguageModelId::from(FUSION_MODEL_ID.to_string()),
-            name: LanguageModelName::from(format!(
-                "Fusion ({mode_str}, {} panelists)",
-                config.panel.len()
-            )),
+            name: LanguageModelName::from("Fusion".to_string()),
             config,
             ports,
         })
@@ -529,47 +525,36 @@ use ui::IconName;
 ///
 /// Notifies when settings change so the registry can re-enumerate models.
 pub struct FusionProviderState {
+    model: Option<Arc<FusionLanguageModel>>,
     _settings_subscription: gpui::Subscription,
 }
 
 impl FusionProviderState {
     fn new(cx: &mut gpui::Context<Self>) -> Self {
-        Self {
-            _settings_subscription: cx.observe_global::<settings::SettingsStore>(|_, cx| {
+        let model = Self::build_model(cx);
+        let state = Self {
+            model,
+            _settings_subscription: cx.observe_global::<settings::SettingsStore>(|this, cx| {
+                this.model = Self::build_model(cx);
                 cx.notify();
             }),
-        }
+        };
+        // The observe_global callback fires on the *next* settings change,
+        // but settings may have already been loaded before the provider was
+        // registered. The initial `build_model` call above handles that. The
+        // subscription ensures subsequent changes rebuild the model.
+        state
     }
-}
 
-/// A `LanguageModelProvider` that exposes the fusion model in zed's model picker.
-///
-/// When `kask.fusion.enabled == true`, this provider returns a single
-/// `FusionLanguageModel` in `provided_models`. When fusion is disabled, it
-/// returns an empty list (so it doesn't appear in the picker).
-///
-/// The fusion model is constructed at provider construction time (when
-/// `AsyncApp` is available) and held for the lifetime of the provider.
-/// If the fusion config changes, the user must restart Zed for the new
-/// config to take effect (a limitation we accept for Slice 3 — dynamic
-/// reconfiguration is a future enhancement).
-pub struct FusionLanguageModelProvider {
-    state: Entity<FusionProviderState>,
-    model: Option<Arc<FusionLanguageModel>>,
-}
-
-impl FusionLanguageModelProvider {
-    /// Construct the provider.
+    /// Rebuild the `FusionLanguageModel` from current settings + registry.
     ///
-    /// Reads `kask.fusion` from settings. When enabled, resolves the panel
-    /// and judge models from the registry and constructs a
-    /// `FusionLanguageModel`. When disabled or construction fails, `model`
-    /// is `None` and the provider returns no models.
-    pub fn new(cx: &mut App) -> Self {
-        let state = cx.new(FusionProviderState::new);
-
+    /// Returns `None` when fusion is disabled or construction fails (missing
+    /// panel models, unresolvable judge, etc.). Reads `kask.fusion` from the
+    /// settings store and resolves panel/judge models from the
+    /// `LanguageModelRegistry`.
+    fn build_model(cx: &App) -> Option<Arc<FusionLanguageModel>> {
         let kask_settings = kask_bridge_settings(cx);
-        let model = kask_settings
+        kask_settings
             .fusion
             .to_fusion_config()
             .and_then(|fc| {
@@ -581,9 +566,41 @@ impl FusionLanguageModelProvider {
                 let resolved = resolve_fusion_models(registry, &names, cx);
                 FusionLanguageModel::new(fc, resolved, cx.to_async())
             })
-            .map(Arc::new);
+            .map(Arc::new)
+    }
 
-        Self { state, model }
+    /// The current fusion model, if any.
+    pub fn model(&self) -> Option<Arc<FusionLanguageModel>> {
+        self.model.clone()
+    }
+}
+
+/// A `LanguageModelProvider` that exposes the fusion model in zed's model picker.
+///
+/// When `kask.fusion.enabled == true`, this provider returns a single
+/// `FusionLanguageModel` in `provided_models`. When fusion is disabled, it
+/// returns an empty list (so it doesn't appear in the picker).
+///
+/// The fusion model is rebuilt dynamically when `kask.fusion` settings change:
+/// `FusionProviderState` observes the global `SettingsStore` and reconstructs
+/// the `FusionLanguageModel` (re-resolving panel/judge models from the
+/// registry) before notifying the registry. This means changing the fusion
+/// mode, judge model, or panel models in settings takes effect without
+/// restarting Zed.
+pub struct FusionLanguageModelProvider {
+    state: Entity<FusionProviderState>,
+}
+
+impl FusionLanguageModelProvider {
+    /// Construct the provider.
+    ///
+    /// Reads `kask.fusion` from settings. When enabled, resolves the panel
+    /// and judge models from the registry and constructs a
+    /// `FusionLanguageModel`. When disabled or construction fails, the
+    /// provider returns no models.
+    pub fn new(cx: &mut App) -> Self {
+        let state = cx.new(FusionProviderState::new);
+        Self { state }
     }
 }
 
@@ -608,25 +625,29 @@ impl LanguageModelProvider for FusionLanguageModelProvider {
         IconOrSvg::Icon(IconName::Sparkle)
     }
 
-    fn default_model(&self, _cx: &App) -> Option<Arc<dyn LanguageModel>> {
-        self.model.clone().map(|m| m as Arc<dyn LanguageModel>)
+    fn default_model(&self, cx: &App) -> Option<Arc<dyn LanguageModel>> {
+        self.state
+            .read(cx)
+            .model()
+            .map(|m| m as Arc<dyn LanguageModel>)
     }
 
     fn default_fast_model(&self, cx: &App) -> Option<Arc<dyn LanguageModel>> {
         self.default_model(cx)
     }
 
-    fn provided_models(&self, _cx: &App) -> Vec<Arc<dyn LanguageModel>> {
-        self.model
-            .clone()
+    fn provided_models(&self, cx: &App) -> Vec<Arc<dyn LanguageModel>> {
+        self.state
+            .read(cx)
+            .model()
             .map(|m| vec![m as Arc<dyn LanguageModel>])
             .unwrap_or_default()
     }
 
-    fn is_authenticated(&self, _cx: &App) -> bool {
+    fn is_authenticated(&self, cx: &App) -> bool {
         // Fusion is "authenticated" when it has a model — i.e., when fusion
         // is enabled and construction succeeded.
-        self.model.is_some()
+        self.state.read(cx).model().is_some()
     }
 
     fn authenticate(
