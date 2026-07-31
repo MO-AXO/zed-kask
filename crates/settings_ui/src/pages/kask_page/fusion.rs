@@ -436,9 +436,7 @@ pub(crate) fn render_fusion_page(
                     Label::new(
                         "When the panel models field is empty or set to \"auto\", the panel \
                          is populated from Artificial Analysis models passing both thresholds. \
-                         These gates also feed the default-model onboarding thresholds. \
-                         Set AA_API_KEY to use the Pro tier (exposes the OpenRouter model \
-                         ID mapping); the free tier works without a key.",
+                         Set AA_API_KEY (free tier — get a key at artificialanalysis.ai/data-api).",
                     )
                     .size(LabelSize::Small)
                     .color(Color::Muted),
