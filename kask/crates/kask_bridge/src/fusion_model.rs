@@ -509,8 +509,12 @@ fn resolve_model(
     }
 
     // No prefix or prefix match failed — search all providers by telemetry_id.
+    // Skip the fusion provider itself to avoid a re-entrant entity borrow when
+    // this function is called from within FusionProviderState's settings-observe
+    // callback (which holds a mutable borrow on the fusion entity).
     registry
         .available_models(cx)
+        .filter(|m| m.provider_id().0.as_ref() != FUSION_PROVIDER_ID)
         .find(|m| m.telemetry_id() == prefixed_name)
 }
 
@@ -534,15 +538,31 @@ impl FusionProviderState {
         let model = Self::build_model(cx);
         let state = Self {
             model,
-            _settings_subscription: cx.observe_global::<settings::SettingsStore>(|this, cx| {
-                this.model = Self::build_model(cx);
-                cx.notify();
-            }),
+            _settings_subscription: cx.observe_global::<settings::SettingsStore>(
+                move |_this, cx| {
+                    // Defer the rebuild to avoid a re-entrant entity borrow:
+                    // `build_model` resolves models from the registry, which calls
+                    // `available_models()`, which calls `is_authenticated()` on
+                    // every provider — including this one. If we held a mutable
+                    // borrow on `self` here (via `this.model = ...`), the
+                    // immutable `self.state.read(cx)` inside `is_authenticated`
+                    // would panic. By deferring to a spawned task, the rebuild
+                    // runs outside the observe callback's borrow scope.
+                    cx.spawn(async move |weak_entity, cx| {
+                        let new_model = cx.update(|cx| Self::build_model(cx));
+                        if let Some(entity) = weak_entity.upgrade() {
+                            cx.update(|cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.model = new_model;
+                                    cx.notify();
+                                });
+                            });
+                        }
+                    })
+                    .detach();
+                },
+            ),
         };
-        // The observe_global callback fires on the *next* settings change,
-        // but settings may have already been loaded before the provider was
-        // registered. The initial `build_model` call above handles that. The
-        // subscription ensures subsequent changes rebuild the model.
         state
     }
 
