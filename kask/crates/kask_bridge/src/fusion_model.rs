@@ -549,15 +549,21 @@ impl FusionProviderState {
                     // would panic. By deferring to a spawned task, the rebuild
                     // runs outside the observe callback's borrow scope.
                     cx.spawn(async move |weak_entity, cx| {
+                        // Bail before calling cx.update() if the entity is
+                        // already gone — the app is shutting down and
+                        // AsyncApp::app() panics with "app was released"
+                        // if called after the app drops.
+                        let entity = match weak_entity.upgrade() {
+                            Some(entity) => entity,
+                            None => return,
+                        };
                         let new_model = cx.update(|cx| Self::build_model(cx));
-                        if let Some(entity) = weak_entity.upgrade() {
-                            cx.update(|cx| {
-                                entity.update(cx, |this, cx| {
-                                    this.model = new_model;
-                                    cx.notify();
-                                });
+                        cx.update(|cx| {
+                            entity.update(cx, |this, cx| {
+                                this.model = new_model;
+                                cx.notify();
                             });
-                        }
+                        });
                     })
                     .detach();
                 },
