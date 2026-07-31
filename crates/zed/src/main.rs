@@ -1439,11 +1439,11 @@ fn main() {
                             log::info!(
                                 "hKask fusion: auto-discovering panel models from Artificial \
                                  Analysis (max_price=${}/M, min_ia={})",
-                                kask_settings.fusion.openrouter_max_price,
-                                kask_settings.fusion.openrouter_min_intelligence
+                                kask_settings.fusion.discovery_max_price,
+                                kask_settings.fusion.discovery_min_intelligence
                             );
-                            let max_price = kask_settings.fusion.openrouter_max_price;
-                            let min_ia = kask_settings.fusion.openrouter_min_intelligence;
+                            let max_price = kask_settings.fusion.discovery_max_price;
+                            let min_ia = kask_settings.fusion.discovery_min_intelligence;
                             // Spawn discovery on the tokio runtime, not GPUI's
                             // background thread pool. `discover_favorites`
                             // drives a `reqwest::Client` which requires a tokio
