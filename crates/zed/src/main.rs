@@ -725,6 +725,9 @@ fn main() {
         let (alert_sink_tx, alert_sink_rx) =
             tokio::sync::mpsc::unbounded_channel::<hkask_regulation::AlertEvent>();
         spawn_alert_toast_drainer(alert_sink_rx, cx);
+        // Clone the sender before it's moved into ToastAlertSink so the
+        // fusion provider can surface construction failures as toasts too.
+        let fusion_alert_tx = alert_sink_tx.clone();
         let alert_sink = std::sync::Arc::new(ToastAlertSink::new(alert_sink_tx));
         let metacognition_loop = std::sync::Arc::new(
             hkask_regulation::MetacognitionLoop::new(regulation_ledger)
@@ -1551,7 +1554,7 @@ fn main() {
                 // deferred-task time.
                 cx.update(|cx| {
                     let fusion_provider =
-                        kask_bridge::FusionLanguageModelProvider::new(cx);
+                        kask_bridge::FusionLanguageModelProvider::new(cx, Some(fusion_alert_tx));
                     language_model::LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
                         registry.register_provider(Arc::new(fusion_provider), cx);
                     });

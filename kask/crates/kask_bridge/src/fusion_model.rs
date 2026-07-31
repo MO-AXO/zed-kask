@@ -639,7 +639,7 @@ impl FusionProviderState {
             critical,
         };
         if let Err(e) = tx.send(event) {
-            log::warn!("Fusion alert dropped (channel closed): {e} — {message}");
+            tracing::warn!(target: "reg.fusion", "Fusion alert dropped (channel closed): {e} — {message}");
         }
     }
 
