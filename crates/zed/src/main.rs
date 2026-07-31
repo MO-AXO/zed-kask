@@ -1444,15 +1444,33 @@ fn main() {
                             let or_api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
                             let max_price = kask_settings.fusion.openrouter_max_price;
                             let min_ia = kask_settings.fusion.openrouter_min_intelligence;
-                            let discovery_task = {
-                                let _tokio_guard = gpui_tokio::Tokio::handle_async(&*cx).enter();
-                                cx.background_spawn(async move {
+                            // Spawn discovery on the tokio runtime, not GPUI's
+                            // background thread pool. `discover_favorites`
+                            // drives a `reqwest::Client` which requires a tokio
+                            // reactor; `cx.background_spawn` schedules on GPUI's
+                            // own executor (no reactor) and panics with
+                            // "there is no reactor running". The `enter()` guard
+                            // around `background_spawn` does NOT help — the
+                            // guard is dropped before the future is polled on
+                            // the GPUI worker thread.
+                            let discovery_task = gpui_tokio::Tokio::spawn(
+                                &*cx,
+                                async move {
                                     kask_bridge::discover_favorites(&or_api_key, max_price, min_ia).await
-                                })
-                            };
+                                },
+                            );
                             let timeout = cx.background_executor().timer(std::time::Duration::from_secs(5));
                             let result = futures::select_biased! {
-                                favs = discovery_task.fuse() => favs,
+                                favs = discovery_task.fuse() => match favs {
+                                    Ok(favs) => favs,
+                                    Err(join_err) => {
+                                        log::warn!(
+                                            "hKask fusion: OpenRouter discovery task failed: {join_err} — \
+                                             falling back to kask_default panel"
+                                        );
+                                        Vec::new()
+                                    }
+                                },
                                 _ = timeout.fuse() => {
                                     log::warn!(
                                         "hKask fusion: OpenRouter discovery timed out after 5s — \
