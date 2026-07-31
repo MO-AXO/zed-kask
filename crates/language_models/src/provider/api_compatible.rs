@@ -24,7 +24,10 @@ pub trait ApiCompatibleProviderSettings: Clone + Default + PartialEq + 'static {
 pub fn api_key_env_var_name_for(id: &str) -> String {
     format!(
         "{}_API_KEY",
-        id.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>().to_uppercase()
+        id.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_uppercase()
     )
 }
 
@@ -325,7 +328,10 @@ mod tests {
         assert_eq!(api_key_env_var_name_for("DeepInfra"), "DEEPINFRA_API_KEY");
         assert_eq!(api_key_env_var_name_for("OpenRouter"), "OPENROUTER_API_KEY");
         assert_eq!(api_key_env_var_name_for("fal.ai"), "FALAI_API_KEY");
-        assert_eq!(api_key_env_var_name_for("Together AI"), "TOGETHERAI_API_KEY");
+        assert_eq!(
+            api_key_env_var_name_for("Together AI"),
+            "TOGETHERAI_API_KEY"
+        );
         assert_eq!(api_key_env_var_name_for("KiloCode"), "KILOCODE_API_KEY");
         assert_eq!(api_key_env_var_name_for("Cline"), "CLINE_API_KEY");
         // Lowercase IDs (used by some kask docs) must also resolve correctly.
