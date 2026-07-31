@@ -224,8 +224,9 @@ impl LanguageModels {
     }
 
     fn refresh_list(&mut self, cx: &App) {
-        let providers = LanguageModelRegistry::global(cx)
-            .read(cx)
+        let registry = LanguageModelRegistry::global(cx);
+        let registry = registry.read(cx);
+        let providers = registry
             .visible_providers()
             .into_iter()
             .filter(|provider| provider.is_authenticated(cx))
@@ -237,6 +238,9 @@ impl LanguageModels {
         let mut recommended = Vec::new();
         for provider in &providers {
             for model in provider.recommended_models(cx) {
+                if !registry.passes_model_filter(model.as_ref()) {
+                    continue;
+                }
                 recommended_models.insert((model.provider_id(), model.id()));
                 recommended.push(Self::map_language_model_to_info(&model, provider));
             }
@@ -252,6 +256,9 @@ impl LanguageModels {
         for provider in providers {
             let mut provider_models = Vec::new();
             for model in provider.provided_models(cx) {
+                if !registry.passes_model_filter(model.as_ref()) {
+                    continue;
+                }
                 let model_info = Self::map_language_model_to_info(&model, &provider);
                 let model_id = model_info.id.clone();
                 provider_models.push(model_info);

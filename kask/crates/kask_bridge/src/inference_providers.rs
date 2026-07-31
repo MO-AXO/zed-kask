@@ -300,6 +300,58 @@ pub fn delete_provider_api_key(
     })
 }
 
+/// Resolve `(api_url, api_key)` for an embedding model string directly from
+/// the `INFERENCE_PROVIDERS` table + env var.
+///
+/// This is the direct path: parse the provider prefix from the model string
+/// (e.g. `DeepInfra/Qwen/...` → `DeepInfra`), look up the descriptor in
+/// `INFERENCE_PROVIDERS`, and read the API key from the env var named in the
+/// descriptor (`DEEPINFRA_API_KEY`, etc.). No `LanguageModelRegistry` lookup,
+/// no GPUI access, no case-sensitivity traps.
+///
+/// Returns `None` (after logging a warn) if:
+/// - The model string has no recognized provider prefix.
+/// - The provider is not in `INFERENCE_PROVIDERS`.
+/// - The env var is not set (key not loaded).
+pub fn resolve_embedding_credentials(embedding_model: &str) -> Option<(String, String)> {
+    let provider = embedding_provider_descriptor(embedding_model).or_else(|| {
+        tracing::warn!(
+            "Embedding model '{}' has no recognized provider prefix \
+             (expected e.g. 'DeepInfra/...'). \
+             Set kask.corpus.embedding_model to a provider-prefixed name, \
+             or set HKASK_EMBEDDING_MODEL.",
+            embedding_model
+        );
+        None
+    })?;
+
+    let api_key = std::env::var(provider.env_var).ok().or_else(|| {
+        tracing::warn!(
+            "Embedding provider '{}' — env var {} is not set. \
+             Embedding-based recall will not work until the key is loaded.",
+            provider.id,
+            provider.env_var
+        );
+        None
+    })?;
+
+    Some((provider.api_url.to_string(), api_key))
+}
+
+/// Find the `InferenceProviderDescriptor` for an embedding model string by
+/// matching its provider prefix (case-insensitive) against `INFERENCE_PROVIDERS`.
+fn embedding_provider_descriptor(embedding_model: &str) -> Option<&'static InferenceProviderDescriptor> {
+    for provider in INFERENCE_PROVIDERS {
+        let prefix = format!("{}/", provider.id);
+        if embedding_model.len() >= prefix.len()
+            && embedding_model[..prefix.len()].eq_ignore_ascii_case(&prefix)
+        {
+            return Some(provider);
+        }
+    }
+    None
+}
+
 /// Check whether an inference provider's API key is available.
 ///
 /// Checks the env var synchronously (instant). The keychain read is async
