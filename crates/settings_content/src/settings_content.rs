@@ -1713,9 +1713,13 @@ pub struct KaskFusionSettingsContent {
     pub skills: Option<String>,
     /// Max rounds for `deliberation` mode.
     pub max_rounds: Option<u32>,
-    /// OpenRouter auto-discovery max prompt price per million tokens (USD).
+    /// Auto-discovery max prompt price per million tokens (USD).
+    /// Discovery queries Artificial Analysis; the field name is retained for
+    /// settings compatibility.
     pub openrouter_max_price: Option<f64>,
-    /// OpenRouter auto-discovery minimum intelligence index.
+    /// Auto-discovery minimum intelligence index.
+    /// Discovery queries Artificial Analysis; the field name is retained for
+    /// settings compatibility.
     pub openrouter_min_intelligence: Option<f64>,
     /// Coherence threshold (0.0–1.0) for measured convergence in deliberation mode.
     pub coherence_threshold: Option<f64>,

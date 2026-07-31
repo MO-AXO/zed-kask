@@ -1437,8 +1437,8 @@ fn main() {
                     if let Some(mut fc) = fusion_config {
                         if kask_bridge::should_auto_discover(&kask_settings.fusion.panel_models) {
                             log::info!(
-                                "hKask fusion: auto-discovering panel models from OpenRouter \
-                                 (max_price=${}/M, min_ia={})",
+                                "hKask fusion: auto-discovering panel models from Artificial \
+                                 Analysis (max_price=${}/M, min_ia={})",
                                 kask_settings.fusion.openrouter_max_price,
                                 kask_settings.fusion.openrouter_min_intelligence
                             );

@@ -485,12 +485,16 @@ pub struct KaskFusionSettings {
     /// Max rounds for `deliberation` mode. Default 5.
     pub max_rounds: u32,
 
-    /// OpenRouter auto-discovery max prompt price per million tokens (USD).
-    /// Default 1.0. Used by Slice 4 to filter candidate panel models.
+    /// Auto-discovery max prompt price per million tokens (USD).
+    /// Default 1.0. Used by fusion auto-discovery to filter candidate panel
+    /// models. Discovery now queries Artificial Analysis (not OpenRouter); the
+    /// field name is retained for settings compatibility.
     pub openrouter_max_price: f64,
 
-    /// OpenRouter auto-discovery minimum intelligence index.
-    /// Default 40.0. Used by Slice 4 to filter candidate panel models.
+    /// Auto-discovery minimum intelligence index.
+    /// Default 40.0. Used by fusion auto-discovery to filter candidate panel
+    /// models. Discovery now queries Artificial Analysis (not OpenRouter); the
+    /// field name is retained for settings compatibility.
     pub openrouter_min_intelligence: f64,
 
     /// Coherence threshold (0.0–1.0) for measured convergence in deliberation

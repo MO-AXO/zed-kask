@@ -175,7 +175,7 @@ pub(crate) fn render_fusion_page(
         .tab_index(0)
         .with_initial_text(openrouter_max_price)
         .with_placeholder("1.0")
-        .aria_label("OpenRouter Max Price")
+        .aria_label("Max Price")
         .confirm_on_focus_out()
         .on_confirm(move |value, _window, cx| {
             if let Some(text) = value
@@ -200,7 +200,7 @@ pub(crate) fn render_fusion_page(
             .tab_index(0)
             .with_initial_text(openrouter_min_intelligence)
             .with_placeholder("40.0")
-            .aria_label("OpenRouter Min Intelligence")
+            .aria_label("Min Intelligence")
             .confirm_on_focus_out()
             .on_confirm(move |value, _window, cx| {
                 if let Some(text) = value
@@ -431,12 +431,14 @@ pub(crate) fn render_fusion_page(
         .child(
             v_flex()
                 .gap_1()
-                .child(Label::new("OpenRouter Auto-Discovery Thresholds"))
+                .child(Label::new("Auto-Discovery Thresholds"))
                 .child(
                     Label::new(
                         "When the panel models field is empty or set to \"auto\", the panel \
-                         is populated from OpenRouter models passing both thresholds. \
-                         These gates also feed the default-model onboarding thresholds.",
+                         is populated from Artificial Analysis models passing both thresholds. \
+                         These gates also feed the default-model onboarding thresholds. \
+                         Set ARTIFICIAL_ANALYSIS_API_KEY to use the Pro tier (exposes \
+                         the OpenRouter model ID mapping); the free tier works without a key.",
                     )
                     .size(LabelSize::Small)
                     .color(Color::Muted),
