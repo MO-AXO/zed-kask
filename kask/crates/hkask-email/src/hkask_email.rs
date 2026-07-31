@@ -243,6 +243,46 @@ mod tests {
     }
 
     #[test]
+    fn try_from_env_returns_none_when_no_env_var() {
+        // Env vars are not set in the test environment (and the
+        // send_email_returns_not_configured test above removes them), so
+        // try_from_env should return None.
+        unsafe {
+            std::env::remove_var("HKASK_ALERT_EMAIL");
+            std::env::remove_var("HKASK_SMTP_USERNAME");
+        }
+        let handle = tokio::runtime::Handle::current();
+        assert!(CuratorAlertEmailSink::try_from_env(handle).is_none());
+    }
+
+    #[test]
+    fn try_from_env_uses_alert_email_when_set() {
+        unsafe {
+            std::env::set_var("HKASK_ALERT_EMAIL", "ops@example.com");
+        }
+        let handle = tokio::runtime::Handle::current();
+        let sink = CuratorAlertEmailSink::try_from_env(handle);
+        assert!(sink.is_some());
+        unsafe {
+            std::env::remove_var("HKASK_ALERT_EMAIL");
+        }
+    }
+
+    #[test]
+    fn try_from_env_falls_back_to_smtp_username() {
+        unsafe {
+            std::env::remove_var("HKASK_ALERT_EMAIL");
+            std::env::set_var("HKASK_SMTP_USERNAME", "curator@example.com");
+        }
+        let handle = tokio::runtime::Handle::current();
+        let sink = CuratorAlertEmailSink::try_from_env(handle);
+        assert!(sink.is_some());
+        unsafe {
+            std::env::remove_var("HKASK_SMTP_USERNAME");
+        }
+    }
+
+    #[test]
     fn try_from_settings_returns_none_when_both_empty() {
         let handle = tokio::runtime::Handle::current();
         assert!(CuratorAlertEmailSink::try_from_settings("", "", handle).is_none());
