@@ -312,6 +312,27 @@ not capture `AsyncApp`. This applies to any `Send + Sync` trait (e.g.
 this the hard way — the first `ToastAlertSink` impl captured `AsyncApp` and
 failed to compile as `Send + Sync`.
 
+## `background_spawn` of tokio-dependent futures panics at poll time
+
+`cx.background_spawn(async move { ... })` schedules on GPUI's own
+thread-pool executor, which has no tokio reactor. Any future that drives
+`reqwest`, `tokio::time`, `tokio::process`, or `tokio::io` panics with
+"there is no reactor running, must be called from the context of a Tokio
+1.x runtime" when polled on the worker thread. The `let _guard =
+Tokio::handle_async(&*cx).enter();` pattern around `background_spawn` does
+NOT help — `enter()` sets a thread-local for the current scope, but the
+future is polled later on a different thread where the guard is gone. Use
+`gpui_tokio::Tokio::spawn(&*cx, async move { ... })` instead (returns
+`Task<Result<R, JoinError>>`; handle the `Err(JoinError)` arm). The
+`main.rs` comment block at the cybernetics-loop spawn documents this, but
+agents editing other files (MCP launchers, panel helpers, deferred-task
+additions) miss it. Before merging any kask change that adds a
+`background_spawn`, grep the future body for `reqwest`, `tokio::`, or any
+`await` on a tokio-backed client — if found, route through `Tokio::spawn`.
+Found in the fusion auto-discovery site: the `enter()` guard looked
+correct, the app panicked on every startup when fusion auto-discovery
+was enabled (the default).
+
 ## Kask MCP servers have two parallel launch paths by design
 
 Kask MCP servers (`hkask-mcp-{id}` binaries) are launched by two independent
