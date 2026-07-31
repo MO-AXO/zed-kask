@@ -527,47 +527,119 @@ use ui::IconName;
 
 /// Observable state for the fusion provider.
 ///
-/// Notifies when settings change so the registry can re-enumerate models.
+/// Notifies when settings or registry state change so the registry can
+/// re-enumerate models. When `build_model` fails (panel models unresolved,
+/// judge missing, etc.), an alert is forwarded to the UI via the optional
+/// `alert_tx` channel so the user sees an honest status rather than a
+/// silently missing model.
 pub struct FusionProviderState {
     model: Option<Arc<FusionLanguageModel>>,
+    /// Tracks whether the previous `build_model` failed, so we only alert
+    /// on state transitions (failure → success, success → failure), not on
+    /// every settings change that still succeeds.
+    was_broken: bool,
+    alert_tx: Option<tokio::sync::mpsc::UnboundedSender<hkask_regulation::AlertEvent>>,
     _settings_subscription: gpui::Subscription,
+    _registry_subscription: gpui::Subscription,
 }
 
 impl FusionProviderState {
-    fn new(cx: &mut gpui::Context<Self>) -> Self {
+    fn new(
+        cx: &mut gpui::Context<Self>,
+        alert_tx: Option<tokio::sync::mpsc::UnboundedSender<hkask_regulation::AlertEvent>>,
+    ) -> Self {
         let model = Self::build_model(cx);
+        let was_broken = model.is_none();
+
+        // Subscribe to LanguageModelRegistry events so the fusion model
+        // rebuilds when a panel/judge provider's auth state changes (token
+        // expires, provider unregistered, model list fetched after startup).
+        // Same deferred-rebuild pattern as the settings observer — avoids
+        // re-entrant entity borrows.
+        let registry = language_model::LanguageModelRegistry::global(cx);
+        let _registry_subscription =
+            cx.subscribe(&registry, |this, _registry, event, cx| match event {
+                language_model::Event::ProviderStateChanged(_)
+                | language_model::Event::AddedProvider(_)
+                | language_model::Event::RemovedProvider(_)
+                | language_model::Event::ProvidersChanged => {
+                    this.schedule_rebuild(cx);
+                }
+                _ => {}
+            });
+
         Self {
             model,
-            _settings_subscription: cx.observe_global::<settings::SettingsStore>(
-                move |_this, cx| {
-                    // Defer the rebuild to avoid a re-entrant entity borrow:
-                    // `build_model` resolves models from the registry, which calls
-                    // `available_models()`, which calls `is_authenticated()` on
-                    // every provider — including this one. If we held a mutable
-                    // borrow on `self` here (via `this.model = ...`), the
-                    // immutable `self.state.read(cx)` inside `is_authenticated`
-                    // would panic. By deferring to a spawned task, the rebuild
-                    // runs outside the observe callback's borrow scope.
-                    cx.spawn(async move |weak_entity, cx| {
-                        // Bail before calling cx.update() if the entity is
-                        // already gone — the app is shutting down and
-                        // AsyncApp::app() panics with "app was released"
-                        // if called after the app drops.
-                        let entity = match weak_entity.upgrade() {
-                            Some(entity) => entity,
-                            None => return,
-                        };
-                        let new_model = cx.update(|cx| Self::build_model(cx));
-                        cx.update(|cx| {
-                            entity.update(cx, |this, cx| {
-                                this.model = new_model;
-                                cx.notify();
-                            });
-                        });
-                    })
-                    .detach();
-                },
-            ),
+            was_broken,
+            alert_tx,
+            _settings_subscription: cx
+                .observe_global::<settings::SettingsStore>(|this, cx| this.schedule_rebuild(cx)),
+            _registry_subscription,
+        }
+    }
+
+    /// Schedule a deferred rebuild of the fusion model.
+    ///
+    /// Defers to a spawned task to avoid re-entrant entity borrows:
+    /// `build_model` resolves models from the registry, which calls
+    /// `available_models()`, which calls `is_authenticated()` on every
+    /// provider — including this one. If we held a mutable borrow on `self`
+    /// here, the immutable `self.state.read(cx)` inside `is_authenticated`
+    /// would panic.
+    fn schedule_rebuild(&mut self, cx: &mut gpui::Context<Self>) {
+        cx.spawn(async move |weak_entity, cx| {
+            // Bail before calling cx.update() if the entity is already gone
+            // — the app is shutting down and AsyncApp::app() panics with
+            // "app was released" if called after the app drops.
+            let entity = match weak_entity.upgrade() {
+                Some(entity) => entity,
+                None => return,
+            };
+            let new_model = cx.update(|cx| Self::build_model(cx));
+            cx.update(|cx| {
+                entity.update(cx, |this, cx| {
+                    this.apply_rebuild(new_model, cx);
+                });
+            });
+        })
+        .detach();
+    }
+
+    /// Apply a rebuild result, alerting the UI on state transitions.
+    fn apply_rebuild(
+        &mut self,
+        new_model: Option<Arc<FusionLanguageModel>>,
+        cx: &mut gpui::Context<Self>,
+    ) {
+        let is_broken = new_model.is_none();
+        self.model = new_model;
+
+        // Only alert on state transitions — not every successful rebuild.
+        if is_broken && !self.was_broken {
+            self.send_alert(
+                "Fusion model unavailable: panel or judge models could not be resolved. \
+                 Check Settings → AI → LLM Providers.",
+                true,
+            );
+        } else if !is_broken && self.was_broken {
+            self.send_alert("Fusion model restored.", false);
+        }
+        self.was_broken = is_broken;
+        cx.notify();
+    }
+
+    /// Best-effort alert delivery. The channel may be absent (no UI wired)
+    /// or closed (app shutting down) — either way, the alert is logged.
+    fn send_alert(&self, message: &str, critical: bool) {
+        let Some(tx) = &self.alert_tx else {
+            return;
+        };
+        let event = hkask_regulation::AlertEvent {
+            message: message.to_string(),
+            critical,
+        };
+        if let Err(e) = tx.send(event) {
+            log::warn!("Fusion alert dropped (channel closed): {e} — {message}");
         }
     }
 
@@ -606,12 +678,15 @@ impl FusionProviderState {
 /// `FusionLanguageModel` in `provided_models`. When fusion is disabled, it
 /// returns an empty list (so it doesn't appear in the picker).
 ///
-/// The fusion model is rebuilt dynamically when `kask.fusion` settings change:
-/// `FusionProviderState` observes the global `SettingsStore` and reconstructs
-/// the `FusionLanguageModel` (re-resolving panel/judge models from the
-/// registry) before notifying the registry. This means changing the fusion
-/// mode, judge model, or panel models in settings takes effect without
-/// restarting Zed.
+/// The fusion model is rebuilt dynamically when `kask.fusion` settings change
+/// OR when a panel/judge provider's auth state changes in the
+/// `LanguageModelRegistry`. `FusionProviderState` observes both the global
+/// `SettingsStore` and the `LanguageModelRegistry`, reconstructing the
+/// `FusionLanguageModel` (re-resolving panel/judge models) before notifying
+/// the registry. This means changing the fusion mode, judge model, or panel
+/// models in settings — or a panel provider losing/gaining authentication —
+/// takes effect for new conversations and the model picker without restarting
+/// Zed. In-flight threads continue using the model they were started with.
 pub struct FusionLanguageModelProvider {
     state: Entity<FusionProviderState>,
 }
@@ -623,8 +698,14 @@ impl FusionLanguageModelProvider {
     /// and judge models from the registry and constructs a
     /// `FusionLanguageModel`. When disabled or construction fails, the
     /// provider returns no models.
-    pub fn new(cx: &mut App) -> Self {
-        let state = cx.new(FusionProviderState::new);
+    ///
+    /// The `alert_tx` channel is used to surface construction failures to
+    /// the UI (toast). Pass `None` when no UI alert sink is available.
+    pub fn new(
+        cx: &mut App,
+        alert_tx: Option<tokio::sync::mpsc::UnboundedSender<hkask_regulation::AlertEvent>>,
+    ) -> Self {
+        let state = cx.new(|cx| FusionProviderState::new(cx, alert_tx));
         Self { state }
     }
 }
