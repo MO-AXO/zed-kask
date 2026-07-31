@@ -464,11 +464,18 @@ pub struct KaskFusionSettings {
     pub panel_models: String,
 
     /// Judge deliberation mode: `"synthesis"` | `"best-of-n"` | `"critique"` |
-    /// `"deliberation"` | `"pi"` | `"algo"`. When empty, defaults to `"synthesis"`.
+    /// `"deliberation"` | `"pi"`. When empty, defaults to `"synthesis"`.
+    ///
+    /// Note: `"algo"` is intentionally NOT a valid `mode` value — the
+    /// `FusionMode` enum has no `Algo` variant, so `mode = "algo"` silently
+    /// coerces to `Synthesis`. The algo judge is activated by setting
+    /// `judge_model = "algo"` (the Judge Model field), which short-circuits
+    /// `mode` entirely. See the fusion orchestrator's `judge == "algo"` branch.
     pub mode: String,
 
-    /// Algo merge strategy when `mode == "algo"`: `"merge"` | `"vote"`.
-    /// When empty, defaults to `"merge"`.
+    /// Algo merge strategy when `judge_model == "algo"`: `"merge"` | `"vote"`.
+    /// When empty, defaults to `"merge"`. Ignored when the judge is a real
+    /// model name (not `"algo"`).
     pub algo_method: String,
 
     /// Comma-separated skill anchors (e.g. `"pragmatic-semantics,coding-guidelines"`).
