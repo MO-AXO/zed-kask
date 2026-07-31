@@ -1101,20 +1101,10 @@ fn main() {
                     Ok(provisioned) => {
                         let kask_bridge::ProvisionedAgent { db_path, passphrase, webid: user_webid } = provisioned;
 
-                        // Construct the embedding port. Credentials are resolved
-                        // directly from the bridge's `INFERENCE_PROVIDERS` table
-                        // + env var — no `LanguageModelRegistry` lookup, no GPUI
-                        // access. This is the direct path: the bridge knows the
-                        // provider's `api_url` and `env_var` statically, so there's
-                        // no need to round-trip through zed's provider registry
-                        // (which had a case-sensitivity bug: the registry stores
-                        // `"DeepInfra"` but the old lookup searched for `"deepinfra"`).
-                        //
-                        // Per the .rules trap "Process-global hooks set at
-                        // runtime need a startup-failure signal": if the
-                        // provider isn't recognized or the key isn't loaded, we
-                        // warn loudly and skip the real memory port (logging
-                        // mode stays active) rather than silently degrading.
+                        // Resolve embedding credentials directly from the bridge's
+                        // `INFERENCE_PROVIDERS` table + env var. Per the .rules trap
+                        // on startup-failure signals: failure warns loudly and
+                        // skips the real memory port (logging mode stays active).
                         let embedding_port_result = cx.update(|cx| {
                             let http_client = app_state_for_deferred.client.http_client();
                             let tokio_handle = gpui_tokio::Tokio::handle(cx);
@@ -1130,9 +1120,6 @@ fn main() {
                         });
 
                         let Some(embedding_port) = embedding_port_result else {
-                            // `resolve_embedding_credentials` already logged a
-                            // warn with remediation guidance. Skip the real
-                            // memory port — logging mode stays active.
                             return;
                         };
 

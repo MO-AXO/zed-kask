@@ -1130,14 +1130,6 @@ async fn mode_deliberation(
         ));
     }
 
-    // Codette-inspired: epistemic tension ξ and coherence Γ would be computed
-    // from panel response embeddings here, but the embedding source was never
-    // wired (the old `EmbeddingRouter` was dead code, deleted). The
-    // `coherence_threshold` field remains in `FusionConfig` for future wiring,
-    // but `measured_coherence` stays `None` — the judge verdict wins alone.
-    let measured_coherence: Option<f64> = None;
-    let _ = fusion.coherence_threshold;
-
     let mut intermediate: Vec<InferenceUsage> =
         prior_responses.iter().map(|r| r.usage.clone()).collect();
     let mut prior_text = format_panel_responses(&prior_responses);
@@ -1176,25 +1168,8 @@ async fn mode_deliberation(
                 round = round,
                 convergence_rounds = round,
                 verdict = ConvergenceVerdict::Converged.as_str(),
-                measured_coherence =? measured_coherence,
                 "Deliberation converged (judge stabilization verdict)"
             );
-            // Codette-inspired: if measured coherence exceeds threshold,
-            // emit an advisory measured-convergence signal. The judge
-            // verdict already won — this is an additional observability span.
-            if let (Some(gamma), Some(threshold)) = (measured_coherence, fusion.coherence_threshold)
-                && gamma > threshold
-            {
-                info!(
-                    target: "reg.fusion",
-                    fusion_mode = "deliberation",
-                    round = round,
-                    measured_convergence = true,
-                    coherence = gamma,
-                    threshold,
-                    "Measured coherence exceeded threshold (advisory)"
-                );
-            }
             let result = InferenceResult {
                 text: payload.unwrap_or_default(),
                 ..judge_result
@@ -1215,9 +1190,6 @@ async fn mode_deliberation(
         prior_responses = dispatch_panel(router, &follow_up, params, tools, effective).await;
         record_latency(dispatch_start.elapsed().as_millis() as u64);
         intermediate.extend(prior_responses.iter().map(|r| r.usage.clone()));
-
-        // ξ/Γ recompute is a no-op — embedding source not wired (see above).
-        let _ = fusion.coherence_threshold;
 
         prior_text = format_panel_responses(&prior_responses);
     }

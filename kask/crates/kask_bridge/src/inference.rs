@@ -370,7 +370,7 @@ impl InferencePort for LanguageModelInferencePort {
 // Embedding generation over OpenAI-compatible provider credentials.
 //
 // The port takes `(api_url, api_key)` resolved upfront from the bridge's
-// `INFERENCE_PROVIDERS` table (env var or keychain) and makes raw
+// `INFERENCE_PROVIDERS` table (env var) and makes raw
 // `/embeddings` POSTs through the app's `HttpClient`. No GPUI access is
 // needed at request time — credentials are resolved once at construction.
 //
@@ -385,7 +385,7 @@ use tokio::sync::mpsc;
 
 use futures::AsyncReadExt;
 
-/// Request sent from the tokio side to the GPUI-side embedding executor.
+/// Request sent to the tokio-side embedding executor.
 struct EmbedRequest {
     /// The provider-prefixed model string (e.g. `DeepInfra/Qwen/Qwen3-Embedding-0.6B`).
     /// The prefix is stripped before the API call.
@@ -505,7 +505,7 @@ impl LanguageModelEmbeddingPort {
         Self { tx }
     }
 
-    /// Construct a port with no backing GPUI task. Any `embed` call will
+    /// Construct a port with no backing receiver task. Any `embed` call will
     /// return a `Connection` error (the channel is closed). For tests that
     /// construct a `RealMemoryPort` but never call embed.
     #[cfg(test)]

@@ -400,3 +400,54 @@ pub fn delete_data_service_api_key(
 pub fn has_data_service_api_key(env_var: &str) -> bool {
     std::env::var(env_var).is_ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Serialize env-var tests so they don't race with each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn resolve_embedding_credentials_deepinfra_with_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: test-only env mutation, serialized by ENV_LOCK.
+        unsafe { std::env::set_var("DEEPINFRA_API_KEY", "test-key"); }
+        let result = resolve_embedding_credentials("DeepInfra/Qwen/Qwen3-Embedding-0.6B");
+        unsafe { std::env::remove_var("DEEPINFRA_API_KEY"); }
+        assert!(result.is_some(), "should resolve with key present");
+        let (api_url, api_key) = result.unwrap();
+        assert_eq!(api_url, "https://api.deepinfra.com/v1/openai");
+        assert_eq!(api_key, "test-key");
+    }
+
+    #[test]
+    fn resolve_embedding_credentials_deepinfra_case_insensitive() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("DEEPINFRA_API_KEY", "test-key"); }
+        let result = resolve_embedding_credentials("deepinfra/Qwen/Qwen3-Embedding-0.6B");
+        unsafe { std::env::remove_var("DEEPINFRA_API_KEY"); }
+        assert!(result.is_some(), "lowercase prefix should match case-insensitively");
+    }
+
+    #[test]
+    fn resolve_embedding_credentials_deepinfra_no_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var("DEEPINFRA_API_KEY"); }
+        let result = resolve_embedding_credentials("DeepInfra/Qwen/Qwen3-Embedding-0.6B");
+        assert!(result.is_none(), "should return None when key is missing");
+    }
+
+    #[test]
+    fn resolve_embedding_credentials_unknown_provider() {
+        let result = resolve_embedding_credentials("UnknownProvider/some-model");
+        assert!(result.is_none(), "unknown provider should return None");
+    }
+
+    #[test]
+    fn resolve_embedding_credentials_no_prefix() {
+        let result = resolve_embedding_credentials("Qwen/Qwen3-Embedding-0.6B");
+        assert!(result.is_none(), "bare model id without prefix should return None");
+    }
+}
