@@ -536,7 +536,7 @@ pub struct FusionProviderState {
 impl FusionProviderState {
     fn new(cx: &mut gpui::Context<Self>) -> Self {
         let model = Self::build_model(cx);
-        let state = Self {
+        Self {
             model,
             _settings_subscription: cx.observe_global::<settings::SettingsStore>(
                 move |_this, cx| {
@@ -562,8 +562,7 @@ impl FusionProviderState {
                     .detach();
                 },
             ),
-        };
-        state
+        }
     }
 
     /// Rebuild the `FusionLanguageModel` from current settings + registry.

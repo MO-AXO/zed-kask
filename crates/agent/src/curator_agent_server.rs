@@ -24,9 +24,7 @@ use fs::Fs;
 use gpui::{App, Entity, SharedString, Task};
 use project::{AgentId, Project};
 
-use crate::{
-    CURATOR_AGENT_ID, NativeAgent, NativeAgentConnection, ThreadStore, templates::Templates,
-};
+use crate::{CURATOR_AGENT_ID, ThreadStore};
 
 /// The Curator's static context — appended to the system prompt.
 ///
