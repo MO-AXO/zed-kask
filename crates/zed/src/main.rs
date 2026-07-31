@@ -656,7 +656,7 @@ fn main() {
         // only fires when ALL alert paths (live channel, archive, email) are
         // unavailable, which is a genuine operator-visible error.
         let alert_email_sink: Option<std::sync::Arc<dyn hkask_regulation::AlertEmailSink>> =
-            hkask_email::CuratorAlertEmailSink::try_from_env(kask_runtime_handle.clone());
+            hkask_email::CuratorAlertEmailSink::try_from_env(kask_runtime_handle);
 
         let cybernetics_loop_inner =
             hkask_regulation::CyberneticsLoop::new(regulation_ledger.clone())
