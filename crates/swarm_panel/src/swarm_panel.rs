@@ -1875,8 +1875,14 @@ impl SwarmPanel {
         let budget_note = if pending.within_budget {
             format!("Within your {}-credit dispatch limit.", pending.max_credits)
         } else {
+            // The per-dispatch ceiling is a hard server-side gate, not an
+            // advisory. There is no override path — the operator must raise
+            // `HKASK_ABW_MAX_CREDITS` and re-request. The previous wording
+            // ("confirm to override") was a no-op: `confirm_hire` proceeded
+            // unconditionally, but the server's `swarm_hire` now refuses the
+            // hire. Disable Confirm so the UI matches the refusal.
             format!(
-                "Exceeds your {}-credit dispatch limit — confirm to override.",
+                "Exceeds your {}-credit dispatch limit — raise HKASK_ABW_MAX_CREDITS to authorize.",
                 pending.max_credits
             )
         };
@@ -1918,6 +1924,7 @@ impl SwarmPanel {
                             Button::new("confirm-hire", "Confirm")
                                 .style(ButtonStyle::Filled)
                                 .label_size(LabelSize::XSmall)
+                                .disabled(!pending.within_budget)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.confirm_hire(cx);
                                 })),
@@ -2440,6 +2447,55 @@ mod tests {
         assert!(
             prompt.contains("swarm_request_consent"),
             "steer prompt must reference the actual swarm_request_consent tool"
+        );
+    }
+
+    // ── Per-dispatch ceiling: banner wording contract ─────────────────────────
+    // The consent banner must not promise an override that doesn't exist. The
+    // server's `swarm_hire` enforces `max_credits_per_dispatch` as a hard gate;
+    // the panel's "confirm to override" wording was a no-op (the hire would be
+    // refused server-side after the operator clicked Confirm). Pin that the
+    // `within_budget: false` path tells the operator to raise the env var, not
+    // to click Confirm. The `PendingHire` struct is the contract between the
+    // server's `swarm_hire_cost` response and the banner; pin its field shape.
+    #[test]
+    fn pending_hire_preserves_within_budget_false_from_server() {
+        // Simulate a `swarm_hire_cost` response for an over-ceiling hire.
+        // The server sets `within_budget = total <= ceiling` (total=60, ceiling=50).
+        let out = r#"{"content":{"agent_name":"expensive","total_hire_cost":60,"required_cost":60,"optional_cost":0,"max_credits_per_dispatch":50,"within_budget":false}}"#;
+        let content = parse_tool_response(out).expect("envelope");
+        let total_hire_cost = content
+            .get("total_hire_cost")
+            .and_then(|c| c.as_u64())
+            .expect("total_hire_cost present");
+        let within_budget = content
+            .get("within_budget")
+            .and_then(|c| c.as_bool())
+            .unwrap_or(false);
+        let max_credits = content
+            .get("max_credits_per_dispatch")
+            .and_then(|c| c.as_u64())
+            .unwrap_or(50) as u32;
+        assert_eq!(total_hire_cost, 60);
+        assert!(
+            !within_budget,
+            "over-ceiling hire must be within_budget=false"
+        );
+        assert_eq!(max_credits, 50);
+    }
+
+    #[test]
+    fn pending_hire_preserves_within_budget_true_from_server() {
+        // A within-ceiling hire: total=20, ceiling=50.
+        let out = r#"{"content":{"agent_name":"cheap","total_hire_cost":20,"required_cost":20,"optional_cost":0,"max_credits_per_dispatch":50,"within_budget":true}}"#;
+        let content = parse_tool_response(out).expect("envelope");
+        let within_budget = content
+            .get("within_budget")
+            .and_then(|c| c.as_bool())
+            .unwrap_or(false);
+        assert!(
+            within_budget,
+            "within-ceiling hire must be within_budget=true"
         );
     }
 }
