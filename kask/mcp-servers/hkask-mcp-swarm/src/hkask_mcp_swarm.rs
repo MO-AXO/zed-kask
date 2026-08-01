@@ -515,6 +515,62 @@ pub struct SwarmRunRequest {
     pub limit: Option<usize>,
 }
 
+// ── Authoring & composition ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GeneratePromptRequest {
+    /// Natural-language description of what the agent should do.
+    pub description: String,
+    /// Agent name (lowercase_with_underscores).
+    pub agent_name: String,
+    /// Agent type (e.g. "research", "creative", "meta").
+    pub agent_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GenerateOntologyRequest {
+    /// Natural-language description of the agent's knowledge domain.
+    pub domain_description: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateAgentRequest {
+    /// Agent name (lowercase_with_underscores) — becomes the system identifier.
+    pub agent_name: String,
+    /// Agent type (e.g. "research", "creative", "meta").
+    pub agent_type: String,
+    /// The agent's system prompt (its instructions).
+    pub system_prompt: String,
+    /// One-sentence description for the catalogue.
+    pub description: String,
+    /// Model id. Default: claude-haiku-4-5-20251001 (fast, cheap).
+    pub model: Option<String>,
+    /// Temperature (0.1–0.3 factual, 0.5–0.8 creative). Default 0.3.
+    pub temperature: Option<f64>,
+    /// Tags for catalogue discovery.
+    pub tags: Option<Vec<String>>,
+    /// Sample queries to help users understand what to ask.
+    pub sample_queries: Option<Vec<String>>,
+    /// Required dependency agent names (for compound agents).
+    pub dependencies_required: Option<Vec<String>>,
+    /// Optional dependency agent names (for compound agents).
+    pub dependencies_optional: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CreateSwarmRequest {
+    /// Workspace (swarm) name.
+    pub name: String,
+    /// Mission / description. Optional.
+    pub mission: Option<String>,
+    /// Agent names to hire into the new swarm. Each hire is consent-gated
+    /// separately — pass `consent_tokens` aligned with `agents`.
+    pub agents: Option<Vec<String>>,
+    /// Consent tokens for the hires (action "hire", target = agent name).
+    /// Required when `agents` is non-empty; the swarm itself is free to create.
+    pub consent_tokens: Option<Vec<String>>,
+}
+
 // ── Server struct ──────────────────────────────────────────────────────────
 
 hkask_mcp_server::mcp_server!(
@@ -949,6 +1005,220 @@ impl SwarmServer {
                 .with_wallet(serde_json::json!({
                     "workspace_id": req.workspace_id,
                     "messages": data,
+                }))
+                .await)
+        })
+        .await
+    }
+
+    /// Generate a system prompt for a new agent from a description.
+    #[tool(
+        description = "Generate an ABW system prompt for a new agent from a natural-language description. Authoring aid — read-only, spends nothing. Requires API key."
+    )]
+    pub async fn swarm_generate_prompt(
+        &self,
+        parameters: Parameters<GeneratePromptRequest>,
+    ) -> String {
+        execute_tool_semantic(self, "swarm_generate_prompt", Some("pko"), async {
+            self.client
+                .require_auth()
+                .map_err(SwarmError::into_tool_error)?;
+            let req = parameters.0;
+            let data = self
+                .client
+                .post(
+                    "/agents/generate-prompt",
+                    &serde_json::json!({
+                        "description": req.description,
+                        "agent_name": req.agent_name,
+                        "agent_type": req.agent_type.unwrap_or_else(|| "research".to_string()),
+                    }),
+                )
+                .await
+                .map_err(SwarmError::into_tool_error)?;
+            Ok(data)
+        })
+        .await
+    }
+
+    /// Generate a seed ontology (entity-relationship model) for a domain.
+    #[tool(
+        description = "Generate a seed ontology (Mermaid ER diagram) for an agent's knowledge domain. Authoring aid — read-only. Requires API key."
+    )]
+    pub async fn swarm_generate_ontology(
+        &self,
+        parameters: Parameters<GenerateOntologyRequest>,
+    ) -> String {
+        execute_tool_semantic(self, "swarm_generate_ontology", Some("pko"), async {
+            self.client
+                .require_auth()
+                .map_err(SwarmError::into_tool_error)?;
+            let req = parameters.0;
+            let data = self
+                .client
+                .post(
+                    "/agents/generate-ontology",
+                    &serde_json::json!({ "domain_description": req.domain_description }),
+                )
+                .await
+                .map_err(SwarmError::into_tool_error)?;
+            Ok(data)
+        })
+        .await
+    }
+
+    /// Create a new agent on ABW. This is the authoring surface.
+    #[tool(
+        description = "Create a new Agent Bestiary World agent from a name, system prompt, and config. The agent appears in your library (draft) and can be hired into swarms. Requires API key."
+    )]
+    pub async fn swarm_create_agent(&self, parameters: Parameters<CreateAgentRequest>) -> String {
+        execute_tool_semantic(self, "swarm_create_agent", Some("pko"), async {
+            self.client
+                .require_auth()
+                .map_err(SwarmError::into_tool_error)?;
+            let req = parameters.0;
+            if req.agent_name.trim().is_empty() || req.system_prompt.trim().is_empty() {
+                return Err(McpToolError::invalid_argument(
+                    "agent_name and system_prompt must be non-empty".to_string(),
+                ));
+            }
+
+            let mut card = serde_json::json!({
+                "agent_name": req.agent_name,
+                "agent_type": req.agent_type,
+                "system_prompt": req.system_prompt,
+                "capabilities": {
+                    "executor": "llm",
+                    "model": req.model.unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string()),
+                    "temperature": req.temperature.unwrap_or(0.3),
+                    "provider": "anthropic",
+                    "mcp_tools": [],
+                    "skills": [],
+                },
+                "metadata": {
+                    "description": req.description,
+                    "tags": req.tags.unwrap_or_default(),
+                    "sample_queries": req.sample_queries.unwrap_or_default(),
+                },
+            });
+            // Compound agents declare their dependency team.
+            if req.dependencies_required.is_some() || req.dependencies_optional.is_some() {
+                card["dependencies"] = serde_json::json!({
+                    "required": req.dependencies_required.unwrap_or_default(),
+                    "optional": req.dependencies_optional.unwrap_or_default(),
+                });
+            }
+
+            let data = self
+                .client
+                .post("/agents", &card)
+                .await
+                .map_err(SwarmError::into_tool_error)?;
+
+            Ok(self.client.with_wallet(data).await)
+        })
+        .await
+    }
+
+    /// Create a new swarm (workspace) and optionally hire agents into it.
+    #[tool(
+        description = "Create a new Agent Bestiary World swarm (workspace) with a name and mission. Optionally hire agents into it (each hire is consent-gated via consent_tokens). This is the composition surface. Requires API key."
+    )]
+    pub async fn swarm_create_swarm(&self, parameters: Parameters<CreateSwarmRequest>) -> String {
+        execute_tool_semantic(self, "swarm_create_swarm", Some("pko"), async {
+            self.client
+                .require_auth()
+                .map_err(SwarmError::into_tool_error)?;
+            let req = parameters.0;
+            if req.name.trim().is_empty() {
+                return Err(McpToolError::invalid_argument(
+                    "name must be non-empty".to_string(),
+                ));
+            }
+
+            // Create the workspace (free).
+            // ABW slugs allow only lowercase letters, digits, and underscores.
+            let slug_base: String = req
+                .name
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                .collect();
+            let slug = format!(
+                "{}_{}",
+                slug_base.trim_matches('_'),
+                &std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis().to_string())
+                    .unwrap_or_default()[..4]
+            );
+            let team = self
+                .client
+                .post(
+                    "/teams",
+                    &serde_json::json!({
+                        "name": req.name,
+                        "slug": slug,
+                        "description": req.mission,
+                        "mission": req.mission,
+                    }),
+                )
+                .await
+                .map_err(SwarmError::into_tool_error)?;
+
+            let workspace_id = team
+                .get("id")
+                .and_then(|i| i.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    SwarmError::ApiVersionMismatch("team create returned no id".to_string())
+                        .into_tool_error()
+                })?;
+
+            // Hire the requested agents, each gated by its own consent token.
+            let agents = req.agents.unwrap_or_default();
+            let tokens = req.consent_tokens.unwrap_or_default();
+            let mut hired = Vec::new();
+            let mut hire_errors = Vec::new();
+            for (ix, agent) in agents.iter().enumerate() {
+                let Some(token) = tokens.get(ix) else {
+                    hire_errors.push(serde_json::json!({
+                        "agent": agent,
+                        "error": "no consent token provided for this hire",
+                    }));
+                    continue;
+                };
+                // Consume the consent token for this specific hire.
+                if let Err(e) = self.consent.consume(token, "hire", agent, 5) {
+                    hire_errors.push(serde_json::json!({
+                        "agent": agent,
+                        "error": e.to_string(),
+                    }));
+                    continue;
+                }
+                match self
+                    .client
+                    .post(
+                        &format!("/workspaces/{workspace_id}/hire"),
+                        &serde_json::json!({ "agent_id": agent, "include_optional": false }),
+                    )
+                    .await
+                {
+                    Ok(_) => hired.push(agent.clone()),
+                    Err(e) => hire_errors.push(serde_json::json!({
+                        "agent": agent,
+                        "error": e.to_string(),
+                    })),
+                }
+            }
+
+            Ok(self
+                .client
+                .with_wallet(serde_json::json!({
+                    "workspace_id": workspace_id,
+                    "name": req.name,
+                    "hired": hired,
+                    "hire_errors": hire_errors,
                 }))
                 .await)
         })
