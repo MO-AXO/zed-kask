@@ -1185,11 +1185,11 @@ in-flight fetches); merge logic upgrades cloud agents to `Synced` when a local
 card's `cloud_id` matches; "Clone to Local" button on Cloud cards, "Push to
 Cloud" button on Local cards.
 
-**Post-slice follow-ups (tracked separately):**
-1. Update Steer-mode system prompt to describe the 5 local tools + mode toggle.
-2. Add a mode toggle (`Abw` | `Local`) to the panel header via
+**Post-slice follow-ups (tracked separately, all complete 2026-08-01):**
+1. ✅ Update Steer-mode system prompt to describe the 5 local tools + mode toggle.
+2. ✅ Add a mode toggle (`Abw` | `Local`) to the panel header via
    `ToggleButtonGroup`, writing `kask.swarm.mode` to settings.json.
-3. Sample local agent card at `agents/local/curated/local_narrator/` (done).
+3. ✅ Sample local agent card at `agents/local/curated/local_narrator/`.
 
 **What:**
 - Update `SwarmPanel` Browse tab to show local agents (from

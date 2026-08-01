@@ -2660,7 +2660,10 @@ mod tests {
     #[test]
     fn panel_tool_names_match_server() {
         // These strings must match the #[tool] fn names in
-        // `hkask-mcp-swarm/src/hkask_mcp_swarm.rs`.
+        // `hkask-mcp-swarm/src/hkask_mcp_swarm.rs`. Keep this list in sync
+        // when adding/removing a server tool — a rename in `hkask-mcp-swarm`
+        // must be reflected here so the panel's `invoke_tool` call sites
+        // don't silently degrade to "tool not found".
         assert_eq!(SWARM_SERVER, "swarm");
         for tool in [
             "swarm_list_agents",
@@ -2668,6 +2671,7 @@ mod tests {
             "swarm_get_agent",
             "swarm_list_apps",
             "swarm_ontology_templates",
+            "swarm_execute_agent",
             "swarm_hire_cost",
             "swarm_request_consent",
             "swarm_hire",
@@ -2679,6 +2683,12 @@ mod tests {
             "swarm_create_swarm",
             "swarm_xaman",
             "swarm_create_app",
+            // v2 §15 local tools (Slices 9 + 11).
+            "swarm_fund_local",
+            "swarm_delegate_local",
+            "swarm_list_local_agents",
+            "swarm_clone_to_local",
+            "swarm_push_to_cloud",
         ] {
             assert!(tool.starts_with("swarm_"));
         }
