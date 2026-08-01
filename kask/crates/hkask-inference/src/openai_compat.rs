@@ -30,7 +30,10 @@ const ERROR_BODY_MAX_CHARS: usize = 200;
 /// Secret-shaped prefixes that a provider error page or proxy debug dump may
 /// echo back (CWE-209). Redaction is a simple prefix scan, not a parser:
 /// defense-in-depth before the body reaches IPC/log sinks.
-const SECRET_PREFIXES: &[&str] = &["Authorization:", "Bearer ", "sk-", "api_key"];
+///
+/// All prefixes MUST be lowercase — they are matched against the lowercased
+/// body in `redact_secret_tokens`.
+const SECRET_PREFIXES: &[&str] = &["authorization:", "bearer ", "sk-", "api_key"];
 
 /// Sanitizes a raw provider response body before embedding it in an error
 /// string: redacts secret-shaped substrings (prefix through the end of the
@@ -78,10 +81,27 @@ fn redact_secret_tokens(body: &str) -> String {
                     + prefix_len
                     + (body[start + prefix_len..].len()
                         - body[start + prefix_len..].trim_start().len());
-                cursor = body[token_start..]
-                    .find(char::is_whitespace)
-                    .map(|offset| token_start + offset)
-                    .unwrap_or(body.len());
+                // Header-style prefixes ("Authorization:", "api_key") may be
+                // followed by a scheme word ("Basic", "Bearer") before the
+                // secret, so redact to end-of-line. Opaque token prefixes
+                // ("Bearer ", "sk-") redact to end-of-token.
+                let matched_prefix = SECRET_PREFIXES
+                    .iter()
+                    .filter(|prefix| lower[start..].starts_with(**prefix))
+                    .max_by_key(|prefix| prefix.len());
+                let to_end_of_line =
+                    matches!(matched_prefix, Some(p) if p.ends_with(':') || *p == "api_key");
+                cursor = if to_end_of_line {
+                    body[token_start..]
+                        .find('\n')
+                        .map(|offset| token_start + offset)
+                        .unwrap_or(body.len())
+                } else {
+                    body[token_start..]
+                        .find(char::is_whitespace)
+                        .map(|offset| token_start + offset)
+                        .unwrap_or(body.len())
+                };
             }
             None => {
                 output.push_str(&body[cursor..]);
@@ -294,10 +314,13 @@ mod tests {
         // The token may follow the prefix after whitespace without a "Bearer"
         // marker (e.g. "Authorization: Basic abc123" in a proxy error page) —
         // the redaction must skip that whitespace, not stop at it.
-        let body = "proxy error. Authorization: Basic abc123 done";
+        // Header-style prefixes redact to end-of-line, so trailing text on
+        // the same line is redacted too (conservative, safe direction).
+        let body = "proxy error. Authorization: Basic abc123\nstatus 401";
         let sanitized = sanitize_error_body(body);
-        assert!(!sanitized.contains("abc123"), "{sanitized}");
-        assert!(sanitized.contains("done"), "{sanitized}");
+        assert!(!sanitized.contains("abc123"), "escaped: {:?}", sanitized);
+        assert!(!sanitized.contains("Basic"), "{sanitized}");
+        assert!(sanitized.contains("status 401"), "{sanitized}");
     }
 
     #[test]
