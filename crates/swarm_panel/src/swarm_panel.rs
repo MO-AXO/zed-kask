@@ -199,6 +199,11 @@ pub struct SwarmPanel {
     /// In-flight consent prompt for a hire action: the agent being considered
     /// plus its pre-flight cost estimate. `Some` renders the consent banner.
     pending_hire: Option<PendingHire>,
+    /// The workspace (swarm) id new hires target. Defaults to the first
+    /// workspace once swarms load; selectable when there are several.
+    selected_workspace: Option<String>,
+    /// A spend currently in flight (after consent), shown as a busy state.
+    spend_in_flight: Option<String>,
 }
 
 /// A hire awaiting operator consent. The gate holds the pre-flight estimate
@@ -237,6 +242,8 @@ impl SwarmPanel {
                 search_task: None,
                 wallet_balance: None,
                 pending_hire: None,
+                selected_workspace: None,
+                spend_in_flight: None,
             };
             this.fetch_all(cx);
             this
@@ -347,6 +354,16 @@ impl SwarmPanel {
                             let mut swarms = swarms;
                             swarms.extend(this.entries.drain(..));
                             this.entries = swarms;
+                            // Default the hire target to the first swarm if unset.
+                            if this.selected_workspace.is_none() {
+                                this.selected_workspace =
+                                    this.entries.iter().find_map(|e| match e {
+                                        SwarmEntry::Swarm(s) if !s.id.is_empty() => {
+                                            Some(s.id.clone())
+                                        }
+                                        _ => None,
+                                    });
+                            }
                             this.filter_entries(cx);
                         }
                         Err(err) => {
@@ -440,20 +457,112 @@ impl SwarmPanel {
         .detach();
     }
 
-    /// Operator authorized the hire. v1: the spend tool is not yet built, so
-    /// this records the consent decision and clears the gate. When the v2
-    /// `swarm_hire` tool lands, it will require this authorization to proceed.
+    /// Operator authorized the hire. Mint a single-use consent token via
+    /// `swarm_request_consent`, then invoke the gated `swarm_hire` spend tool
+    /// with it. The token is action-scoped ("hire") and target-scoped (the
+    /// agent name), so it cannot be replayed for a different agent or spend.
     fn confirm_hire(&mut self, cx: &mut Context<Self>) {
-        if let Some(pending) = self.pending_hire.take() {
-            log::info!(
-                "swarm-panel: operator authorized hire of '{}' for up to {} credits (gate passed)",
-                pending.agent_name,
-                pending.total_hire_cost
-            );
-            // TODO(slice 5): invoke `swarm_hire` with a signed
-            // `credits_authorized` token derived from this consent.
-        }
+        let Some(pending) = self.pending_hire.take() else {
+            return;
+        };
+        let Some(workspace_id) = self.selected_workspace.clone() else {
+            self.fetch_error =
+                Some("No swarm selected to hire into. Create a workspace on ABW first.".into());
+            cx.notify();
+            return;
+        };
+        let Some(invoker) = kask_panel::shared_tool_invoker() else {
+            self.fetch_error = Some("Tool invoker not wired.".into());
+            cx.notify();
+            return;
+        };
+
+        let agent_name = pending.agent_name.clone();
+        let credits = pending.total_hire_cost as u32;
+        self.spend_in_flight = Some(agent_name.clone());
         cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            // Step 1: mint the consent token (records the operator's authorization).
+            let consent = invoker
+                .invoke_tool(
+                    SWARM_SERVER,
+                    "swarm_request_consent",
+                    json!({
+                        "action": "hire",
+                        "target": agent_name,
+                        "credits_authorized": credits,
+                    }),
+                )
+                .await;
+
+            let token = match consent {
+                Ok(output) => {
+                    let parsed: Option<serde_json::Value> = serde_json::from_str(&output)
+                        .ok()
+                        .and_then(|v: serde_json::Value| v.get("content").cloned().or(Some(v)));
+                    parsed.and_then(|c| {
+                        c.get("consent_token")
+                            .and_then(|t| t.as_str())
+                            .map(str::to_string)
+                    })
+                }
+                Err(err) => {
+                    this.update(cx, |this, cx| {
+                        this.spend_in_flight = None;
+                        this.fetch_error = Some(format!("Consent failed: {err}").into());
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            let Some(token) = token else {
+                this.update(cx, |this, cx| {
+                    this.spend_in_flight = None;
+                    this.fetch_error = Some("Consent did not return a token.".into());
+                    cx.notify();
+                })
+                .ok();
+                return;
+            };
+
+            // Step 2: invoke the gated spend tool with the consent token.
+            let hire = invoker
+                .invoke_tool(
+                    SWARM_SERVER,
+                    "swarm_hire",
+                    json!({
+                        "workspace_id": workspace_id,
+                        "agent_name": agent_name,
+                        "include_optional": false,
+                        "consent_token": token,
+                        "credits_authorized": credits,
+                    }),
+                )
+                .await;
+
+            this.update(cx, |this, cx| {
+                this.spend_in_flight = None;
+                match hire {
+                    Ok(output) => {
+                        if let Some(b) = extract_wallet_balance(&output) {
+                            this.wallet_balance = Some(b);
+                        }
+                        log::info!("swarm-panel: hired '{agent_name}' into {workspace_id}");
+                        // Refresh so the new hire appears in the swarm roster.
+                        this.fetch_all(cx);
+                    }
+                    Err(err) => {
+                        this.fetch_error = Some(format!("Hire failed: {err}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Operator declined the hire — clear the gate without spending.
