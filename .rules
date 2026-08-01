@@ -240,6 +240,21 @@ created in the constructor (e.g. `self.focus_handle.clone()`), because that
 handle is reachable immediately. The trap is specific to delegated focus
 handles (child `Editor`, child `Input`, etc.).
 
+## Center-pane `Item` constructors must take `&Workspace` by borrow
+
+A center-pane `Item` constructed inside a `Workspace` action handler (e.g.
+`Toggle`) receives `cx: &mut Context<Workspace>` — the action closure already
+holds an `update` lease on the `Workspace` entity. Calling
+`cx.entity().read(cx)` inside the constructor re-enters the entity map's `read`
+while the lease is held → `double_lease_panic` ("cannot read
+workspace::Workspace while it is already being updated") at
+`crates/gpui/src/app/entity_map.rs:164`. The correct pattern is `pub fn
+new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Workspace>)
+-> Entity<Self>` and read `workspace.project()` /
+`workspace.app_state().fs` through the borrow. `KaskPanel::new` uses this
+pattern; `SwarmPanel::new` did not and crashed on every launch until fixed.
+Any new center-pane `Item` must follow `KaskPanel::new`'s signature.
+
 # zed-kask integration traps
 
 These traps recur when modifying the Kask↔Zed seam. Each was hit multiple
