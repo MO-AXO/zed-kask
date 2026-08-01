@@ -2,8 +2,8 @@
 title: "Agent Bestiary World (ABW) Swarm Intelligence — Integration Plan"
 audience: [zed-kask integrators, hKask architects, ABW partnership]
 last_updated: 2026-08-01
-version: "0.8.1"
-status: "Slices 1–4 built and verified live; independent audit complete (§12) — 1 critical security gap (prompt-injection → unauthorized-spend chain), 2 high gaps, 5 medium gaps pending slice 5"
+version: "0.9.1"
+status: "Slices 1–7 + Xaman Ek integration built and verified live; three audits complete (§12 self-audit, panel interaction audit, kali security audit) with all critical/high/medium findings remediated. Feature-complete for v1; remaining items are enhancements and ABW-side unknowns, not gaps."
 domain: "composition"
 mds_categories: [composition, trust, lifecycle, curation]
 ---
