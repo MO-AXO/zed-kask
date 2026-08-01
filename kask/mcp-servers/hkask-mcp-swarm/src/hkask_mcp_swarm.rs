@@ -123,6 +123,12 @@ pub enum SwarmError {
     /// Serde parse failure on a known endpoint — possible API drift (S4).
     #[error("ABW API version mismatch: {0}")]
     ApiVersionMismatch(String),
+    /// A spend tool was invoked without a valid consent token. The gate is
+    /// the enforcement point — this is a hard refusal, not a warning.
+    #[error(
+        "ABW spend refused: {0}. Obtain operator consent via the swarm panel (Hire… → Confirm) and retry with the issued consent token."
+    )]
+    ConsentDenied(String),
     /// Network/transport failure.
     #[error("ABW request failed: {0}")]
     Unavailable(String),
@@ -139,6 +145,7 @@ impl SwarmError {
             Self::RateLimited(m) => McpToolError::rate_limited(m),
             Self::CuratorUnavailable(m) => McpToolError::unavailable(m),
             Self::ApiVersionMismatch(m) => McpToolError::internal(m),
+            Self::ConsentDenied(m) => McpToolError::permission_denied(m),
             Self::Unavailable(m) => McpToolError::unavailable(m),
         }
     }
