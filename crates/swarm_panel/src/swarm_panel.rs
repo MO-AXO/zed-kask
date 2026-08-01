@@ -794,6 +794,9 @@ impl SwarmPanel {
                 Err(err) => {
                     this.update(cx, |this, cx| {
                         this.spend_in_flight = None;
+                        // Restore the banner so the operator can retry from the
+                        // estimate they already reviewed (the M4 finding).
+                        this.pending_hire = Some(pending.clone());
                         this.hire_error = Some(format!("Consent failed: {err}").into());
                         cx.notify();
                     })
@@ -805,6 +808,7 @@ impl SwarmPanel {
             let Some(token) = token else {
                 this.update(cx, |this, cx| {
                     this.spend_in_flight = None;
+                    this.pending_hire = Some(pending.clone());
                     this.hire_error = Some("Consent did not return a token.".into());
                     cx.notify();
                 })
@@ -860,8 +864,22 @@ impl SwarmPanel {
         cx.notify();
     }
 
-    fn set_mode(&mut self, mode: PanelMode, cx: &mut Context<Self>) {
+    fn set_mode(&mut self, mode: PanelMode, window: &mut Window, cx: &mut Context<Self>) {
         self.mode = mode;
+        // Move focus to the target mode's first field — otherwise focus stays
+        // on the now-hidden search editor and keyboard input goes nowhere (the
+        // M5 finding). Steer focuses its conversation's editor.
+        let handle = match mode {
+            PanelMode::Browse => self.query_editor.read(cx).focus_handle(cx),
+            PanelMode::Author => self.author.name.read(cx).focus_handle(cx),
+            PanelMode::Compose => self.compose.name.read(cx).focus_handle(cx),
+            PanelMode::Steer => self
+                .steer_conversation
+                .as_ref()
+                .map(|c| c.read(cx).focus_handle(cx))
+                .unwrap_or_else(|| self.query_editor.read(cx).focus_handle(cx)),
+        };
+        handle.focus(window, cx);
         cx.notify();
     }
 
@@ -1164,6 +1182,9 @@ impl SwarmPanel {
         }
         self.compose.xaman_busy = true;
         self.compose.xaman_response = None;
+        // Clear stale suggestions — the "Use team" button must not pre-fill
+        // the previous recommendation while a new query is in flight (L5).
+        self.compose.xaman_suggested_agents.clear();
         cx.notify();
         let session_id = self.compose.xaman_session.clone();
 
@@ -1337,7 +1358,11 @@ impl SwarmPanel {
                 break;
             }
             let entry_ix = self.filtered_entry_indices[ix];
-            let entry = self.entries[entry_ix].clone();
+            // Defensive: filtered indices can go stale relative to entries if
+            // a mutation path forgets filter_entries — skip rather than panic.
+            let Some(entry) = self.entries.get(entry_ix).cloned() else {
+                continue;
+            };
             cards.push(self.render_card(entry, cx));
         }
         cards
@@ -1941,27 +1966,27 @@ impl Render for SwarmPanel {
                                 [
                                     ToggleButtonSimple::new(
                                         "Browse",
-                                        cx.listener(|this, _event, _, cx| {
-                                            this.set_mode(PanelMode::Browse, cx);
+                                        cx.listener(|this, _event, window, cx| {
+                                            this.set_mode(PanelMode::Browse, window, cx);
                                         }),
                                     ),
                                     ToggleButtonSimple::new(
                                         "Author",
-                                        cx.listener(|this, _event, _, cx| {
-                                            this.set_mode(PanelMode::Author, cx);
+                                        cx.listener(|this, _event, window, cx| {
+                                            this.set_mode(PanelMode::Author, window, cx);
                                         }),
                                     ),
                                     ToggleButtonSimple::new(
                                         "Compose",
-                                        cx.listener(|this, _event, _, cx| {
-                                            this.set_mode(PanelMode::Compose, cx);
+                                        cx.listener(|this, _event, window, cx| {
+                                            this.set_mode(PanelMode::Compose, window, cx);
                                         }),
                                     ),
                                     ToggleButtonSimple::new(
                                         "Steer",
                                         cx.listener(|this, _event, window, cx| {
-                                            this.set_mode(PanelMode::Steer, cx);
                                             this.ensure_steer_conversation(window, cx);
+                                            this.set_mode(PanelMode::Steer, window, cx);
                                         }),
                                     ),
                                 ],
@@ -2095,7 +2120,20 @@ impl EventEmitter<ItemEvent> for SwarmPanel {}
 
 impl Focusable for SwarmPanel {
     fn focus_handle(&self, cx: &App) -> gpui::FocusHandle {
-        self.query_editor.read(cx).focus_handle(cx)
+        // Mode-dependent: the search editor is only rendered in Browse, so
+        // delegating to it in other modes strands focus on a hidden editor
+        // (the H3 finding). Fall back to the search editor for Steer when the
+        // conversation isn't constructed yet.
+        match self.mode {
+            PanelMode::Browse => self.query_editor.read(cx).focus_handle(cx),
+            PanelMode::Author => self.author.name.read(cx).focus_handle(cx),
+            PanelMode::Compose => self.compose.name.read(cx).focus_handle(cx),
+            PanelMode::Steer => self
+                .steer_conversation
+                .as_ref()
+                .map(|c| c.read(cx).focus_handle(cx))
+                .unwrap_or_else(|| self.query_editor.read(cx).focus_handle(cx)),
+        }
     }
 }
 
