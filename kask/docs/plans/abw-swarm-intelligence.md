@@ -637,3 +637,69 @@ B would have required a bridge from the MCP server process to the
 seam the `.rules` "Cross-thread GPUI communication uses channels" trap
 governs. The cost is one new `ConversationView` in the panel, which is the
 established pattern.
+
+## 14. Out-of-Scope Defense Layers (deferred by design, with re-entry conditions)
+
+The kali audit (§KA, `kask/docs/audits/abw-swarm-kali-audit.md`) mapped the
+8-layer defense-in-depth stack. Layers 1, 4, and 6 are present; 2, 3, and 7
+are partial and remediated; layers **5 (information flow control)** and **8
+(deception detection)** are **absent — deliberately, not by omission**. This
+section records *why* they are out of scope for a single MCP server and *what
+would bring them back in scope*, so a future reviewer doesn't re-litigate the
+decision or mistake the absence for a gap.
+
+### 14.1 Layer 5 — information flow control (taint labels / FIDES Source→Sink)
+
+**What it would be:** label ABW-sourced content as `Source: untrusted` at the
+boundary and block `Source → Sink` flows (e.g. ABW agent output → `swarm_hire`
+args) structurally, rather than pattern-matching injection prefixes.
+
+**Why it's out of scope here:** taint propagation is a *workspace/process-wide*
+concern, not a single-server one. The kask FIDES taint system
+(`RR-0026`, the `input_mapping`/`propagate_taint_for_binding` convention)
+operates at the ManifestExecutor / skill-cascade layer, one level up from this
+MCP server. Bolting a per-server taint scheme onto `hkask-mcp-swarm` would
+create a *second, incompatible* taint model — the `.rules` "two parallel
+systems by design" anti-pattern. The current mitigation
+(`sanitize_abw_response` + the `{content, source, trust}` wrapper) is
+pattern-based defense-in-depth, not label-based IFC, and the audit says so.
+
+**Re-entry condition:** if the swarm server ever *constructs* skill-cascade
+inputs from ABW output (it does not today — the panel and `SkillTool` do
+that), then ABW-derived taint must propagate through
+`propagate_taint_for_binding` before `context.insert`, per the `RR-0026`
+convention. At that point IFC moves from partial to required, and the correct
+home is the cascade layer, not this server.
+
+### 14.2 Layer 8 — deception detection (canary tokens, decoy tools)
+
+**What it would be:** canary credentials that must never be exfiltrated, decoy
+MCP tools that must never be called, and ABW-response canary detection to
+surface a compromised or adversarial agent/curator.
+
+**Why it's out of scope here:** deception detection is a *honeypot*
+strategy that only pays off against a motivated, adaptive adversary with a
+reason to target this integration specifically. ABW is a known, cooperative
+third party with a business relationship; the threat model is *accidental*
+prompt-injection (an agent echoing adversarial content it read), not a
+compromised ABW platform running decoy-seeking attacks. Canaries and decoys
+add maintenance surface (they must be rotated, monitored, and kept out of the
+agent's legitimate context) for a threat that is currently hypothetical.
+
+**Re-entry condition:** if ABW opens a *public, unvetted* agent-submission
+channel that zed-kask consumes (a stranger can publish an agent whose output
+our agent then executes), the threat model changes from accidental to
+adversarial, and canary tokens on `HKASK_ABW_API_KEY` plus a decoy
+`swarm_admin_*` tool become worth their cost. Until then, the runtime
+monitoring (layer 6: `with_wallet`, `tracing::warn!` on stale signals,
+`detect_embedded_error`) is the proportionate control.
+
+### 14.3 Google OAuth — resolved, not deferred
+
+§6 already resolved this: ABW's `/auth/google` is a web session-cookie flow,
+not a programmatic bearer flow, and the only supported programmatic credential
+is the Pro-tier API key. **Not a deferral — a closed decision.** Revisit only
+if ABW publishes a standards-compliant OAuth 2.0 authorization-server surface
+(`/well-known/oauth-authorization-server`), at which point zed's existing
+context-server OAuth (`crates/context_server/src/oauth.rs`) handles it with no
+new code.
