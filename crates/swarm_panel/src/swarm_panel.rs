@@ -682,10 +682,17 @@ impl SwarmPanel {
                                 .child(
                                     Button::new(
                                         SharedString::from(format!("hire-{agent_name}")),
-                                        "Hire…",
+                                        if self.spend_in_flight.as_deref()
+                                            == Some(agent_name.as_str())
+                                        {
+                                            "Hiring…"
+                                        } else {
+                                            "Hire…"
+                                        },
                                     )
                                     .style(ButtonStyle::Subtle)
                                     .label_size(LabelSize::XSmall)
+                                    .disabled(self.spend_in_flight.is_some())
                                     .on_click(cx.listener(
                                         move |this, _, _, cx| {
                                             this.begin_hire(agent_name.clone(), cx);
@@ -1055,7 +1062,15 @@ mod tests {
         // These strings must match the #[tool] fn names in
         // `hkask-mcp-swarm/src/hkask_mcp_swarm.rs`.
         assert_eq!(SWARM_SERVER, "swarm");
-        for tool in ["swarm_list_agents", "swarm_get_swarm", "swarm_hire_cost"] {
+        for tool in [
+            "swarm_list_agents",
+            "swarm_get_swarm",
+            "swarm_hire_cost",
+            "swarm_request_consent",
+            "swarm_hire",
+            "swarm_delegate",
+            "swarm_run_status",
+        ] {
             assert!(tool.starts_with("swarm_"));
         }
     }
