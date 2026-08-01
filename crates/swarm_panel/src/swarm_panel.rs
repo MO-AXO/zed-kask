@@ -945,14 +945,14 @@ impl SwarmPanel {
     }
 
     /// Pre-fill the agents field with Xaman Ek's recommended team.
-    fn apply_xaman_suggestions(&mut self, cx: &mut Context<Self>) {
+    fn apply_xaman_suggestions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.compose.xaman_suggested_agents.is_empty() {
             return;
         }
         let joined = self.compose.xaman_suggested_agents.join(", ");
         let agents_editor = self.compose.agents.clone();
         agents_editor.update(cx, |editor, cx| {
-            editor.set_text(joined, cx);
+            editor.set_text(joined, window, cx);
         });
         cx.notify();
     }
@@ -1343,8 +1343,8 @@ impl SwarmPanel {
                                     Button::new("apply-xaman", "Use team")
                                         .style(ButtonStyle::Filled)
                                         .label_size(LabelSize::XSmall)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.apply_xaman_suggestions(cx);
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.apply_xaman_suggestions(window, cx);
                                         })),
                                 ),
                         )
