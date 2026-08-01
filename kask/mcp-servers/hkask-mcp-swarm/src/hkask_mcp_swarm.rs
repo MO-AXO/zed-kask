@@ -47,6 +47,11 @@ pub struct SwarmConfig {
     pub max_credits_per_dispatch: u32,
     /// Whether Xaman Ek sessions may be initiated without per-call opt-in (S5 policy).
     pub curator_consent_default: bool,
+    /// Default model id for newly created ABW agents when the caller omits
+    /// `model`. Operator-configurable via `HKASK_ABW_DEFAULT_AGENT_MODEL` so
+    /// the default is not a code literal that goes stale when the provider
+    /// renames/deprecates the model (KA-05).
+    pub default_agent_model: String,
 }
 
 impl Default for SwarmConfig {
@@ -56,6 +61,7 @@ impl Default for SwarmConfig {
             api_key: None,
             max_credits_per_dispatch: 50,
             curator_consent_default: false,
+            default_agent_model: "claude-haiku-4-5-20251001".to_string(),
         }
     }
 }
@@ -77,6 +83,10 @@ impl SwarmConfig {
             .ok()
             .and_then(|s| s.trim().to_lowercase().parse::<bool>().ok())
             .unwrap_or(default.curator_consent_default);
+        let default_agent_model = std::env::var("HKASK_ABW_DEFAULT_AGENT_MODEL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(default.default_agent_model);
         let warning = if api_key.is_none() {
             Some(
                 "HKASK_ABW_API_KEY not set — swarm server in catalogue-only mode; \
@@ -92,6 +102,7 @@ impl SwarmConfig {
                 api_key,
                 max_credits_per_dispatch,
                 curator_consent_default,
+                default_agent_model,
             },
             warning,
         )
@@ -482,6 +493,30 @@ fn make_swarm_slug(slug_base: &str, now: std::time::SystemTime) -> String {
     format!("{}_{}", slug_base.trim_matches('_'), suffix)
 }
 
+/// Strip leading @mentions from a delegate task (KA-06): a task starting
+/// with `@other_agent` would mention a different agent in the ABW workspace
+/// chat, a semantic injection at the chat layer. The consent gate already
+/// authorizes the named agent; this is defense-in-depth against accidental
+/// cross-mention. Strips all leading `@` tokens (and intervening whitespace)
+/// so `@a @b do x` becomes `do x`.
+fn strip_leading_mentions(task: &str) -> String {
+    let mut remaining = task.trim_start();
+    while remaining.starts_with('@') {
+        // Skip the @ and the following token (up to whitespace).
+        let after_at = &remaining[1..];
+        match after_at.find(char::is_whitespace) {
+            Some(end) => {
+                remaining = after_at[end..].trim_start();
+            }
+            None => {
+                // The entire task is `@token` with no trailing content.
+                return String::new();
+            }
+        }
+    }
+    remaining.to_string()
+}
+
 /// Sanitize an ABW agent or Xaman Ek response before returning it to the MCP
 /// client (the zed-kask agent). ABW agents and the curator are third-party
 /// surfaces that could return prompt-injection vectors (e.g. "ignore previous
@@ -645,7 +680,8 @@ pub struct CreateAgentRequest {
     pub system_prompt: String,
     /// One-sentence description for the catalogue.
     pub description: String,
-    /// Model id. Default: claude-haiku-4-5-20251001 (fast, cheap).
+    /// Model id. Default: the server's `default_agent_model` (operator-
+    /// configurable via `HKASK_ABW_DEFAULT_AGENT_MODEL`).
     pub model: Option<String>,
     /// Temperature (0.1–0.3 factual, 0.5–0.8 creative). Default 0.3.
     pub temperature: Option<f64>,
@@ -1213,6 +1249,12 @@ impl SwarmServer {
             };
 
             // ABW delegation is an @mention message in the workspace chat.
+            // Strip leading @mentions from the task (KA-06): a task starting
+            // with `@other_agent` would mention a different agent in the
+            // workspace chat, a semantic injection at the ABW chat layer.
+            // The consent gate already authorizes the named agent; this is
+            // defense-in-depth against accidental cross-mention.
+            let task_clean = strip_leading_mentions(&req.task);
             let data = self
                 .client
                 .post(
@@ -1220,7 +1262,7 @@ impl SwarmServer {
                         "/workspaces/{}/messages",
                         url_encode_segment(&req.workspace_id)
                     ),
-                    &serde_json::json!({ "content": format!("@{} {}", req.agent_name, req.task) }),
+                    &serde_json::json!({ "content": format!("@{} {}", req.agent_name, task_clean) }),
                 )
                 .await
                 .map_err(|e| {
@@ -1314,6 +1356,11 @@ impl SwarmServer {
                 .require_auth()
                 .map_err(SwarmError::into_tool_error)?;
             let req = parameters.0;
+            if req.description.trim().is_empty() || req.agent_name.trim().is_empty() {
+                return Err(McpToolError::invalid_argument(
+                    "description and agent_name must be non-empty".to_string(),
+                ));
+            }
             let data = self
                 .client
                 .post(
@@ -1354,6 +1401,11 @@ impl SwarmServer {
                 .require_auth()
                 .map_err(SwarmError::into_tool_error)?;
             let req = parameters.0;
+            if req.domain_description.trim().is_empty() {
+                return Err(McpToolError::invalid_argument(
+                    "domain_description must be non-empty".to_string(),
+                ));
+            }
             let data = self
                 .client
                 .post(
@@ -1398,7 +1450,7 @@ impl SwarmServer {
                 "system_prompt": req.system_prompt,
                 "capabilities": {
                     "executor": "llm",
-                    "model": req.model.unwrap_or_else(|| "claude-haiku-4-5-20251001".to_string()),
+                    "model": req.model.unwrap_or_else(|| self.client.config().default_agent_model.clone()),
                     "temperature": req.temperature.unwrap_or(0.3),
                     "provider": "anthropic",
                     "mcp_tools": [],
@@ -1898,6 +1950,10 @@ mod tests {
         assert_eq!(c.api_base_url, "https://agent-bestiary.world");
         assert!(!c.curator_consent_default);
         assert!(c.api_key.is_none());
+        // KA-05: the default agent model must be a config field, not a code
+        // literal in the handler. The default exists so the handler can read
+        // it; the operator overrides via HKASK_ABW_DEFAULT_AGENT_MODEL.
+        assert!(!c.default_agent_model.is_empty());
     }
 
     // The algedonic wallet signal must never be fabricated. When the server is
@@ -2128,5 +2184,36 @@ mod tests {
             !slug.contains("__leading"),
             "leading underscores must be trimmed"
         );
+    }
+
+    // ── Delegate task @mention stripping (KA-06) ───────────────────────────
+    // A delegate task starting with @other_agent would mention a different
+    // agent in the ABW chat. strip_leading_mentions removes all leading
+    // @tokens so only the intended agent (named in the @mention prefix the
+    // server adds) is mentioned.
+    #[test]
+    fn strip_leading_mentions_removes_single_mention() {
+        assert_eq!(
+            strip_leading_mentions("@other_agent do the task"),
+            "do the task"
+        );
+    }
+
+    #[test]
+    fn strip_leading_mentions_removes_multiple_mentions() {
+        assert_eq!(strip_leading_mentions("@a @b do x"), "do x");
+    }
+
+    #[test]
+    fn strip_leading_mentions_preserves_clean_task() {
+        assert_eq!(
+            strip_leading_mentions("analyze the market data"),
+            "analyze the market data"
+        );
+    }
+
+    #[test]
+    fn strip_leading_mentions_empty_when_only_mentions() {
+        assert_eq!(strip_leading_mentions("@only_mention"), "");
     }
 }
