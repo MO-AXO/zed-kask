@@ -45,11 +45,12 @@ pub const KASK_SKILLS_S3_PREFIX: &str = "kask-skills";
 ///    (e.g. not logged in).
 ///
 /// Returns the base URL with no trailing slash.
-fn kask_marketplace_base_url(http_client: &HttpClientWithUrl) -> String {
-    match std::env::var("HKASK_MARKETPLACE_URL") {
-        Ok(val) if !val.trim().is_empty() => val.trim_end_matches('/').to_string(),
+/// Pure decision behind `kask_marketplace_base_url`, extracted for
+/// testability (env-var tests are racy under parallel test runners).
+fn resolve_marketplace_base(env_override: Option<String>, server_url: String) -> String {
+    match env_override {
+        Some(val) if !val.trim().is_empty() => val.trim_end_matches('/').to_string(),
         _ => {
-            let server_url = http_client.base_url();
             if server_url.trim().is_empty() {
                 log::warn!(
                     "HKASK_MARKETPLACE_URL not set and the client has no server_url — \
@@ -64,6 +65,41 @@ fn kask_marketplace_base_url(http_client: &HttpClientWithUrl) -> String {
             }
         }
     }
+}
+
+fn kask_marketplace_base_url(http_client: &HttpClientWithUrl) -> String {
+    resolve_marketplace_base(
+        std::env::var("HKASK_MARKETPLACE_URL").ok(),
+        http_client.base_url(),
+    )
+}
+
+/// Whether the Zed account `Authorization` header may be attached to a
+/// marketplace request. The credentials are issued by `server_url`'s host;
+/// sending them to a different host leaks the account token, so the header
+/// is only attached when the resolved marketplace URL is same-host.
+fn credentials_allowed_for_url(http_client: &HttpClientWithUrl, marketplace_url: &str) -> bool {
+    let base = http_client.base_url();
+    if base.trim().is_empty() {
+        return false;
+    }
+    let host_of = |url: &str| {
+        url.trim_end_matches('/')
+            .split_once("://")
+            .map(|(_, rest)| rest.split('/').next().unwrap_or("").to_string())
+            .unwrap_or_default()
+    };
+    let allowed = host_of(marketplace_url) == host_of(&base);
+    if !allowed {
+        log::warn!(
+            "kask-extensions: withholding Zed credentials from marketplace host — \
+             the resolved marketplace URL '{marketplace_url}' is not same-host with \
+             the credential issuer '{base}'. The operation will likely fail with 401. \
+             Remediation: point HKASK_MARKETPLACE_URL at the same host as server_url, \
+             or obtain credentials issued by the marketplace host."
+        );
+    }
+    allowed
 }
 
 /// zed-kask: Build a full marketplace URL string by joining `path` to the
@@ -91,6 +127,24 @@ pub fn kask_marketplace_url(
         url_str.push_str(&query_string);
     }
     Ok(url_str)
+}
+
+/// Build a request with the Zed account `Authorization` header attached
+/// only when `credentials_allowed_for_url` permits it. See that function
+/// for the same-host rationale.
+fn authed_request(
+    method: http_client::http::method::Method,
+    url: &str,
+    http_client: &HttpClientWithUrl,
+    credentials: &client::Credentials,
+) -> http_client::http::request::Builder {
+    let mut request = http_client::http::Request::builder()
+        .method(method)
+        .uri(url);
+    if credentials_allowed_for_url(http_client, url) {
+        request = request.header("Authorization", credentials.authorization_header());
+    }
+    request
 }
 
 /// Package a skill directory into a tar.gz archive and compute its SHA256.
@@ -246,8 +300,6 @@ pub async fn publish_skill(
         KASK_SKILLS_S3_PREFIX, source_user, skill.name, version
     );
 
-    let auth_header = credentials.authorization_header();
-
     // Upload tarball.
     let upload_url = crate::publish::kask_marketplace_url(
         http_client,
@@ -256,10 +308,14 @@ pub async fn publish_skill(
     )?;
     http_client
         .send(
-            http_client::http::Request::post(&upload_url)
-                .header("Content-Type", "application/octet-stream")
-                .header("Authorization", &auth_header)
-                .body(AsyncBody::from_bytes(Bytes::from(tarball_bytes)))?,
+            authed_request(
+                http_client::http::method::Method::POST,
+                &upload_url,
+                http_client,
+                credentials,
+            )
+            .header("Content-Type", "application/octet-stream")
+            .body(AsyncBody::from_bytes(Bytes::from(tarball_bytes)))?,
         )
         .await
         .context("uploading kask skill tarball")?;
@@ -272,12 +328,16 @@ pub async fn publish_skill(
     )?;
     http_client
         .send(
-            http_client::http::Request::post(&manifest_upload_url)
-                .header("Content-Type", "application/json")
-                .header("Authorization", &auth_header)
-                .body(AsyncBody::from_bytes(Bytes::from(
-                    manifest_json.into_bytes(),
-                )))?,
+            authed_request(
+                http_client::http::method::Method::POST,
+                &manifest_upload_url,
+                http_client,
+                credentials,
+            )
+            .header("Content-Type", "application/json")
+            .body(AsyncBody::from_bytes(Bytes::from(
+                manifest_json.into_bytes(),
+            )))?,
         )
         .await
         .context("uploading kask skill manifest")?;
@@ -309,7 +369,6 @@ pub async fn unpublish_skill(
         skill_name
     );
 
-    let auth_header = credentials.authorization_header();
     // zed-kask: URL-encode the skill ID (alice/bug-hunt → alice%2Fbug-hunt)
     // so it's a single path segment. The server decodes it back.
     let skill_id_str = format!("{}/{}", source_user, skill_name);
@@ -321,9 +380,13 @@ pub async fn unpublish_skill(
     )?;
     http_client
         .send(
-            http_client::http::Request::delete(&delete_url)
-                .header("Authorization", &auth_header)
-                .body(AsyncBody::empty())?,
+            authed_request(
+                http_client::http::method::Method::DELETE,
+                &delete_url,
+                http_client,
+                credentials,
+            )
+            .body(AsyncBody::empty())?,
         )
         .await
         .context("unpublishing kask skill")?;
@@ -433,7 +496,6 @@ pub async fn vote_skill(
     skill_id: &str,
     vote: i8,
 ) -> Result<(i64, i64)> {
-    let auth_header = credentials.authorization_header();
     let encoded_id = urlencoding::encode(skill_id);
     let vote_url = crate::publish::kask_marketplace_url(
         http_client,
@@ -443,10 +505,14 @@ pub async fn vote_skill(
     let body = serde_json::to_string(&cloud_api_types::KaskSkillVoteRequest { vote })?;
     let mut response = http_client
         .send(
-            http_client::http::Request::post(&vote_url)
-                .header("Content-Type", "application/json")
-                .header("Authorization", &auth_header)
-                .body(AsyncBody::from_bytes(Bytes::from(body.into_bytes())))?,
+            authed_request(
+                http_client::http::method::Method::POST,
+                &vote_url,
+                http_client,
+                credentials,
+            )
+            .header("Content-Type", "application/json")
+            .body(AsyncBody::from_bytes(Bytes::from(body.into_bytes())))?,
         )
         .await
         .context("voting on kask skill")?;

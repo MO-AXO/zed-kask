@@ -646,7 +646,7 @@ impl CuratorStores {
     /// Construct a handle over pre-built stores (tests). Never attempts a
     /// re-open — the passphrase is empty and healing is disabled. For the
     /// absent-store case, pass `None`s.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     fn for_tests(
         episodic: Option<Arc<EpisodicMemory>>,
         semantic: Option<Arc<SemanticMemory>>,
@@ -662,7 +662,7 @@ impl CuratorStores {
 
     /// Test helper: replace the stores after construction, simulating an
     /// outage or a heal.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     fn set_for_tests(
         &self,
         episodic: Option<Arc<EpisodicMemory>>,
@@ -2134,10 +2134,8 @@ mod tests {
 
         // The curator's episodic store should have the turn, tagged with the
         // curator's WebID (Private, curator perspective).
-        let curator_episodic = port
-            .curator_episodic
-            .as_ref()
-            .expect("curator episodic store");
+        let (curator_episodic, curator_semantic) = port.curator_stores.get();
+        let curator_episodic = curator_episodic.expect("curator episodic store");
         let h_mems = curator_episodic
             .query_for_deduped_untouched("chat:thread:curator-thread-1", curator_webid)
             .expect("curator episodic query should succeed");
@@ -2148,23 +2146,21 @@ mod tests {
         );
         assert_eq!(h_mems[0].attribute, "chatted");
 
-        // The user's episodic store should NOT contain the curator's turn —
-        // curator turns are private to the curator, not the user.
+        // The user's episodic store should ALSO contain the turn (Private,
+        // user perspective) — dual-perspective writes give each party a
+        // first-person record of the shared conversation.
         let user_h_mems = port
             .episodic
             .query_for_deduped_untouched("chat:thread:curator-thread-1", port.user_webid)
             .expect("user episodic query should succeed");
         assert_eq!(
             user_h_mems.len(),
-            0,
-            "curator turn must not leak into the user's episodic store"
+            1,
+            "curator turn must also land in the user's episodic store"
         );
 
         // The curator's semantic store should also have the turn (Shared copy).
-        let curator_semantic = port
-            .curator_semantic
-            .as_ref()
-            .expect("curator semantic store");
+        let curator_semantic = curator_semantic.expect("curator semantic store");
         let semantic_h_mems = curator_semantic
             .query_deduped("curator:thread:curator-thread-1")
             .expect("curator semantic query should succeed");
@@ -2176,10 +2172,13 @@ mod tests {
         assert_eq!(semantic_h_mems[0].attribute, "turn");
     }
 
-    /// Curator turns should NOT write to the user's episodic or semantic stores.
-    /// This pins the isolation invariant: the curator's memory is sovereign.
+    /// Curator turns write to BOTH perspectives' episodic stores (dual-
+    /// perspective memory: each party keeps a first-person record of the
+    /// shared conversation) but the Shared semantic copy stays sovereign to
+    /// the curator's DB — the user's semantic store holds consolidated
+    /// facts, not per-turn records.
     #[tokio::test]
-    async fn ingest_curator_turn_does_not_touch_user_stores() {
+    async fn ingest_curator_turn_writes_user_perspective_but_not_user_semantic() {
         let port = in_memory_port();
         let record = TurnRecord {
             thread_id: "curator-isolation-test".to_string(),
@@ -2194,18 +2193,20 @@ mod tests {
             .await
             .expect("ingestion should succeed");
 
-        // User episodic — should be empty for the curator's thread.
+        // User episodic — the user's first-person record of the curator
+        // conversation must be present.
         let user_episodic = port
             .episodic
             .query_for_deduped_untouched("chat:thread:curator-isolation-test", port.user_webid)
             .expect("user episodic query should succeed");
         assert_eq!(
             user_episodic.len(),
-            0,
-            "curator turn must not write to the user's episodic store"
+            1,
+            "curator turn must write the user's episodic perspective"
         );
 
-        // User semantic — should not have the curator entity.
+        // User semantic — should not have the curator entity (per-turn
+        // semantic records are sovereign to the curator's DB).
         let user_semantic = port
             .semantic
             .query_deduped("curator:thread:curator-isolation-test")
@@ -2340,10 +2341,9 @@ mod tests {
         .expect("ingest succeeds");
 
         // Verify the curator episodic store has the turn before consolidation.
-        let curator_episodic = port
-            .curator_episodic
-            .as_ref()
-            .expect("curator episodic store should be available in tests");
+        let (curator_episodic, _) = port.curator_stores.get();
+        let curator_episodic =
+            curator_episodic.expect("curator episodic store should be available in tests");
         let h_mems_before = curator_episodic
             .query_for_deduped_untouched("chat:thread:curator-consolidation-test", curator_webid)
             .expect("curator episodic query should succeed");
@@ -2376,5 +2376,110 @@ mod tests {
         // confidence decay — we just verify the query succeeds and the
         // curator consolidation pass didn't panic.
         let _ = h_mems_after;
+    }
+
+    /// Dual-perspective pin: a curator turn must produce first-person
+    /// episodic records for BOTH parties — the user (user_webid, user DB)
+    /// and the curator (curator_webid, curator DB) — plus the Shared
+    /// semantic copy in the curator's DB. Three records, one conversation.
+    #[tokio::test]
+    async fn ingest_curator_turn_writes_both_perspectives() {
+        let port = in_memory_port();
+        let record = TurnRecord {
+            thread_id: "dual-perspective-test".to_string(),
+            user_input: "status?".to_string(),
+            agent_response: "nominal".to_string(),
+            model: "test-model".to_string(),
+            thread_title: None,
+            agent_id: Some("Curator".to_string()),
+        };
+        port.ingest_turn(record).await.expect("ingest succeeds");
+
+        let user_perspective = port
+            .episodic
+            .query_for_deduped_untouched("chat:thread:dual-perspective-test", port.user_webid)
+            .expect("user query");
+        assert_eq!(user_perspective.len(), 1, "user perspective present");
+
+        let (curator_episodic, curator_semantic) = port.curator_stores.get();
+        let curator_perspective = curator_episodic
+            .expect("curator episodic")
+            .query_for_deduped_untouched("chat:thread:dual-perspective-test", port.curator_webid)
+            .expect("curator query");
+        assert_eq!(curator_perspective.len(), 1, "curator perspective present");
+
+        let shared = curator_semantic
+            .expect("curator semantic")
+            .query_deduped("curator:thread:dual-perspective-test")
+            .expect("semantic query");
+        assert_eq!(shared.len(), 1, "shared semantic copy present");
+    }
+
+    /// Self-healing pin: when the curator stores are down, `get()` returns
+    /// `None`s without healing (heal disabled in tests), and after
+    /// `set_for_tests` restores them, subsequent reads see the healed
+    /// stores. This mirrors the production heal path where a failed open is
+    /// retried on the next access.
+    #[tokio::test]
+    async fn curator_stores_heal_after_outage() {
+        let port = in_memory_port();
+
+        // Simulate an outage — stores go None.
+        port.curator_stores.set_for_tests(None, None);
+        let (episodic, semantic) = port.curator_stores.get();
+        assert!(episodic.is_none(), "stores down");
+        assert!(semantic.is_none(), "stores down");
+
+        // Ingestion during the outage still succeeds (user record persists,
+        // curator writes skip).
+        port.ingest_turn(TurnRecord {
+            thread_id: "outage-test".to_string(),
+            user_input: "during outage".to_string(),
+            agent_response: "response".to_string(),
+            model: "test-model".to_string(),
+            thread_title: None,
+            agent_id: Some("Curator".to_string()),
+        })
+        .await
+        .expect("ingestion during outage succeeds");
+        let user_record = port
+            .episodic
+            .query_for_deduped_untouched("chat:thread:outage-test", port.user_webid)
+            .expect("user query");
+        assert_eq!(user_record.len(), 1, "user record persisted during outage");
+
+        // Heal: restore fresh in-memory stores and verify reads see them.
+        let curator_driver: Arc<dyn hkask_storage::DatabaseDriver> =
+            SqliteDriver::in_memory_driver();
+        let healed_episodic = Arc::new(EpisodicMemory::new(
+            HMemStore::from_driver(Arc::clone(&curator_driver)).expect("hmem init"),
+        ));
+        let healed_semantic = Arc::new(SemanticMemory::new(
+            HMemStore::from_driver(Arc::clone(&curator_driver)).expect("hmem init"),
+            EmbeddingStore::from_driver(curator_driver, 1024),
+        ));
+        port.curator_stores
+            .set_for_tests(Some(healed_episodic), Some(healed_semantic));
+
+        let (episodic, semantic) = port.curator_stores.get();
+        assert!(episodic.is_some(), "stores healed");
+        assert!(semantic.is_some(), "stores healed");
+
+        // Post-heal ingestion writes curator records again.
+        port.ingest_turn(TurnRecord {
+            thread_id: "post-heal-test".to_string(),
+            user_input: "after heal".to_string(),
+            agent_response: "response".to_string(),
+            model: "test-model".to_string(),
+            thread_title: None,
+            agent_id: Some("Curator".to_string()),
+        })
+        .await
+        .expect("post-heal ingestion succeeds");
+        let curator_record = episodic
+            .expect("healed episodic")
+            .query_for_deduped_untouched("chat:thread:post-heal-test", port.curator_webid)
+            .expect("curator query");
+        assert_eq!(curator_record.len(), 1, "curator record written after heal");
     }
 }
