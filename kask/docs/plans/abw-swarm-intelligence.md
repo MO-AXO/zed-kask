@@ -585,10 +585,11 @@ slice-status notes.
 | 12.8 | tool count 9 vs ≤7 | Deferred (v2 grouping) |
 | 12.9 | missing fire/import/version tools | Deferred (v2) |
 
-**Remaining for slice 6 (skill wiring, see §13):** the `swarm-intelligence`
-skill is registry-complete and validated (33/33 checks) but not yet
-invocable from `SwarmPanel`. With the consent gate now honest, the skill's
-`loop_closure` convergence invariant is truthful, and slice 6 is unblocked.
+**Slice 6 (skill wiring, see §13):** the `swarm-intelligence` skill is
+registry-complete, validated (33/33 checks), and now invocable from
+`SwarmPanel` via Steer mode — a `ConversationView` scoped to the swarm MCP
+server. The consent gate is honest, so the skill's `loop_closure`
+convergence invariant is truthful.
 ---
 
 ## 13. Companion Skill: `swarm-intelligence`
@@ -610,25 +611,29 @@ A registry skill exists that operationalizes the composition PDCA described in
   this plan's §4 cybernetic analysis calls for. The panel (§3.2) and MCP
   server (§3.3) are the *substrate* the skill acts on.
 
-### Wiring gap (open)
+### Wiring (slice 6 — implemented)
 
-The skill is **not yet invocable from `SwarmPanel`**. The panel calls MCP
-tools directly via `shared_tool_invoker` (browse, hire, consent), but the
-skill is a FlowDef manifest executed by the `ManifestExecutor`, which is
-reachable only through the agent's `SkillTool` (`crates/agent/src/tools/
-skill_tool.rs`) — not through the `ToolInvoker` trait the panel uses.
+The skill is invocable from `SwarmPanel` via **Steer mode** — a
+`ConversationView` scoped to the swarm MCP server, mirroring `KaskPanel`'s
+per-tab agent pattern (Option A from the skill design doc §8). The operator
+selects the "Steer" toggle in the panel; the panel lazily constructs a
+`ConversationView` with a `CuratorAgentServer` whose system prompt names the
+`swarm-intelligence` skill and the active workspace. The operator asks the
+curator to compose/steer a swarm; the curator's `SkillTool` invokes the
+`swarm-intelligence` cascade, which emits gated `swarm_update_swarm`/
+`swarm_delegate` calls back through the same MCP server.
 
-Two integration paths were identified (see the skill design doc §8):
-- **Option A:** embed a `ConversationView` in `SwarmPanel` (mirror
-  `KaskPanel`'s per-tab agent pattern), scoped to `Agent::Curator` with the
-  swarm server's tools. The operator asks the curator to compose/steer; the
-  curator's `SkillTool` invokes `swarm-intelligence`. Substantial addition.
-- **Option B:** add a `swarm_steer` MCP tool to `hkask-mcp-swarm` that calls
-  back into the `ManifestExecutor`. Keeps the panel thin but requires a new
-  bridge from the MCP server process to the `ManifestExecutor` (which lives
-  in the GPUI/agent process).
+**Implementation:** `crates/swarm_panel/src/swarm_panel.rs` —
+`PanelMode::Steer`, `ensure_steer_conversation`, `steer_system_prompt`, and
+the Steer render branch. Tests pin that the prompt names the skill and the
+server scope. The conversation is not persisted (matching `KaskPanel`'s
+non-persisted-threads pattern); re-clicking Steer after a restart starts a
+fresh composition conversation.
 
-This wiring is **slice 6** work. With slice 5 now complete (the §12
-audit gaps closed — see §12.17), the consent gate is honest and the
-skill's `loop_closure` convergence invariant is truthful, so slice 6 is
-unblocked.
+**Why Option A over Option B:** Option A reuses the existing `SkillTool` →
+`ManifestExecutor` machinery wholesale — no new cross-process bridge. Option
+B would have required a bridge from the MCP server process to the
+`ManifestExecutor` (which lives in the GPUI/agent process), the same class of
+seam the `.rules` "Cross-thread GPUI communication uses channels" trap
+governs. The cost is one new `ConversationView` in the panel, which is the
+established pattern.

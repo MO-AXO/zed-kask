@@ -20241,6 +20241,7 @@ dependencies = [
  "anyhow",
  "collections",
  "editor",
+ "fs",
  "gpui",
  "kask_panel",
  "log",
