@@ -1485,13 +1485,13 @@ impl SwarmServer {
                 .get("description")
                 .and_then(|d| d.as_str())
                 .map(|d| d.to_string());
-            if let Some(desc) = desc_to_sanitize {
-                if let Some(obj) = data.as_object_mut() {
-                    obj.insert(
-                        "description".to_string(),
-                        sanitize_abw_response(Some(&serde_json::Value::String(desc))),
-                    );
-                }
+            if let Some(desc) = desc_to_sanitize
+                && let Some(obj) = data.as_object_mut()
+            {
+                obj.insert(
+                    "description".to_string(),
+                    sanitize_abw_response(Some(&serde_json::Value::String(desc))),
+                );
             }
             Ok(self.client.with_wallet(data).await)
         })
@@ -2173,7 +2173,7 @@ mod tests {
         assert!(slug.starts_with("test_"));
         // The suffix is the first 4 digits of the millisecond timestamp.
         let suffix = slug.strip_prefix("test_").unwrap_or("");
-        assert!(suffix.len() >= 1);
+        assert!(!suffix.is_empty());
     }
 
     #[test]
