@@ -648,6 +648,324 @@ impl LocalAgentRegistry {
     }
 }
 
+// ── Local swarm runtime (v2 §15 Slice 9) ───────────────────────────────────
+//
+// Holds the local ledger, inference port, and content guard. Constructed
+// once at server startup and shared across tool calls via `Arc`.
+//
+// The ledger is operator-funded (§15.6 — the strongest objection). If
+// unfunded, `swarm_delegate_local` returns `PaymentRequired`, the same
+// error ABW returns. No auto-replenishment — the corrective signal must
+// be real.
+//
+// The inference port is resolved once at startup via
+// `hkask_inference::resolve_inference_port()`. This routes through zed's
+// IPC bridge when available, or falls back to MediaRouter.
+//
+// The content guard scans both input (prompt injection) and output (secret
+// leakage, canary exfiltration) per OWASP LLM Top 10.
+
+/// The local swarm runtime — ledger + inference + guard.
+///
+/// Constructed lazily on first tool call (the `run_server` factory closure
+/// is sync — it cannot `.await` the inference port resolution). `lazy()`
+/// stores the config; `get_or_init()` does the async init on first use.
+pub struct LazyLocalSwarmRuntime {
+    ledger_path: String,
+    inner: tokio::sync::OnceCell<LocalSwarmRuntime>,
+}
+
+impl LazyLocalSwarmRuntime {
+    /// Store the config without initializing. The runtime is constructed
+    /// on first call to `get_or_init`.
+    pub fn lazy(ledger_path: String) -> Self {
+        Self {
+            ledger_path,
+            inner: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    /// Get the runtime, initializing it on first call. Returns `Err` if
+    /// initialization fails (ledger open, inference port resolution, guard
+    /// init). Subsequent calls return the cached runtime.
+    pub async fn get_or_init(&self) -> Result<&LocalSwarmRuntime, String> {
+        self.inner
+            .get_or_try_init(|| async { LocalSwarmRuntime::new(&self.ledger_path).await })
+            .await
+    }
+}
+
+/// The initialized local swarm runtime — ledger + inference + guard.
+pub struct LocalSwarmRuntime {
+    ledger: std::sync::Arc<hkask_ledger::Ledger>,
+    inference: std::sync::Arc<dyn hkask_types::InferencePort>,
+    guard: std::sync::Arc<hkask_guard::ContentGuard>,
+    /// The operator's account id in the ledger (funded via `swarm_fund_local`).
+    operator_account: String,
+    /// The asset name for local credits.
+    asset: String,
+}
+
+impl LocalSwarmRuntime {
+    /// Construct the runtime. Opens (or creates) the ledger at `db_path`,
+    /// resolves the inference port, and initializes the guard.
+    ///
+    /// The operator account is ensured in the ledger namespace "local_swarm".
+    /// It starts at balance 0 — the operator funds it via `swarm_fund_local`.
+    pub async fn new(db_path: &str) -> Result<Self, String> {
+        // Open the ledger at the file path. Create the directory if needed.
+        if let Some(parent) = std::path::Path::new(db_path).parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create ledger dir {}: {e}", parent.display()))?;
+        }
+        let manager = r2d2_sqlite::SqliteConnectionManager::file(db_path)
+            .with_init(|conn| conn.execute_batch(hkask_storage::WAL_PRAGMA_BATCH));
+        let pool = r2d2::Pool::builder()
+            .max_size(4)
+            .build(manager)
+            .map_err(|e| format!("failed to create ledger pool: {e}"))?;
+        let driver: std::sync::Arc<dyn hkask_storage::DatabaseDriver> =
+            std::sync::Arc::new(hkask_storage::SqliteDriver::new(pool));
+        let ledger = hkask_ledger::Ledger::from_driver(driver)
+            .map_err(|e| format!("failed to init ledger: {e}"))?;
+
+        // Resolve the inference port (zed IPC bridge or MediaRouter fallback).
+        let inference = hkask_inference::resolve_inference_port().await;
+
+        // Initialize the content guard with mandatory scanners.
+        let guard_config = hkask_guard::GuardConfig::from_env();
+        let guard = hkask_guard::ContentGuard::mandatory(&guard_config);
+
+        // Ensure the operator account exists.
+        let operator_account = "operator".to_string();
+        let asset = "credits".to_string();
+        ledger
+            .ensure_account(&operator_account, "local_swarm")
+            .map_err(|e| format!("failed to ensure operator account: {e}"))?;
+
+        Ok(Self {
+            ledger: std::sync::Arc::new(ledger),
+            inference,
+            guard: std::sync::Arc::new(guard),
+            operator_account,
+            asset,
+        })
+    }
+
+    /// The operator's current ledger balance. Returns `None` on query error
+    /// (the `.rules` trap — never fabricate a zero balance on a failed
+    /// measurement).
+    fn balance(&self) -> Option<i64> {
+        self.ledger
+            .balance(&self.operator_account, Some(&self.asset))
+            .ok()
+    }
+
+    /// Deposit credits into the operator's account. Returns the new balance.
+    /// Used by `swarm_fund_local`.
+    fn fund(&self, amount: i64) -> Result<i64, String> {
+        if amount <= 0 {
+            return Err("fund amount must be positive".to_string());
+        }
+        let tx_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let reference = format!("fund-{tx_id}");
+        let tx = hkask_ledger::LedgerTransaction {
+            id: tx_id,
+            timestamp: now,
+            reference,
+            postings: vec![hkask_ledger::Posting {
+                source: "external".to_string(),
+                destination: self.operator_account.clone(),
+                asset: self.asset.clone(),
+                amount,
+            }],
+            metadata: serde_json::json!({ "action": "fund" }),
+        };
+        self.ledger
+            .commit(&tx)
+            .map_err(|e| format!("ledger commit failed: {e}"))?;
+        self.balance().ok_or_else(|| {
+            "balance query failed after fund — ledger may be in a bad state".to_string()
+        })
+    }
+
+    /// Debit credits from the operator's account. Returns the new balance.
+    /// Returns `Err(PaymentRequired)` if the balance is insufficient.
+    fn debit(&self, amount: i64, reference: &str) -> Result<i64, SwarmError> {
+        if amount <= 0 {
+            return Err(SwarmError::PaymentRequired(
+                "debit amount must be positive".to_string(),
+            ));
+        }
+        let balance = self.balance().ok_or_else(|| {
+            SwarmError::Unavailable("ledger balance query failed — cannot verify funds".to_string())
+        })?;
+        if balance < amount {
+            return Err(SwarmError::PaymentRequired(format!(
+                "insufficient local credits: have {balance}, need {amount} \
+                 — fund via swarm_fund_local"
+            )));
+        }
+        let tx_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        let tx = hkask_ledger::LedgerTransaction {
+            id: tx_id,
+            timestamp: now,
+            reference: reference.to_string(),
+            postings: vec![hkask_ledger::Posting {
+                source: self.operator_account.clone(),
+                destination: "external".to_string(),
+                asset: self.asset.clone(),
+                amount,
+            }],
+            metadata: serde_json::json!({ "action": "debit" }),
+        };
+        self.ledger
+            .commit(&tx)
+            .map_err(|e| SwarmError::Unavailable(format!("ledger commit failed: {e}")))?;
+        self.balance().ok_or_else(|| {
+            SwarmError::Unavailable(
+                "balance query failed after debit — ledger may be in a bad state".to_string(),
+            )
+        })
+    }
+
+    /// Scan input text through the content guard. Returns `Err` if the guard
+    /// rejects the input (prompt injection, role override, etc.).
+    fn scan_input(&self, text: &str) -> Result<(), SwarmError> {
+        let result = self.guard.scan_input(text);
+        if !result.passed {
+            let violations: Vec<String> = result
+                .violations
+                .iter()
+                .map(|v| format!("{}: {}", v.scanner, v.description))
+                .collect();
+            return Err(SwarmError::Unavailable(format!(
+                "input guard rejected: {}",
+                violations.join("; ")
+            )));
+        }
+        Ok(())
+    }
+
+    /// Scan output text through the content guard. Returns the (possibly
+    /// sanitized) output text, or `Err` if canary exfiltration is detected.
+    fn scan_output(&self, text: &str) -> Result<String, SwarmError> {
+        let result = self.guard.scan_output(text);
+        if self.guard.check_canary(text) {
+            return Err(SwarmError::Unavailable(
+                "canary token detected in output — system prompt exfiltration suspected"
+                    .to_string(),
+            ));
+        }
+        if !result.passed {
+            tracing::warn!(
+                target: "hkask.mcp.swarm",
+                violations = ?result.violations,
+                "output guard violations — sanitizing"
+            );
+        }
+        Ok(result.output.content(text).to_string())
+    }
+
+    /// Execute a local agent: scan input → call inference → scan output →
+    /// debit ledger. Returns the response text, model, token usage, and
+    /// remaining balance.
+    async fn delegate(
+        &self,
+        agent: &LocalAgentCard,
+        task: &str,
+        credits_authorized: u32,
+        max_credits_per_dispatch: u32,
+    ) -> Result<LocalDelegateResult, SwarmError> {
+        // Strip leading @mentions (defense-in-depth, mirrors ABW delegate).
+        let task_clean = strip_leading_mentions(task);
+
+        // Scan the input through the guard.
+        self.scan_input(&task_clean)?;
+
+        // Check the per-dispatch ceiling.
+        if credits_authorized > max_credits_per_dispatch {
+            return Err(SwarmError::PaymentRequired(format!(
+                "credits_authorized {credits_authorized} exceeds per-dispatch ceiling \
+                 {max_credits_per_dispatch} (raise HKASK_ABW_MAX_CREDITS to authorize)"
+            )));
+        }
+
+        // Check the ledger balance — the operator must have funded it.
+        // The cost is `credits_authorized` (the operator's declared budget for
+        // this call). We debit after the call completes, using actual token
+        // usage if available, capped at `credits_authorized`.
+        let balance = self.balance().ok_or_else(|| {
+            SwarmError::Unavailable("ledger balance query failed — cannot verify funds".to_string())
+        })?;
+        if balance < i64::from(credits_authorized) {
+            return Err(SwarmError::PaymentRequired(format!(
+                "insufficient local credits: have {balance}, need {credits_authorized} \
+                 — fund via swarm_fund_local"
+            )));
+        }
+
+        // Build the prompt: system prompt + task.
+        let system_prompt = agent
+            .capabilities
+            .system_prompt
+            .as_deref()
+            .unwrap_or("You are a helpful assistant.");
+        let prompt = format!("{system_prompt}\n\n---\n\nTask: {task_clean}");
+
+        // Call the inference port.
+        let params = hkask_types::LLMParameters::default();
+        let model_override = if agent.capabilities.model.is_empty() {
+            None
+        } else {
+            Some(agent.capabilities.model.clone())
+        };
+        let result = self
+            .inference
+            .generate_with_model(&prompt, &params, model_override.as_deref(), None)
+            .await
+            .map_err(|e| SwarmError::UpstreamModelError {
+                provider: "local".to_string(),
+                message: format!("inference failed: {e}"),
+            })?;
+
+        // Scan the output through the guard.
+        let output_text = self.scan_output(&result.text)?;
+
+        // Compute the cost: 1 credit per 1000 tokens (mirrors ABW's
+        // `execution_fee`), capped at `credits_authorized`.
+        let tokens = i64::from(result.usage.total_tokens);
+        let base_cost = std::cmp::max(1, tokens / 1000);
+        let cost = std::cmp::min(base_cost, i64::from(credits_authorized));
+
+        // Debit the ledger.
+        let reference = format!("delegate-{}-{}", agent.agent_id, uuid::Uuid::new_v4());
+        let new_balance = self.debit(cost, &reference)?;
+
+        Ok(LocalDelegateResult {
+            agent_id: agent.agent_id.clone(),
+            response: output_text,
+            model: result.model,
+            tokens_used: tokens,
+            cost,
+            balance: new_balance,
+        })
+    }
+}
+
+/// Result of a local delegation.
+#[derive(Debug, Clone, serde::Serialize)]
+struct LocalDelegateResult {
+    agent_id: String,
+    response: String,
+    model: String,
+    tokens_used: i64,
+    cost: i64,
+    balance: i64,
+}
+
 /// Inspect a 200-response body for ABW's embedded upstream-error pattern.
 /// Returns a typed `SwarmError` when the payload is an error in disguise.
 fn detect_embedded_error(value: &serde_json::Value) -> Option<SwarmError> {
@@ -963,6 +1281,29 @@ pub struct CreateAppRequest {
     pub session_id: String,
 }
 
+// ── Local mode request types (v2 §15 Slice 9) ──────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FundLocalRequest {
+    /// Number of local credits to deposit into the operator's ledger
+    /// account. Must be positive.
+    pub credits: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DelegateLocalRequest {
+    /// The agent id to delegate to. Must exist in the local agent registry
+    /// (`agents/local/curated/<id>/agent_card.json`).
+    pub agent_name: String,
+    /// The task text to send to the agent. Leading @mentions are stripped
+    /// (defense-in-depth, mirrors ABW delegate).
+    pub task: String,
+    /// The maximum credits the operator authorizes for this call. The actual
+    /// cost is `min(1 credit per 1000 tokens, credits_authorized)`. Must not
+    /// exceed the per-dispatch ceiling (`HKASK_ABW_MAX_CREDITS`, default 50).
+    pub credits_authorized: u32,
+}
+
 // ── Server struct ──────────────────────────────────────────────────────────
 
 hkask_mcp_server::mcp_server!(
@@ -970,6 +1311,7 @@ hkask_mcp_server::mcp_server!(
         pub client: std::sync::Arc<SwarmClient>,
         pub consent: std::sync::Arc<ConsentStore>,
         pub local_registry: std::sync::Arc<LocalAgentRegistry>,
+        pub local_runtime: std::sync::Arc<LazyLocalSwarmRuntime>,
     }
 );
 
@@ -2121,6 +2463,82 @@ impl SwarmServer {
         })
         .await
     }
+
+    // ── Local mode tools (v2 §15 Slice 9) ───────────────────────────────────
+
+    /// Fund the local swarm ledger. The operator deposits credits that
+    /// `swarm_delegate_local` debits per call. The ledger must be
+    /// operator-funded — no auto-replenishment (§15.6 — the strongest
+    /// objection: a synthetic ledger breaks the corrective feedback loop).
+    #[tool(
+        description = "Deposit local credits into the swarm ledger. The operator funds the local economy — no auto-replenishment. If unfunded, swarm_delegate_local returns PaymentRequired. Returns the new balance."
+    )]
+    pub async fn swarm_fund_local(&self, parameters: Parameters<FundLocalRequest>) -> String {
+        execute_tool_semantic(self, "swarm_fund_local", Some("pko"), async {
+            let req = parameters.0;
+            if req.credits <= 0 {
+                return Err(McpToolError::invalid_argument(
+                    "credits must be positive".to_string(),
+                ));
+            }
+            let runtime = self.local_runtime.get_or_init().await.map_err(|e| {
+                McpToolError::unavailable(format!("local swarm runtime initialization failed: {e}"))
+            })?;
+            let new_balance = runtime.fund(req.credits).map_err(McpToolError::internal)?;
+            Ok(serde_json::json!({
+                "funded": req.credits,
+                "balance": new_balance,
+                "asset": "credits",
+            }))
+        })
+        .await
+    }
+
+    /// Delegate a task to a local agent. The agent must exist in the local
+    /// registry (`agents/local/curated/<id>/agent_card.json`). The task is
+    /// scanned by the content guard, executed via `hkask-inference`, and the
+    /// output is scanned for secret leakage + canary exfiltration. The
+    /// ledger is debited per token (1 credit / 1000 tokens, capped at
+    /// `credits_authorized`). No consent token — the balance check is the
+    /// gate (§15.1.2 — rejected consent tokens on local tools).
+    #[tool(
+        description = "Delegate a task to a local agent (from agents/local/curated/). Executes via hkask-inference (Ollama/cloud), scans I/O via hkask-guard, debits the local ledger per token. No ABW calls. No consent token — the balance check is the gate. Returns the response, model, token usage, cost, and remaining balance."
+    )]
+    pub async fn swarm_delegate_local(
+        &self,
+        parameters: Parameters<DelegateLocalRequest>,
+    ) -> String {
+        execute_tool_semantic(self, "swarm_delegate_local", Some("pko"), async {
+            let req = parameters.0;
+            if req.agent_name.trim().is_empty() || req.task.trim().is_empty() {
+                return Err(McpToolError::invalid_argument(
+                    "agent_name and task must be non-empty".to_string(),
+                ));
+            }
+            let runtime = self.local_runtime.get_or_init().await.map_err(|e| {
+                McpToolError::unavailable(format!(
+                    "local swarm runtime initialization failed: {e}"
+                ))
+            })?;
+            // Look up the agent in the local registry.
+            let agent = self.local_registry.get(&req.agent_name).ok_or_else(|| {
+                McpToolError::not_found(format!(
+                    "agent '{}' not found in local registry — load agents from agents/local/curated/<id>/agent_card.json",
+                    req.agent_name
+                ))
+            })?;
+            // Execute via the local runtime.
+            let ceiling = self.client.config().max_credits_per_dispatch;
+            let result = runtime
+                .delegate(&agent, &req.task, req.credits_authorized, ceiling)
+                .await
+                .map_err(SwarmError::into_tool_error)?;
+            Ok(serde_json::to_value(&result).unwrap_or_else(|_| {
+                serde_json::json!({ "error": "failed to serialize result" })
+            }))
+        })
+        .await
+    }
 }
 
 #[rmcp::tool_handler(router = Self::combined_router())]
@@ -2167,6 +2585,32 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
                     );
                 }
             }
+
+            // Construct the local swarm runtime (ledger + inference + guard).
+            // This is always constructed — even in Abw mode, the operator can
+            // call `swarm_fund_local` / `swarm_delegate_local` to mix local
+            // execution. The ledger path defaults to
+            // `~/.hkask/swarm_ledger.db` (operator-configurable via
+            // `HKASK_SWARM_LEDGER_PATH`).
+            //
+            // The runtime is constructed lazily on first tool call (the
+            // `run_server` factory closure is sync — it cannot `.await` the
+            // inference port resolution). `LocalSwarmRuntime::lazy` stores
+            // the config; `LocalSwarmRuntime::get_or_init` does the async
+            // init on first use.
+            let ledger_path = std::env::var("HKASK_SWARM_LEDGER_PATH")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| {
+                    dirs::data_dir()
+                        .unwrap_or_else(|| std::path::Path::new(".").to_path_buf())
+                        .join("hkask")
+                        .join("swarm_ledger.db")
+                        .to_string_lossy()
+                        .to_string()
+                });
+            let local_runtime = std::sync::Arc::new(LazyLocalSwarmRuntime::lazy(ledger_path));
+
             Ok(SwarmServer::new(
                 ctx.webid,
                 std::sync::Arc::new(SwarmClient::new(
@@ -2179,6 +2623,7 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
                 )),
                 std::sync::Arc::new(ConsentStore::default()),
                 local_registry,
+                local_runtime,
             ))
         },
         vec![CredentialRequirement::optional(

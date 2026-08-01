@@ -200,6 +200,7 @@ pub const BUILT_IN_MCP_SERVERS: &[BuiltinMcpServer] = &[
             "HKASK_ABW_DEFAULT_AGENT_MODEL",
             "HKASK_SWARM_MODE",
             "HKASK_LOCAL_AGENTS_DIR",
+            "HKASK_SWARM_LEDGER_PATH",
         ]),
     },
     BuiltinMcpServer {
