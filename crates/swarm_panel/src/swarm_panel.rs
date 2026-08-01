@@ -663,10 +663,17 @@ impl SwarmPanel {
     /// nothing, and populates `pending_hire` so the banner renders.
     fn begin_hire(&mut self, agent_name: String, cx: &mut Context<Self>) {
         let Some(invoker) = kask_panel::shared_tool_invoker() else {
-            self.fetch_error = Some("Tool invoker not wired.".into());
+            self.hire_error = Some("Tool invoker not wired.".into());
             cx.notify();
             return;
         };
+        // Clear any stale pending consent — a new Hire click replaces it, and
+        // a failed cost fetch must not leave a confirmable banner against an
+        // unknown cost basis (the M2 finding).
+        if self.pending_hire.take().is_some() {
+            log::info!("swarm-panel: replaced pending hire consent with a new request");
+        }
+        self.hire_error = None;
         cx.spawn(async move |this, cx| {
             let result = invoker
                 .invoke_tool(
@@ -717,13 +724,13 @@ impl SwarmPanel {
                                 });
                             }
                             None => {
-                                this.fetch_error =
+                                this.hire_error =
                                     Some(format!("Failed to parse hire cost: {output}").into());
                             }
                         }
                     }
                     Err(err) => {
-                        this.fetch_error =
+                        this.hire_error =
                             Some(format!("Failed to estimate hire cost: {err}").into());
                     }
                 }
@@ -743,13 +750,13 @@ impl SwarmPanel {
             return;
         };
         let Some(workspace_id) = self.selected_workspace.clone() else {
-            self.fetch_error =
+            self.hire_error =
                 Some("No swarm selected to hire into. Create a workspace on ABW first.".into());
             cx.notify();
             return;
         };
         let Some(invoker) = kask_panel::shared_tool_invoker() else {
-            self.fetch_error = Some("Tool invoker not wired.".into());
+            self.hire_error = Some("Tool invoker not wired.".into());
             cx.notify();
             return;
         };
@@ -787,7 +794,7 @@ impl SwarmPanel {
                 Err(err) => {
                     this.update(cx, |this, cx| {
                         this.spend_in_flight = None;
-                        this.fetch_error = Some(format!("Consent failed: {err}").into());
+                        this.hire_error = Some(format!("Consent failed: {err}").into());
                         cx.notify();
                     })
                     .ok();
@@ -798,7 +805,7 @@ impl SwarmPanel {
             let Some(token) = token else {
                 this.update(cx, |this, cx| {
                     this.spend_in_flight = None;
-                    this.fetch_error = Some("Consent did not return a token.".into());
+                    this.hire_error = Some("Consent did not return a token.".into());
                     cx.notify();
                 })
                 .ok();
@@ -832,7 +839,7 @@ impl SwarmPanel {
                         this.fetch_all(cx);
                     }
                     Err(err) => {
-                        this.fetch_error = Some(format!("Hire failed: {err}").into());
+                        this.hire_error = Some(format!("Hire failed: {err}").into());
                     }
                 }
                 cx.notify();
@@ -992,16 +999,51 @@ impl SwarmPanel {
 
         cx.spawn(async move |this, cx| {
             // Mint a consent token per agent to hire (each hire is gated).
+            // Fetch the real hire cost per agent first (BH-02): a hardcoded
+            // `credits_authorized: 5` would under-authorize an agent that
+            // costs 20, and the server's re-verify would reject the hire —
+            // but only after the workspace was already created. Fetching the
+            // cost up front lets us abort before any ABW mutation and pass
+            // the real ceiling to the consent token.
             // A spend path must not silently degrade: if any consent mint
             // fails, abort the create rather than hiring a partial team.
             let mut consent_tokens = Vec::new();
             let mut consent_failures = Vec::new();
             for agent in &agents {
+                // Step 1: fetch the real hire cost.
+                let cost_result = invoker
+                    .invoke_tool(
+                        SWARM_SERVER,
+                        "swarm_hire_cost",
+                        json!({ "agent_name": agent }),
+                    )
+                    .await;
+                let credits = match cost_result {
+                    Ok(output) => {
+                        let parsed = serde_json::from_str::<serde_json::Value>(&output)
+                            .ok()
+                            .and_then(|v| v.get("content").cloned().or(Some(v)));
+                        parsed
+                            .and_then(|c| c.get("total_hire_cost").and_then(|v| v.as_u64()))
+                            .map(|c| c as u32)
+                    }
+                    Err(err) => {
+                        log::warn!("swarm-panel: hire cost fetch for '{agent}' failed: {err}");
+                        consent_failures.push(agent.clone());
+                        continue;
+                    }
+                };
+                let Some(credits) = credits else {
+                    log::warn!("swarm-panel: hire cost fetch for '{agent}' returned no total_hire_cost");
+                    consent_failures.push(agent.clone());
+                    continue;
+                };
+                // Step 2: mint the consent token with the real cost.
                 match invoker
                     .invoke_tool(
                         SWARM_SERVER,
                         "swarm_request_consent",
-                        json!({ "action": "hire", "target": agent, "credits_authorized": 5 }),
+                        json!({ "action": "hire", "target": agent, "credits_authorized": credits }),
                     )
                     .await
                 {
@@ -1066,8 +1108,34 @@ impl SwarmPanel {
                         if let Some(b) = extract_wallet_balance(&output) {
                             this.wallet_balance = Some(b);
                         }
-                        this.compose.status =
-                            Some(format!("Swarm '{}' created.", name.trim()).into());
+                        // Surface any per-hire errors the server reported
+                        // (BH-07): the workspace is created but some hires may
+                        // have failed (cost re-verify, network drop). The
+                        // operator must not see "Swarm created." while all
+                        // hires silently failed.
+                        let parsed = serde_json::from_str::<serde_json::Value>(&output)
+                            .ok()
+                            .and_then(|v| v.get("content").cloned().or(Some(v)));
+                        let hire_errors = parsed
+                            .and_then(|c| c.get("hire_errors").and_then(|e| e.as_array()).cloned())
+                            .unwrap_or_default();
+                        if hire_errors.is_empty() {
+                            this.compose.status =
+                                Some(format!("Swarm '{}' created.", name.trim()).into());
+                        } else {
+                            let failed: Vec<String> = hire_errors
+                                .iter()
+                                .filter_map(|e| {
+                                    e.get("agent").and_then(|a| a.as_str()).map(str::to_string)
+                                })
+                                .collect();
+                            this.compose.status = Some(format!(
+                                "Swarm '{}' created, but {} hire(s) failed: {}",
+                                name.trim(),
+                                failed.len(),
+                                failed.join(", ")
+                            ).into());
+                        }
                         this.fetch_all(cx);
                     }
                     Err(err) => {
@@ -1100,6 +1168,58 @@ impl SwarmPanel {
         let session_id = self.compose.xaman_session.clone();
 
         cx.spawn(async move |this, cx| {
+            // Mint a curate consent token before calling the curator. With the
+            // default `curator_consent_default: false`, the server requires a
+            // token (action "curate", target "xaman") — without it, every
+            // "Ask Xaman Ek" click is rejected with ConsentDenied (BH-03).
+            // Curator calls read task content but spend no credits, so the
+            // ceiling is 0.
+            let consent = invoker
+                .invoke_tool(
+                    SWARM_SERVER,
+                    "swarm_request_consent",
+                    json!({ "action": "curate", "target": "xaman", "credits_authorized": 0 }),
+                )
+                .await;
+            let consent_token: Option<String> = match consent {
+                Ok(output) => serde_json::from_str::<serde_json::Value>(&output)
+                    .ok()
+                    .and_then(|v| v.get("content").cloned().or(Some(v)))
+                    .and_then(|c| {
+                        c.get("consent_token")
+                            .and_then(|t| t.as_str())
+                            .map(str::to_string)
+                    }),
+                Err(err) => {
+                    this.update(cx, |this, cx| {
+                        this.compose.xaman_busy = false;
+                        this.compose.xaman_response = Some(
+                            format!(
+                                "Consent for Xaman Ek failed: {err}. \
+                             Set kask.swarm.curator_consent_default true to opt in globally."
+                            )
+                            .into(),
+                        );
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+            let Some(consent_token) = consent_token else {
+                this.update(cx, |this, cx| {
+                    this.compose.xaman_busy = false;
+                    this.compose.xaman_response = Some(
+                        "Consent for Xaman Ek returned no token. \
+                         Set kask.swarm.curator_consent_default true to opt in globally."
+                            .into(),
+                    );
+                    cx.notify();
+                })
+                .ok();
+                return;
+            };
+
             let result = invoker
                 .invoke_tool(
                     SWARM_SERVER,
@@ -1108,6 +1228,7 @@ impl SwarmPanel {
                         "message": message.trim(),
                         "session_type": "composition_design",
                         "session_id": session_id,
+                        "consent_token": consent_token,
                     }),
                 )
                 .await;
@@ -1628,10 +1749,10 @@ impl SwarmPanel {
     fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let has_search = self.search_query(cx).is_some();
 
-        let message: SharedString = if self.is_fetching {
+        let message: SharedString = if self.is_fetching() {
             "Loading agents and swarms…".into()
-        } else if let Some(fetch_error) = &self.fetch_error {
-            format!("Failed to load swarm data: {fetch_error}").into()
+        } else if let Some(err) = self.visible_error() {
+            format!("Failed to load swarm data: {err}").into()
         } else {
             match self.filter {
                 SwarmFilter::All => {
@@ -1659,7 +1780,7 @@ impl SwarmPanel {
             .into()
         };
 
-        marketplace_empty_state(message, self.fetch_error.is_some())
+        marketplace_empty_state(message, self.visible_error().is_some())
     }
 
     /// The cost/consent gate banner. Renders only when a hire is pending
@@ -1793,6 +1914,24 @@ impl Render for SwarmPanel {
                             }),
                     )
                     .children(self.render_consent_banner(cx))
+                    // Hire-flow errors surface near the consent banner.
+                    .when_some(self.hire_error.clone(), |this, err| {
+                        this.child(
+                            Label::new(err)
+                                .size(LabelSize::Small)
+                                .color(Color::Warning),
+                        )
+                    })
+                    // Fetch errors surface as a status strip whenever present,
+                    // not only in the empty state (the M3 partial-degradation
+                    // finding — a working list can hide a failed source).
+                    .when_some(self.visible_error().cloned(), |this, err| {
+                        this.child(
+                            Label::new(format!("Load warning: {err}"))
+                                .size(LabelSize::XSmall)
+                                .color(Color::Warning),
+                        )
+                    })
                     // The three surfaces: Browse (discovery/sharing), Author
                     // (agents), Compose (swarms).
                     .child(
