@@ -1655,6 +1655,10 @@ impl SwarmPanel {
                 let show_clone = source == AgentSource::Cloud;
                 // Push-to-cloud button: visible for Local agents only.
                 let show_push = source == AgentSource::Local;
+                // Pre-clone agent_name for each button closure that needs it.
+                let hire_name = agent_name.clone();
+                let clone_name = agent_name.clone();
+                let push_name = agent_name.clone();
                 MarketplaceCard::new().child(
                     h_flex()
                         .w_full()
@@ -1714,49 +1718,42 @@ impl SwarmPanel {
                                     .style(ButtonStyle::Subtle)
                                     .label_size(LabelSize::XSmall)
                                     .disabled(self.spend_in_flight.is_some())
-                                    .on_click({
-                                        let agent_name = agent_name.clone();
-                                        cx.listener(
-                                            move |this, _, _, cx| {
-                                                this.begin_hire(agent_name.clone(), cx);
-                                            },
-                                        )
-                                    })),
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.begin_hire(hire_name.clone(), cx);
+                                        },
+                                    )),
                                 )
                                 .when(show_clone, |this| {
-                                    let agent_name = agent_name.clone();
                                     this.child(
                                         Button::new(
-                                            SharedString::from(format!("clone-{agent_name}")),
+                                            SharedString::from(format!("clone-{clone_name}")),
                                             "Clone to Local",
                                         )
                                         .style(ButtonStyle::Subtle)
                                         .label_size(LabelSize::XSmall)
                                         .disabled(self.spend_in_flight.is_some())
-                                        .on_click({
-                                            let agent_name = agent_name.clone();
+                                        .on_click(
                                             cx.listener(move |this, _, _, cx| {
-                                                this.clone_to_local(agent_name.clone(), cx);
-                                            })
-                                        }),
+                                                this.clone_to_local(clone_name.clone(), cx);
+                                            }),
+                                        ),
                                     )
                                 })
                                 .when(show_push, |this| {
-                                    let agent_name = agent_name.clone();
                                     this.child(
                                         Button::new(
-                                            SharedString::from(format!("push-{agent_name}")),
+                                            SharedString::from(format!("push-{push_name}")),
                                             "Push to Cloud",
                                         )
                                         .style(ButtonStyle::Subtle)
                                         .label_size(LabelSize::XSmall)
                                         .disabled(self.spend_in_flight.is_some())
-                                        .on_click({
-                                            let agent_name = agent_name.clone();
+                                        .on_click(
                                             cx.listener(move |this, _, _, cx| {
-                                                this.push_to_cloud(agent_name.clone(), cx);
-                                            })
-                                        }),
+                                                this.push_to_cloud(push_name.clone(), cx);
+                                            }),
+                                        ),
                                     )
                                 }),
                         ),
