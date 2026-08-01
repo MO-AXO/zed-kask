@@ -260,6 +260,21 @@ fn extract_wallet_balance(output: &str) -> Option<i64> {
         .and_then(|b| b.as_i64())
 }
 
+/// Parse a tool invoker response, unwrapping the `content` envelope the MCP
+/// runtime wraps around tool returns. Returns the inner `content` object when
+/// the envelope is present, or the whole value when it isn't (defensive
+/// against a future invoker that returns the payload directly). `None` means
+/// the response was not valid JSON — callers should surface a parse error,
+/// never fabricate a default.
+///
+/// This is the single seam for the panel's MCP response parsing — every call
+/// site goes through it, so a change to the envelope shape is one edit, and
+/// the parse path is unit-testable without GPUI or the tool invoker.
+fn parse_tool_response(output: &str) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_str(output).ok()?;
+    Some(value.get("content").cloned().unwrap_or(value))
+}
+
 /// Extract agent-name mentions from a Xaman Ek composition response. The
 /// curator recommends members in its `response` text and `in_progress` plan;
 /// we match `lowercase_with_underscores` tokens that look like agent names.
@@ -554,36 +569,47 @@ impl SwarmPanel {
                         this.wallet_balance = Some(b);
                     }
                     match result {
-                        Ok(output) => match serde_json::from_str::<AgentListResponse>(&output) {
-                            Ok(response) => {
-                                let agents = response
-                                    .agents
-                                    .into_iter()
-                                    .map(|a| {
-                                        SwarmEntry::Agent(AgentCard {
-                                            id: a.agent_id.unwrap_or_default(),
-                                            agent_type: a.agent_type.unwrap_or_default(),
-                                            description: a.description.unwrap_or_default(),
-                                            author: a.author.unwrap_or_default(),
-                                            executions: a
-                                                .execution_stats
-                                                .and_then(|s| s.total_executions)
-                                                .unwrap_or(0),
+                        Ok(output) => {
+                            // The invoker wraps tool output in {"content": {...}}.
+                            // Unwrap the envelope first, then deserialize the
+                            // inner content into the typed response. The prior
+                            // direct `from_str::<AgentListResponse>(&output)` always
+                            // failed because the top-level key is `content`, not
+                            // `agents` — the panel silently showed a parse error
+                            // instead of the agent list.
+                            let parsed = parse_tool_response(&output)
+                                .and_then(|c| serde_json::from_value::<AgentListResponse>(c).ok());
+                            match parsed {
+                                Some(response) => {
+                                    let agents = response
+                                        .agents
+                                        .into_iter()
+                                        .map(|a| {
+                                            SwarmEntry::Agent(AgentCard {
+                                                id: a.agent_id.unwrap_or_default(),
+                                                agent_type: a.agent_type.unwrap_or_default(),
+                                                description: a.description.unwrap_or_default(),
+                                                author: a.author.unwrap_or_default(),
+                                                executions: a
+                                                    .execution_stats
+                                                    .and_then(|s| s.total_executions)
+                                                    .unwrap_or(0),
+                                            })
                                         })
-                                    })
-                                    .collect::<Vec<_>>();
-                                // Replace agent entries, keep swarm entries.
-                                this.entries.retain(|e| matches!(e, SwarmEntry::Swarm(_)));
-                                this.entries.extend(agents);
-                                this.agents_error = None;
-                                this.filter_entries(cx);
+                                        .collect::<Vec<_>>();
+                                    // Replace agent entries, keep swarm entries.
+                                    this.entries.retain(|e| matches!(e, SwarmEntry::Swarm(_)));
+                                    this.entries.extend(agents);
+                                    this.agents_error = None;
+                                    this.filter_entries(cx);
+                                }
+                                None => {
+                                    this.agents_error =
+                                        Some(format!("Failed to parse agents: {output}").into());
+                                    this.filter_entries(cx);
+                                }
                             }
-                            Err(err) => {
-                                this.agents_error =
-                                    Some(format!("Failed to parse agents: {err}").into());
-                                this.filter_entries(cx);
-                            }
-                        },
+                        }
                         Err(err) => {
                             this.agents_error =
                                 Some(format!("Failed to list agents: {err}").into());
@@ -609,8 +635,10 @@ impl SwarmPanel {
                         if let Some(b) = extract_wallet_balance(&output) {
                             this.wallet_balance = Some(b);
                         }
-                        match serde_json::from_str::<WorkspaceListResponse>(&output) {
-                            Ok(response) => {
+                        match parse_tool_response(&output)
+                            .and_then(|c| serde_json::from_value::<WorkspaceListResponse>(c).ok())
+                        {
+                            Some(response) => {
                                 let mut swarms = response
                                     .workspaces
                                     .into_iter()
@@ -650,9 +678,9 @@ impl SwarmPanel {
                                 this.swarms_error = None;
                                 this.filter_entries(cx);
                             }
-                            Err(err) => {
+                            None => {
                                 this.swarms_error =
-                                    Some(format!("Failed to parse workspaces: {err}").into());
+                                    Some(format!("Failed to parse workspaces: {output}").into());
                                 this.filter_entries(cx);
                             }
                         }
@@ -704,17 +732,30 @@ impl SwarmPanel {
                             this.wallet_balance = Some(b);
                         }
                         // Parse the pre-flight estimate out of the content envelope.
-                        let parsed: Option<serde_json::Value> = serde_json::from_str(&output)
-                            .ok()
-                            .and_then(|v: serde_json::Value| v.get("content").cloned().or(Some(v)));
-                        match parsed {
+                        match parse_tool_response(&output) {
                             Some(content) => {
+                                // The server contract: a successful `swarm_hire_cost`
+                                // response always carries `total_hire_cost`. A missing
+                                // field means the response is malformed or ABW drifted —
+                                // the cost is *unknown*, not zero. Fabricating 0 would
+                                // show the operator a free hire and then fail at the
+                                // consent gate (which rejects `credits_authorized: 0`
+                                // for spend actions). Surface the error here instead.
+                                // Mirrors the server's own `swarm_hire_cost` guard.
+                                let Some(total_hire_cost) =
+                                    content.get("total_hire_cost").and_then(|c| c.as_u64())
+                                else {
+                                    this.hire_error = Some(
+                                        "Hire cost unknown — the server response was \
+                                         missing total_hire_cost."
+                                            .into(),
+                                    );
+                                    cx.notify();
+                                    return;
+                                };
                                 this.pending_hire = Some(PendingHire {
                                     agent_name: agent_name.clone(),
-                                    total_hire_cost: content
-                                        .get("total_hire_cost")
-                                        .and_then(|c| c.as_u64())
-                                        .unwrap_or(0),
+                                    total_hire_cost,
                                     required_cost: content
                                         .get("required_cost")
                                         .and_then(|c| c.as_u64())
@@ -796,16 +837,11 @@ impl SwarmPanel {
                 .await;
 
             let token = match consent {
-                Ok(output) => {
-                    let parsed: Option<serde_json::Value> = serde_json::from_str(&output)
-                        .ok()
-                        .and_then(|v: serde_json::Value| v.get("content").cloned().or(Some(v)));
-                    parsed.and_then(|c| {
-                        c.get("consent_token")
-                            .and_then(|t| t.as_str())
-                            .map(str::to_string)
-                    })
-                }
+                Ok(output) => parse_tool_response(&output).and_then(|c| {
+                    c.get("consent_token")
+                        .and_then(|t| t.as_str())
+                        .map(str::to_string)
+                }),
                 Err(err) => {
                     this.update(cx, |this, cx| {
                         this.spend_in_flight = None;
@@ -1053,12 +1089,9 @@ impl SwarmPanel {
                     .await;
                 let credits = match cost_result {
                     Ok(output) => {
-                        let parsed = serde_json::from_str::<serde_json::Value>(&output)
-                            .ok()
-                            .and_then(|v| v.get("content").cloned().or(Some(v)));
-                        parsed
-                            .and_then(|c| c.get("total_hire_cost").and_then(|v| v.as_u64()))
-                            .map(|c| c as u32)
+                        parse_tool_response(&output).and_then(|c| {
+                            c.get("total_hire_cost").and_then(|v| v.as_u64())
+                        }).map(|c| c as u32)
                     }
                     Err(err) => {
                         log::warn!("swarm-panel: hire cost fetch for '{agent}' failed: {err}");
@@ -1081,14 +1114,11 @@ impl SwarmPanel {
                     .await
                 {
                     Ok(output) => {
-                        let token = serde_json::from_str::<serde_json::Value>(&output)
-                            .ok()
-                            .and_then(|v| v.get("content").cloned().or(Some(v)))
-                            .and_then(|c| {
-                                c.get("consent_token")
-                                    .and_then(|t| t.as_str())
-                                    .map(str::to_string)
-                            });
+                        let token = parse_tool_response(&output).and_then(|c| {
+                            c.get("consent_token")
+                                .and_then(|t| t.as_str())
+                                .map(str::to_string)
+                        });
                         match token {
                             Some(t) => consent_tokens.push(t),
                             None => {
@@ -1146,11 +1176,10 @@ impl SwarmPanel {
                         // have failed (cost re-verify, network drop). The
                         // operator must not see "Swarm created." while all
                         // hires silently failed.
-                        let parsed = serde_json::from_str::<serde_json::Value>(&output)
-                            .ok()
-                            .and_then(|v| v.get("content").cloned().or(Some(v)));
-                        let hire_errors = parsed
-                            .and_then(|c| c.get("hire_errors").and_then(|e| e.as_array()).cloned())
+                        let hire_errors = parse_tool_response(&output)
+                            .and_then(|c| {
+                                c.get("hire_errors").and_then(|e| e.as_array()).cloned()
+                            })
                             .unwrap_or_default();
                         if hire_errors.is_empty() {
                             this.compose.status =
@@ -1218,14 +1247,11 @@ impl SwarmPanel {
                 )
                 .await;
             let consent_token: Option<String> = match consent {
-                Ok(output) => serde_json::from_str::<serde_json::Value>(&output)
-                    .ok()
-                    .and_then(|v| v.get("content").cloned().or(Some(v)))
-                    .and_then(|c| {
-                        c.get("consent_token")
-                            .and_then(|t| t.as_str())
-                            .map(str::to_string)
-                    }),
+                Ok(output) => parse_tool_response(&output).and_then(|c| {
+                    c.get("consent_token")
+                        .and_then(|t| t.as_str())
+                        .map(str::to_string)
+                }),
                 Err(err) => {
                     this.update(cx, |this, cx| {
                         this.compose.xaman_busy = false;
@@ -1275,9 +1301,7 @@ impl SwarmPanel {
                         if let Some(b) = extract_wallet_balance(&output) {
                             this.wallet_balance = Some(b);
                         }
-                        let parsed = serde_json::from_str::<serde_json::Value>(&output)
-                            .ok()
-                            .and_then(|v| v.get("content").cloned().or(Some(v)));
+                        let parsed = parse_tool_response(&output);
                         if let Some(content) = parsed {
                             // Continue the session.
                             if let Some(sid) = content.get("session_id").and_then(|s| s.as_str()) {
@@ -2278,6 +2302,87 @@ mod tests {
     fn extract_wallet_balance_absent_on_garbage() {
         assert_eq!(extract_wallet_balance("not json"), None);
         assert_eq!(extract_wallet_balance("{}"), None);
+    }
+
+    // `parse_tool_response` is the single seam for unwrapping the MCP runtime's
+    // `{"content": {...}}` envelope. Every panel call site goes through it, so
+    // a change to the envelope shape is one edit. These tests pin the contract.
+    #[test]
+    fn parse_tool_response_unwraps_content_envelope() {
+        let out = r#"{"content":{"agents":[{"agent_id":"a"}]}}"#;
+        let parsed = parse_tool_response(out).expect("valid envelope");
+        assert!(parsed.get("agents").is_some(), "inner content is unwrapped");
+    }
+
+    #[test]
+    fn parse_tool_response_returns_inner_when_no_envelope() {
+        // Defensive: if a future invoker returns the payload directly (no
+        // `content` wrapper), the helper returns the whole value rather than
+        // dropping it. This keeps the panel working across invoker changes.
+        let out = r#"{"agents":[{"agent_id":"a"}]}"#;
+        let parsed = parse_tool_response(out).expect("valid json");
+        assert!(parsed.get("agents").is_some());
+    }
+
+    #[test]
+    fn parse_tool_response_none_on_garbage() {
+        assert_eq!(parse_tool_response("not json"), None);
+        assert_eq!(parse_tool_response(""), None);
+    }
+
+    // The `fetch_all` parse path was broken before the `parse_tool_response`
+    // extraction: the prior `serde_json::from_str::<AgentListResponse>(&output)`
+    // targeted the inner content shape but the response is wrapped in
+    // `{"content": {...}}`, so the top-level key was `content`, not `agents` —
+    // every parse failed silently. This test pins the fixed path: unwrap the
+    // envelope, then deserialize the inner content into the typed response.
+    #[test]
+    fn fetch_all_parse_path_unwraps_envelope_before_typed_deserialize() {
+        let out = r#"{"content":{"count":1,"agents":[{"agent_id":"sensor_advisor","agent_type":"research","description":"d","author":"a","execution_stats":{"total_executions":5}}]}}"#;
+        let parsed = parse_tool_response(out).expect("envelope");
+        let response: AgentListResponse =
+            serde_json::from_value(parsed).expect("inner content deserializes");
+        assert_eq!(response.agents.len(), 1);
+        assert_eq!(
+            response.agents[0].agent_id.as_deref(),
+            Some("sensor_advisor")
+        );
+        assert_eq!(
+            response.agents[0]
+                .execution_stats
+                .as_ref()
+                .and_then(|s| s.total_executions),
+            Some(5)
+        );
+    }
+
+    // The workspace parse path mirrors the agents path.
+    #[test]
+    fn fetch_all_parse_path_unwraps_envelope_for_workspaces() {
+        let out = r#"{"content":{"workspaces":[{"id":"ws1","name":"Team","agent_count":3,"workspace_budget":100,"workspace_remaining":40}]}}"#;
+        let parsed = parse_tool_response(out).expect("envelope");
+        let response: WorkspaceListResponse =
+            serde_json::from_value(parsed).expect("inner content deserializes");
+        assert_eq!(response.workspaces.len(), 1);
+        assert_eq!(response.workspaces[0].id.as_deref(), Some("ws1"));
+        assert_eq!(response.workspaces[0].agent_count, Some(3));
+    }
+
+    // Pin the consent-token response field name. The panel extracts
+    // `consent_token` from the `swarm_request_consent` response at three sites
+    // (confirm_hire, create_swarm, ask_xaman). If the server renames the field,
+    // all three break silently — the panel shows "Consent did not return a token"
+    // with no indication that the contract drifted. This test pins the field
+    // name the server emits, so a rename fails here first.
+    #[test]
+    fn consent_response_field_name_is_consent_token() {
+        let out = r#"{"content":{"consent_token":"hkask-consent-deadbeef","action":"hire","target":"a","credits_authorized":5}}"#;
+        let parsed = parse_tool_response(out).expect("envelope");
+        assert_eq!(
+            parsed.get("consent_token").and_then(|t| t.as_str()),
+            Some("hkask-consent-deadbeef"),
+            "swarm_request_consent must return the token under `consent_token`"
+        );
     }
 
     // Steer mode: the system prompt must name the `swarm-intelligence` skill

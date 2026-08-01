@@ -56,6 +56,14 @@ pub struct SwarmConfig {
 
 impl Default for SwarmConfig {
     fn default() -> Self {
+        // These defaults MUST stay in sync with `KaskSwarmSettings::default()` in
+        // `kask/crates/kask_bridge/src/settings.rs`. The bridge emits env vars
+        // (`HKASK_ABW_*`) from its `Default`; this server reads them in `from_env`.
+        // The two `Default` impls are deliberately separate (the server crate
+        // does not depend on the bridge crate) to avoid a circular dependency —
+        // the duplication is the seam between them. If you change a default
+        // here, change it there too, and update the `swarm_settings_default_emits_no_env`
+        // test in `settings.rs`.
         Self {
             api_base_url: "https://agent-bestiary.world".to_string(),
             api_key: None,
@@ -758,9 +766,13 @@ impl SwarmServer {
     )]
     pub async fn swarm_list_agents(&self, parameters: Parameters<ListAgentsRequest>) -> String {
         execute_tool_semantic(self, "swarm_list_agents", Some("dublin-core"), async {
-            self.client
-                .require_auth()
-                .map_err(SwarmError::into_tool_error)?;
+            // The ABW `/agents` catalogue endpoint is open (no API key required).
+            // The module doc (L10) and the tool doc both say "Keyless". The prior
+            // `require_auth()` call broke the panel's primary browse surface in
+            // catalogue-only mode (the default when no key is set) — every
+            // `swarm_list_agents` call returned an Auth error. The `is_authenticated()`
+            // flag is returned in the response envelope so the caller knows the
+            // auth state and can gate authenticated-only UI accordingly.
             let req = parameters.0;
             let data = self
                 .client
@@ -1560,9 +1572,19 @@ impl SwarmServer {
                     continue;
                 };
                 // Consume the consent token for this specific hire. The token's
-                // `credits_authorized` ceiling was set by the panel from the
-                // real `swarm_hire_cost` estimate; we re-verify the actual cost
-                // against ABW below before spending (mirroring `swarm_hire`).
+                // `credits_authorized` ceiling was set by the panel from the real
+                // `swarm_hire_cost` estimate; we re-verify the actual cost against
+                // ABW below before spending (mirroring `swarm_hire`).
+                //
+                // The `cost: 0` passed to `consume` is intentional: the actual
+                // spend is not known until the ABW re-verify below, so the consent
+                // store's over-spend guard (`cost > credits_authorized`) cannot
+                // fire meaningfully here. The store's single-use + scope checks
+                // (action + target) still fire. The real over-spend guard is the
+                // `actual_cost > grant` check at L1619, which refunds on failure.
+                // This is the two-phase consume pattern: consume with cost=0 to
+                // validate scope + single-use, then re-verify against ABW, then
+                // refund if the real cost exceeds the authorized ceiling.
                 let grant = match self.consent.consume(token, "hire", agent, 0) {
                     Ok(ceiling) => ceiling,
                     Err(e) => {
