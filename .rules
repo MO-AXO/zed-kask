@@ -609,3 +609,20 @@ enforcement point, or the doc must say "not yet enforced."
 plain `HashMap` method with no taint awareness, and the FIDES Source→Sink
 block is silently bypassed. The compiler does not enforce this; it is a
 convention enforced by `RR-0026` (cargo-test kind).
+
+## MCP tool responses are wrapped in a `content` envelope — panel parse sites must unwrap before typed deserialization
+
+`execute_tool_semantic` (in `hkask-mcp-server`) wraps every tool's `Ok(Value)`
+in `McpToolOutput::new(value).to_json_string()`, producing
+`{"content": <value>}`. The `ToolPort::invoke` path returns this as a
+`serde_json::Value`, so panel call sites receive `{"content": {"agents": [...]}}`,
+not `{"agents": [...]}`. A direct `serde_json::from_str::<T>(&output)` where `T`
+expects the inner shape (e.g. `AgentListResponse { agents: Vec<...> }`) will
+always fail because the top-level key is `content`, not `agents` — the panel
+silently shows a parse error instead of the data. The panel must unwrap the
+envelope first. `swarm_panel::parse_tool_response` is the single seam for this
+— new panel call sites should use it rather than re-implementing the unwrap.
+The same pattern applies to any panel that calls
+`kask_panel::shared_tool_invoker()`. Found in `SwarmPanel::fetch_all`, where
+the agents and swarms lists were always empty because the typed deserialize
+targeted the inner content shape but the response was envelope-wrapped.
