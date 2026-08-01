@@ -425,8 +425,14 @@ impl SwarmPanel {
                     e
                 }),
                 system_prompt: cx.new(|cx| {
-                    let mut e = Editor::single_line(window, cx);
-                    e.set_placeholder_text("System prompt — the agent's instructions", window, cx);
+                    // Multi-line auto-height: system prompts are multi-paragraph
+                    // by nature (the L3 finding). Grows 4–16 lines with content.
+                    let mut e = Editor::auto_height(4, 16, window, cx);
+                    e.set_placeholder_text(
+                        "System prompt — the agent's instructions (multiple lines supported)",
+                        window,
+                        cx,
+                    );
                     e
                 }),
                 agent_type: "research".to_string(),
