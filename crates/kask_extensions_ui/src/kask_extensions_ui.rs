@@ -246,7 +246,11 @@ impl KaskExtensionsPage {
                 futures::AsyncReadExt::read_to_end(response.body_mut(), &mut body)
                     .await
                     .context("error reading kask skills response")?;
-                if response.status().is_client_error() {
+                // zed-kask: surface the server's response body for both 4xx
+                // and 5xx — the collab server returns actionable error text
+                // (e.g. marketplace-not-configured 501s) that the user should
+                // see, not a JSON parse failure.
+                if response.status().is_client_error() || response.status().is_server_error() {
                     let text = String::from_utf8_lossy(body.as_slice());
                     anyhow::bail!(
                         "status error {}, response: {text:?}",
@@ -267,15 +271,15 @@ impl KaskExtensionsPage {
                         this.filter_extension_entries(cx);
                     }
                     Err(err) => {
-                        let summary = format!("{err:#}");
-                        this.fetch_error = Some(
-                            summary
-                                .lines()
-                                .next()
-                                .unwrap_or("unknown error")
-                                .to_string()
-                                .into(),
-                        );
+                        // The root cause is the actionable line — the outer
+                        // anyhow context ("error reading kask skills
+                        // response") is the least informative fragment.
+                        let root_cause = err
+                            .chain()
+                            .last()
+                            .map(|cause| cause.to_string())
+                            .unwrap_or_else(|| format!("{err:#}"));
+                        this.fetch_error = Some(root_cause.into());
                         this.filter_extension_entries(cx);
                         log::warn!("kask-extensions: failed to fetch skill catalog: {err:#}.");
                     }
