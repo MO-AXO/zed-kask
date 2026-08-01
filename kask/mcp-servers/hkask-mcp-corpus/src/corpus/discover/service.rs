@@ -42,8 +42,8 @@ impl DiscoveryService {
             .output_dir
             .clone()
             .unwrap_or_else(|| format!("./{}", author_slug));
-        let output_path = PathBuf::from(&output_dir);
-        let cache_dir = PathBuf::from(&req.cache_dir);
+        let output_path = crate::path_safety::contain_for_write(&output_dir)?;
+        let cache_dir = crate::path_safety::contain_for_write(&req.cache_dir)?;
 
         // Ensure output and cache directories exist
         std::fs::create_dir_all(&output_path).map_err(|e| {
