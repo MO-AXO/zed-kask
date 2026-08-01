@@ -590,6 +590,10 @@ pub fn open_curator_regulation_archive(
     }
 }
 
+/// The curator store pair: first-person episodic + shared semantic, both
+/// backed by the curator's sovereign `pod.db`.
+type CuratorStorePair = (Option<Arc<EpisodicMemory>>, Option<Arc<SemanticMemory>>);
+
 /// The curator's sovereign stores, with self-healing open.
 ///
 /// Wraps the `(episodic, semantic)` pair in an `RwLock` plus the parameters
@@ -604,7 +608,7 @@ pub fn open_curator_regulation_archive(
 /// per attempt, and a successful heal logs `info!`. This is the fail-loud
 /// half of the contract; the lazy re-open is the self-healing half.
 struct CuratorStores {
-    stores: RwLock<(Option<Arc<EpisodicMemory>>, Option<Arc<SemanticMemory>>)>,
+    stores: RwLock<CuratorStorePair>,
     passphrase: String,
     embedding_dim: usize,
     /// Set once the first post-construction failure has been logged, so a
@@ -679,7 +683,7 @@ impl CuratorStores {
     /// on a locked/absent DB) and runs at most once per call. Callers get a
     /// cloned pair of `Arc`s, so a heal mid-ingestion takes effect on the
     /// next turn.
-    fn get(&self) -> (Option<Arc<EpisodicMemory>>, Option<Arc<SemanticMemory>>) {
+    fn get(&self) -> CuratorStorePair {
         let needs_heal = match self.stores.read() {
             Ok(guard) => guard.0.is_none() || guard.1.is_none(),
             Err(_) => true, // poisoned — attempt re-open to rebuild state
@@ -910,10 +914,10 @@ impl MemoryPort for RealMemoryPort {
                         self.consolidation_cadence_secs,
                         &self.curator_stores,
                     );
-                    if let Ok(mut guard) = self.curator_consolidation.write() {
-                        if guard.is_none() {
-                            *guard = rebuilt;
-                        }
+                    if let Ok(mut guard) = self.curator_consolidation.write()
+                        && guard.is_none()
+                    {
+                        *guard = rebuilt;
                     }
                 }
             }
