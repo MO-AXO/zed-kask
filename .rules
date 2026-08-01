@@ -649,3 +649,14 @@ exit path) or detected from the `send()` result itself (the current code
 already branches on `Err` — just lower the log level there). The same
 `debug!`-on-closed-channel discipline is already used by `PtySender::shutdown`
 in the same file.
+
+# Lazy-load caches must distinguish not-loaded from loaded-empty
+
+A lazy-load cache that stores `Option<T>` and guards re-entry with
+`cached.is_none()` re-runs the load on every call when the load yields an
+empty result (`None`). The `None` sentinel is ambiguous: it means both "never
+loaded" and "loaded, got nothing." Use a separate load-attempted flag
+(`loaded: bool`) or `Option<Option<T>>` (`None` = not loaded, `Some(None)` =
+loaded-empty) so an empty result is cached after the first attempt. Found in
+`Thread::static_context`: the `is_none()` guard meant an empty curator memory
+recall fired a SQLite + embedding query on every turn for the entire session.
