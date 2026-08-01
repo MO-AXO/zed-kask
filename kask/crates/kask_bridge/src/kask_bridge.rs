@@ -56,9 +56,8 @@ pub use memory::{BridgeMemoryPort, RealMemoryPort};
 pub use settings::{
     KaskCodegraphSettings, KaskCompaniesSettings, KaskCondenserSettings, KaskCorpusSettings,
     KaskCuratorEmailSettings, KaskCuratorSettings, KaskDataServiceSettings, KaskFusionSettings,
-    KaskGuardSettings, KaskInferenceProvidersSettings, KaskMcpSettings, KaskMediaSettings,
-    KaskMemorySettings, KaskModelsSettings, KaskScenariosSettings, KaskSettings,
-    KaskTrainingSettings,
+    KaskInferenceProvidersSettings, KaskMcpSettings, KaskMediaSettings, KaskMemorySettings,
+    KaskModelsSettings, KaskScenariosSettings, KaskSettings, KaskTrainingSettings,
 };
 pub use skill_executor::BridgeManifestExecutor;
 
