@@ -109,7 +109,17 @@ fn steer_system_prompt(selected_workspace: Option<&str>) -> SharedString {
          (consume the token before spending). Do not hire or delegate without \
          first calling `swarm_request_consent` and passing the returned token to \
          the spend tool. The consent gate is the enforcement point — it must \
-         actually block, not just warn.\n"
+         actually block, not just warn.
+\
+         The per-dispatch credit ceiling (`HKASK_ABW_MAX_CREDITS`, default 50) is \
+         a hard server-side gate. `swarm_hire` and `swarm_create_swarm` refuse \
+         any hire whose actual cost exceeds the ceiling; `swarm_delegate` refuses \
+         if `credits_authorized` exceeds it. Before hiring, call `swarm_hire_cost` \
+         to check `within_budget` — if false, tell the operator to raise \
+         `HKASK_ABW_MAX_CREDITS` rather than attempting the hire. For delegation, \
+         set `credits_authorized` to the ceiling or lower; do not mint a delegate \
+         consent for more than the ceiling.
+"
     )
     .into()
 }
@@ -2447,6 +2457,17 @@ mod tests {
         assert!(
             prompt.contains("swarm_request_consent"),
             "steer prompt must reference the actual swarm_request_consent tool"
+        );
+        // The per-dispatch ceiling guidance must be present so the model
+        // doesn't attempt doomed spends (the server refuses them, but a
+        // doomed attempt wastes a turn and confuses the operator).
+        assert!(
+            prompt.contains("HKASK_ABW_MAX_CREDITS"),
+            "steer prompt must name the per-dispatch ceiling env var"
+        );
+        assert!(
+            prompt.contains("within_budget"),
+            "steer prompt must tell the model to check within_budget before hiring"
         );
     }
 
