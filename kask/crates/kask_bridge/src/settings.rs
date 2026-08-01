@@ -242,22 +242,6 @@ pub struct KaskCuratorEmailSettings {
     pub digest_interval_secs: u64,
 }
 
-/// Curator email configuration (non-secret fields).
-/// Guard / regulation configuration.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct KaskGuardSettings {
-    /// Direct-chat guard strategy: "buffer", "incremental", or "cascade_only".
-    pub direct_chat_strategy: String,
-}
-
-impl Default for KaskGuardSettings {
-    fn default() -> Self {
-        Self {
-            direct_chat_strategy: "cascade_only".to_string(),
-        }
-    }
-}
-
 /// Memory consolidation and recall configuration.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct KaskMemorySettings {
@@ -1027,17 +1011,6 @@ impl From<KaskCuratorSettingsContent> for KaskCuratorSettings {
     }
 }
 
-impl From<KaskGuardSettingsContent> for KaskGuardSettings {
-    fn from(c: KaskGuardSettingsContent) -> Self {
-        let default = Self::default();
-        Self {
-            direct_chat_strategy: c
-                .direct_chat_strategy
-                .unwrap_or(default.direct_chat_strategy),
-        }
-    }
-}
-
 impl From<KaskMemorySettingsContent> for KaskMemorySettings {
     fn from(c: KaskMemorySettingsContent) -> Self {
         let default = Self::default();
@@ -1435,14 +1408,6 @@ mod tests {
         assert_eq!(default.discovery_min_intelligence, 40.0);
     }
 
-    #[test]
-    fn guard_settings_default_strategy_is_cascade_only() {
-        assert_eq!(
-            KaskGuardSettings::default().direct_chat_strategy,
-            "cascade_only"
-        );
-    }
-
     // The absent-subsection path: when a user has a `kask` section but omits a
     // subsection, `From` hits `.unwrap_or_default()`. This test verifies ALL
     // subsections produce their intended defaults through that path.
@@ -1452,7 +1417,6 @@ mod tests {
         assert!(settings.mcp.load_default);
         assert!(settings.curator.always_on);
         assert_eq!(settings.curator.algedonic_threshold, 0.8);
-        assert_eq!(settings.guard.direct_chat_strategy, "cascade_only");
         assert!(settings.memory.auto_inject);
         assert_eq!(settings.memory.consolidation_cadence_secs, 300);
         assert!(settings.condenser.auto_compress_tool_results);
