@@ -231,7 +231,6 @@ mod tests {
     use crate::database::sqlite::SqliteDriver;
     use hkask_capability::DelegationAction;
     use hkask_capability::DelegationResource;
-    use hkask_capability::token_types::TokenSignature;
     use hkask_types::WebID;
     use std::sync::Arc;
 
@@ -252,8 +251,6 @@ mod tests {
             action: DelegationAction::Execute,
             delegated_from: from,
             delegated_to: to,
-            signature: TokenSignature([0u8; 64]),
-            public_key: hkask_types::Ed25519PublicKey([0u8; 32]),
             expires_at: None,
             attenuation_level: 0,
             max_attenuation: 7,

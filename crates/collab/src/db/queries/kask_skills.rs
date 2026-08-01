@@ -20,6 +20,183 @@ pub struct NewKaskSkillVersion {
 }
 
 impl Database {
+    /// zed-kask: Creates the kask skill marketplace tables/indexes if they
+    /// do not exist. Idempotent boot-time self-heal for self-hosted
+    /// deployments — upstream Zed applies schema out-of-band, which leaves
+    /// a fresh self-hosted collab server 500ing on `/api/kask-skills` with
+    /// no signal. Mirrors the `initialize_notification_kinds` pattern:
+    /// called from `setup_app_database` when the server serves API mode.
+    pub async fn ensure_kask_skill_tables(&self) -> Result<()> {
+        let backend = self.pool.get_database_backend();
+
+        let mut statements = vec![
+            Table::create()
+                .table(kask_skill::Entity)
+                .if_not_exists()
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill::Column::Id)
+                        .integer()
+                        .not_null()
+                        .auto_increment()
+                        .primary_key(),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill::Column::SourceUser)
+                        .text()
+                        .not_null(),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill::Column::SkillName)
+                        .text()
+                        .not_null(),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill::Column::Description)
+                        .text()
+                        .not_null(),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill::Column::LatestVersion)
+                        .text()
+                        .not_null(),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill::Column::TotalDownloadCount)
+                        .big_integer()
+                        .not_null()
+                        .default(0),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill::Column::UpvoteCount)
+                        .big_integer()
+                        .not_null()
+                        .default(0),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill::Column::DownvoteCount)
+                        .big_integer()
+                        .not_null()
+                        .default(0),
+                )
+                .to_owned(),
+            Table::create()
+                .table(kask_skill_version::Entity)
+                .if_not_exists()
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill_version::Column::KaskSkillId)
+                        .integer()
+                        .not_null(),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill_version::Column::Version)
+                        .text()
+                        .not_null(),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill_version::Column::PublishedAt)
+                        .timestamp()
+                        .not_null()
+                        .default(Expr::current_timestamp()),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill_version::Column::Dependencies)
+                        .text()
+                        .not_null()
+                        .default(""),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill_version::Column::TarballSha256)
+                        .text()
+                        .not_null(),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill_version::Column::DownloadCount)
+                        .big_integer()
+                        .not_null()
+                        .default(0),
+                )
+                .primary_key(
+                    Index::create()
+                        .col(kask_skill_version::Column::KaskSkillId)
+                        .col(kask_skill_version::Column::Version),
+                )
+                .foreign_key(
+                    sea_orm::sea_query::ForeignKey::create()
+                        .from(
+                            kask_skill_version::Entity,
+                            kask_skill_version::Column::KaskSkillId,
+                        )
+                        .to(kask_skill::Entity, kask_skill::Column::Id)
+                        .on_delete(sea_orm::sea_query::ForeignKeyAction::Cascade),
+                )
+                .to_owned(),
+            Table::create()
+                .table(kask_skill_vote::Entity)
+                .if_not_exists()
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill_vote::Column::KaskSkillId)
+                        .integer()
+                        .not_null(),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill_vote::Column::UserId)
+                        .integer()
+                        .not_null(),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill_vote::Column::Vote)
+                        .small_integer()
+                        .not_null(),
+                )
+                .col(
+                    sea_orm::sea_query::ColumnDef::new(kask_skill_vote::Column::VotedAt)
+                        .timestamp()
+                        .not_null()
+                        .default(Expr::current_timestamp()),
+                )
+                .primary_key(
+                    Index::create()
+                        .col(kask_skill_vote::Column::KaskSkillId)
+                        .col(kask_skill_vote::Column::UserId),
+                )
+                .foreign_key(
+                    sea_orm::sea_query::ForeignKey::create()
+                        .from(
+                            kask_skill_vote::Entity,
+                            kask_skill_vote::Column::KaskSkillId,
+                        )
+                        .to(kask_skill::Entity, kask_skill::Column::Id)
+                        .on_delete(sea_orm::sea_query::ForeignKeyAction::Cascade),
+                )
+                .to_owned(),
+        ];
+
+        let index_statements = vec![
+            Index::create()
+                .name("index_kask_skills_source_user_skill_name")
+                .table(kask_skill::Entity)
+                .col(kask_skill::Column::SourceUser)
+                .col(kask_skill::Column::SkillName)
+                .unique()
+                .if_not_exists()
+                .to_owned(),
+            Index::create()
+                .name("index_kask_skills_total_download_count")
+                .table(kask_skill::Entity)
+                .col(kask_skill::Column::TotalDownloadCount)
+                .if_not_exists()
+                .to_owned(),
+        ];
+
+        for statement in statements.drain(..) {
+            self.pool.execute(backend.build(&statement)).await?;
+        }
+        for statement in index_statements {
+            self.pool.execute(backend.build(&statement)).await?;
+        }
+        Ok(())
+    }
+
     /// Returns all kask skills (latest version of each), ordered by download count.
     pub async fn get_kask_skills(&self) -> Result<Vec<KaskSkillMetadata>> {
         self.transaction(|tx| async move { self.get_kask_skills_where(None, None, &tx).await })
