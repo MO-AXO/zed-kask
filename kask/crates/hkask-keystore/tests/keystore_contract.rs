@@ -7,7 +7,6 @@
 use hkask_keystore::{
     encryption::{EncryptionError, EncryptionService, derive_key},
     keychain::resolve_db_passphrase,
-    master_key::{InternalSecrets, derive_all_internal_secrets_with_version},
 };
 
 // ---------------------------------------------------------------------------
@@ -175,8 +174,6 @@ fn resolve_db_passphrase_from_env() {
     assert_eq!(&*passphrase, b"test-db-passphrase");
 }
 
-// ---------------------------------------------------------------------------
-// 6. derive_all_internal_secrets field independence
 // ---------------------------------------------------------------------------
 
 #[test]
