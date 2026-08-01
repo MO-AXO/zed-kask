@@ -84,8 +84,72 @@ resolution.
    override setting may be needed. Do not add it until the key seam is
     resolved — otherwise we mask the real bug.
 
+## Essentialist audit — D5 sovereignty keys (completed)
+
+### G1 — EXIST (deletion test): FAIL for OCAP/a2a seam, PASS for DB passphrase
+
+The `hkask-keystore` crate contains two distinct subsystems:
+
+1. **DB passphrase + encryption** (`resolve_db_passphrase_string`, `derive_key`,
+   `EncryptionService`, `Keychain::store_by_key`). Consumed by `kask_bridge/src/identity.rs`,
+   `kask_bridge/src/memory.rs`, `hkask-storage/src/core/database.rs`,
+   `hkask-services-core/src/config.rs`. **Load-bearing** — deleting this would
+   require reappearing keychain read + generation + Argon2 derivation in 4+
+   consumers. PASSES G1.
+
+2. **OCAP/a2a sovereignty secrets** (`resolve_a2a_secret`, `get_or_create_ocap_secret`,
+   `resolve_secret_chain`, `resolve_treasury_key`, `resolve_wallet_seed`,
+   `sign_wallet_bytes`, `derive_all_internal_secrets`, `derive_sub_key`,
+   `InternalSecrets`). Consumed by `main.rs` (PanelToolInvoker token minting),
+   `hkask-mcp-server/src/server/credentials.rs`, `hkask-services-core/src/config.rs`,
+   `hkask-templates/src/executor.rs`, `kask_bridge/src/skill_executor.rs`.
+   **FAILS G1** — the OCAP token is self-signed: `PanelToolInvoker` mints a
+   token with a signing key derived from `a2a_secret`, and `McpRuntime::invoke`
+   verifies the token's signature against the token's OWN embedded public key
+   (`token.verify()` in `token_types.rs:273`). The verification does not check
+   that the public key corresponds to a trusted authority. Anyone can mint a
+   valid token with any signing key. The `a2a_secret` is not verified by the
+   runtime — it's only used to sign, and the verification doesn't check the
+   signer's identity. This is security theater ("Advertised invariants need
+   enforcement points" trap from `.rules`).
+
+### G2 — SURFACE: FAIL
+
+`hkask-keystore` exposes 25+ public items. The sovereignty-secret subsystem
+alone exposes 10+ public functions (`resolve_a2a_secret`, `get_or_create_ocap_secret`,
+`resolve_secret_chain`, `resolve_treasury_key`, `resolve_wallet_seed`,
+`sign_wallet_bytes`, `derive_all_internal_secrets`, `derive_sub_key`,
+`derive_all_internal_secrets_with_version`, `InternalSecrets`). Most have zero
+or one dynamic consumers in zed-kask.
+
+### G3 — CONTRACT: FAIL
+
+`resolve_a2a_secret` is a pass-through: reads env var or keychain, returns
+bytes. The bytes are used to derive an Ed25519 signing key that signs tokens
+which verify against themselves. The entire chain adds no security beyond
+what `McpRuntime`'s gas/regulation membrane already provides.
+
+### Verdict: REMOVE the OCAP/a2a sovereignty-secret surface
+
+The OCAP/a2a seam is security theater. Remove:
+- `resolve_a2a_secret`, `get_or_create_ocap_secret`, `resolve_secret_chain`,
+  `resolve_treasury_key`, `resolve_wallet_seed`, `sign_wallet_bytes`
+- `derive_all_internal_secrets`, `derive_sub_key`, `InternalSecrets`
+- The `a2a_secret` field threaded through `PanelToolInvoker`,
+  `BridgeManifestExecutor`, `hkask-services-core/src/config.rs`,
+  `hkask-templates/src/executor.rs`, `kask_bridge/src/skill_executor.rs`
+- The `HKASK_A2A_SECRET` / `HKASK_OCAP_SECRET` env var resolution
+
+Keep:
+- `resolve_db_passphrase_string`, `derive_key`, `Keychain`, `EncryptionService`
+  (load-bearing for SQLCipher encryption)
+
 ## Next action
 
-Run the essentialist skill on D5 (sovereignty keys) as the first seam to
-evaluate, since it has the clearest deletion-test failure and would remove
-the most keychain-resolution surface area.
+Begin removing the OCAP/a2a sovereignty-secret surface. Start with the
+`a2a_secret` field threading through `main.rs` → `PanelToolInvoker` →
+`BridgeManifestExecutor` → `hkask-templates/src/executor.rs` →
+`kask_bridge/src/skill_executor.rs` → `hkask-services-core/src/config.rs`.
+Replace the OCAP token minting in `PanelToolInvoker` with a no-op token
+(since verification is theater anyway) or remove the token parameter entirely
+if `McpRuntime::invoke` can be called without governance for the panel path.
