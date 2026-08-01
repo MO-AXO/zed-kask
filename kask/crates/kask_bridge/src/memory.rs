@@ -174,25 +174,8 @@ impl RealMemoryPort {
 
         let curator_webid = WebID::from_persona(b"curator");
 
-        // Open the curator's sovereign DB (`agents/curator/pod.db`) and
-        // construct both episodic and semantic stores pointed at it. The
-        // curator MCP server reads from the same DB, so h_mems written here
-        // are visible to `curator_memory_recall` and `curator_semantic_search`.
-        //
-        // The episodic store holds curator-perspective first-person records
-        // (Curator turns, Private, `curator_webid`) — the curator's own
-        // experiential memory, mirroring the user agent's episodic loop. The
-        // semantic store holds the curator-accessible shared copy.
-        //
-        // The curator DB uses the same passphrase as the user's DB — both are
-        // SQLCipher databases under the same hKask data directory, and the
-        // passphrase is provisioned by `provision_agent` / the keychain.
-        //
-        // When the curator DB cannot be opened (missing dir, wrong
-        // passphrase, disk error), both are `None` — curator copies are
-        // silently skipped but the user's episodic + semantic records still
-        // persist. This is graceful degradation, not a hard failure.
-        let (curator_episodic, curator_semantic) = open_curator_stores(passphrase, embedding_dim);
+        // Curator stores behind the self-healing handle — see the field docs.
+        let curator_stores = Arc::new(CuratorStores::new(passphrase, embedding_dim));
 
         // Consolidation service — episodic → semantic promotion.
         // Only constructed when the cadence is non-zero; a zero cadence disables
@@ -211,35 +194,15 @@ impl RealMemoryPort {
             None
         };
 
-        // Curator consolidation service — promotes the curator's episodic
-        // h_mems (curator-perspective first-person turns) to the curator's
-        // semantic memory, mirroring the user's consolidation loop. Without
-        // this, the curator's episodic store grows unbounded and the curator
-        // never learns consolidated facts from its own experience — the
-        // asymmetry flagged in the curator-memory audit. Skipped when the
-        // cadence is zero OR when the curator stores are unavailable (graceful
-        // degradation — the curator runs without consolidation, not errors).
-        let curator_consolidation = if consolidation_cadence_secs > 0
-            && let (Some(curator_episodic), Some(curator_semantic)) =
-                (&curator_episodic, &curator_semantic)
-        {
-            let bridge = Arc::new(ConsolidationBridge::new(
-                Arc::clone(curator_episodic),
-                Arc::clone(curator_semantic),
-            ));
-            Some(Arc::new(ConsolidationService::new(
-                bridge,
-                Arc::clone(curator_semantic),
-            )))
-        } else {
-            None
-        };
+        let curator_consolidation = RwLock::new(build_curator_consolidation(
+            consolidation_cadence_secs,
+            &curator_stores,
+        ));
 
         Ok(Self {
             episodic,
             semantic,
-            curator_semantic,
-            curator_episodic,
+            curator_stores,
             embedding_port,
             embedding_model,
             user_webid,
