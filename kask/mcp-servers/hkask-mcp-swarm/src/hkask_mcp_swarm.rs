@@ -24,6 +24,13 @@
 //!
 //! Spend-mutating tools (hire/fire/delegate) are deferred to v2 behind the
 //! cost/consent gate — see `kask/docs/plans/abw-swarm-intelligence.md` §3.6.
+//!
+//! ## v2 Local mode (§15)
+//! `SwarmConfig.mode` selects between `Abw` (v1, default) and `Local`
+//! (v2). In `Local` mode, the server reads agent cards from a local
+//! directory (`agents/local/curated/`) via `LocalAgentRegistry` and will
+//! (Slice 9) execute them through `hkask-inference` + `hkask-ledger` +
+//! `hkask-guard`. No ABW calls are made in `Local` mode.
 
 use hkask_mcp_server::server::{CredentialRequirement, McpToolError, execute_tool_semantic};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
@@ -32,6 +39,57 @@ use serde::Deserialize;
 
 // ── Configuration ──────────────────────────────────────────────────────────
 
+/// Which backend the swarm server talks to.
+///
+/// `Abw` (default, v1) routes all tools to the Agent Bestiary World REST API.
+/// `Local` (v2, §15) routes to zed-kask's local substrate crates
+/// (`hkask-ledger`, `hkask-inference`, `hkask-guard`). Both tool sets are
+/// available in either mode — the operator chooses the tool explicitly.
+/// There is no `Hybrid` routing layer (§15.1.8 — rejected: the operator does
+/// the routing by choosing the tool).
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum SwarmMode {
+    /// Route to Agent Bestiary World (v1 behavior).
+    #[default]
+    Abw,
+    /// Route to local substrate crates (v2, §15).
+    Local,
+}
+
+impl std::fmt::Display for SwarmMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Abw => write!(f, "abw"),
+            Self::Local => write!(f, "local"),
+        }
+    }
+}
+
+impl std::str::FromStr for SwarmMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "abw" => Ok(Self::Abw),
+            "local" => Ok(Self::Local),
+            other => Err(format!(
+                "unknown swarm mode '{other}' — expected 'abw' or 'local'"
+            )),
+        }
+    }
+}
+
 /// Runtime configuration for the ABW client. Validated at construction.
 ///
 /// Defaults are the single source of truth; env vars override. No secrets are
@@ -39,6 +97,8 @@ use serde::Deserialize;
 /// the `ServerContext` credentials map at server construction.
 #[derive(Debug, Clone)]
 pub struct SwarmConfig {
+    /// Which backend to route to (§15). Default `Abw` (v1 behavior).
+    pub mode: SwarmMode,
     /// ABW API base URL (apex — endpoints are `/api/*` under it).
     pub api_base_url: String,
     /// Resolved ABW API key. `None` = unauthenticated (catalogue-only mode).
@@ -52,24 +112,32 @@ pub struct SwarmConfig {
     /// the default is not a code literal that goes stale when the provider
     /// renames/deprecates the model (KA-05).
     pub default_agent_model: String,
+    /// Directory containing local agent cards (`<id>/agent_card.json`),
+    /// read by `LocalAgentRegistry` in `Local` mode. Default
+    /// `agents/local/curated` relative to the working directory.
+    pub local_agents_dir: String,
 }
 
 impl Default for SwarmConfig {
     fn default() -> Self {
         // These defaults MUST stay in sync with `KaskSwarmSettings::default()` in
         // `kask/crates/kask_bridge/src/settings.rs`. The bridge emits env vars
-        // (`HKASK_ABW_*`) from its `Default`; this server reads them in `from_env`.
-        // The two `Default` impls are deliberately separate (the server crate
-        // does not depend on the bridge crate) to avoid a circular dependency —
-        // the duplication is the seam between them. If you change a default
-        // here, change it there too, and update the `swarm_settings_default_emits_no_env`
-        // test in `settings.rs`.
+        // (`HKASK_ABW_*` / `HKASK_SWARM_*`) from its `Default`; this server reads
+        // them in `from_env`. The two `Default` impls are deliberately separate
+        // (the server crate does not depend on the bridge crate) to avoid a
+        // circular dependency — the duplication is the seam between them. If
+        // you change a default here, change it there too, and update the
+        // `swarm_settings_default_emits_no_env` test in `settings.rs`.
+        // Note: `default_agent_model` is server-only (operator env var, not
+        // settings-file) — it has no counterpart here.
         Self {
+            mode: SwarmMode::default(),
             api_base_url: "https://agent-bestiary.world".to_string(),
             api_key: None,
             max_credits_per_dispatch: 50,
             curator_consent_default: false,
             default_agent_model: "claude-haiku-4-5-20251001".to_string(),
+            local_agents_dir: "agents/local/curated".to_string(),
         }
     }
 }
@@ -79,6 +147,11 @@ impl SwarmConfig {
     /// degraded operation (missing key → catalogue-only mode).
     fn from_env(api_key: Option<String>) -> (Self, Option<String>) {
         let default = Self::default();
+        let mode = std::env::var("HKASK_SWARM_MODE")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(default.mode);
         let api_base_url = std::env::var("HKASK_ABW_API_URL")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -95,22 +168,42 @@ impl SwarmConfig {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(default.default_agent_model);
-        let warning = if api_key.is_none() {
+        let local_agents_dir = std::env::var("HKASK_LOCAL_AGENTS_DIR")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(default.local_agents_dir);
+        let warning = if api_key.is_none() && mode == SwarmMode::Abw {
             Some(
-                "HKASK_ABW_API_KEY not set — swarm server in catalogue-only mode; \
+                "HKASK_ABW_API_KEY not set and mode=abw — swarm server in catalogue-only mode; \
                  authenticated tools (get_swarm, execute_agent, curate) will return Auth errors"
                     .to_string(),
             )
+        } else if mode == SwarmMode::Local {
+            // In local mode, the ABW key is irrelevant — no warning needed.
+            // But warn if the local agents dir doesn't exist or is empty, so
+            // the operator doesn't silently run with zero agents (the
+            // startup-failure-signal rule).
+            if !std::path::Path::new(&local_agents_dir).exists() {
+                Some(format!(
+                    "HKASK_SWARM_MODE=local but local agents dir '{local_agents_dir}' does not exist \
+                     — local tools will return zero agents. Create the directory and add \
+                     agent cards (<id>/agent_card.json), or set HKASK_LOCAL_AGENTS_DIR."
+                ))
+            } else {
+                None
+            }
         } else {
             None
         };
         (
             Self {
+                mode,
                 api_base_url,
                 api_key,
                 max_credits_per_dispatch,
                 curator_consent_default,
                 default_agent_model,
+                local_agents_dir,
             },
             warning,
         )
@@ -423,6 +516,135 @@ impl SwarmClient {
             );
         }
         value
+    }
+}
+
+// ── Local agent registry (v2 §15) ──────────────────────────────────────────
+//
+// Reads agent cards from a local directory (`<id>/agent_card.json`),
+// mirroring fermi's `AgentRegistry::load_from_directory`. Catalogue only —
+// execution is Slice 9 (`swarm_delegate_local`).
+//
+// The cache uses `Option<Vec>` with a `loaded` flag (not `Option<Vec>` alone)
+// to distinguish "never loaded" from "loaded, got nothing" — the
+// `Thread::static_context` `.rules` trap on lazy-load caches.
+
+/// A local agent card — the minimal subset of fermi's `AgentCard` we need for
+/// catalogue + future execution. Mirrors the JSON shape in
+/// `agents/local/curated/<id>/agent_card.json`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LocalAgentCard {
+    pub agent_id: String,
+    pub agent_type: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub accepts: Vec<String>,
+    #[serde(default)]
+    pub produces: Vec<String>,
+    #[serde(default)]
+    pub dependencies: LocalAgentDependencies,
+    #[serde(default)]
+    pub capabilities: LocalAgentCapabilities,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LocalAgentDependencies {
+    #[serde(default)]
+    pub required: Vec<String>,
+    #[serde(default)]
+    pub optional: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct LocalAgentCapabilities {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub min_provider_class: String,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+}
+
+/// Reads agent cards from a local directory. Catalogue only — no execution.
+///
+/// The directory layout mirrors fermi's `agents/curated/`:
+/// ```text
+/// agents/local/curated/
+///   market_research/
+///     agent_card.json
+///   sentiment_analyzer/
+///     agent_card.json
+/// ```
+///
+/// The cache distinguishes not-loaded from loaded-empty via the `loaded` flag
+/// (the `.rules` trap on lazy-load caches). A missing directory is not an
+/// error at load time — it surfaces as an empty list + a startup warning
+/// (emitted by `SwarmConfig::from_env`).
+pub struct LocalAgentRegistry {
+    dir: String,
+    cards: std::sync::Mutex<Option<Vec<LocalAgentCard>>>,
+}
+
+impl LocalAgentRegistry {
+    /// Construct without loading. Call `load` to populate.
+    pub fn new(dir: impl Into<String>) -> Self {
+        Self {
+            dir: dir.into(),
+            cards: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Load (or reload) agent cards from the directory. Returns the number of
+    /// cards loaded. A missing directory yields zero cards (not an error) —
+    /// the startup warning in `SwarmConfig::from_env` covers this case.
+    pub fn load(&self) -> Result<usize, String> {
+        let path = std::path::Path::new(&self.dir);
+        if !path.exists() {
+            *self.cards.lock().unwrap() = Some(Vec::new());
+            return Ok(0);
+        }
+        let mut cards = Vec::new();
+        let entries = std::fs::read_dir(path)
+            .map_err(|e| format!("failed to read local agents dir '{}': {e}", self.dir))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("readdir entry error: {e}"))?;
+            let card_path = entry.path().join("agent_card.json");
+            if !card_path.exists() {
+                continue;
+            }
+            let json = std::fs::read_to_string(&card_path)
+                .map_err(|e| format!("failed to read {}: {e}", card_path.display()))?;
+            let card: LocalAgentCard = serde_json::from_str(&json)
+                .map_err(|e| format!("failed to parse {}: {e}", card_path.display()))?;
+            cards.push(card);
+        }
+        cards.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        let count = cards.len();
+        *self.cards.lock().unwrap() = Some(cards);
+        Ok(count)
+    }
+
+    /// List all loaded cards. Returns an empty slice if not yet loaded or the
+    /// directory was empty. Call `load` first.
+    pub fn list(&self) -> Vec<LocalAgentCard> {
+        self.cards.lock().unwrap().clone().unwrap_or_default()
+    }
+
+    /// Look up a single card by agent id. Returns `None` if not loaded or not
+    /// found.
+    pub fn get(&self, agent_id: &str) -> Option<LocalAgentCard> {
+        self.cards
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|cards| cards.iter().find(|c| c.agent_id == agent_id).cloned())
+    }
+
+    /// Whether `load` has been called (regardless of result). Used to
+    /// distinguish not-loaded from loaded-empty.
+    pub fn is_loaded(&self) -> bool {
+        self.cards.lock().unwrap().is_some()
     }
 }
 
@@ -747,6 +969,7 @@ hkask_mcp_server::mcp_server!(
     pub struct SwarmServer {
         pub client: std::sync::Arc<SwarmClient>,
         pub consent: std::sync::Arc<ConsentStore>,
+        pub local_registry: std::sync::Arc<LocalAgentRegistry>,
     }
 );
 
@@ -1920,6 +2143,30 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
             if let Some(w) = warning {
                 tracing::warn!(target: "hkask.mcp.swarm", "{w}");
             }
+            // Load local agent cards (v2 §15). In Abw mode this is a no-op
+            // if the directory doesn't exist — the registry stays empty and
+            // local tools (Slice 9) will return zero agents. In Local mode
+            // the startup warning above already covers the missing-dir case.
+            let local_registry =
+                std::sync::Arc::new(LocalAgentRegistry::new(config.local_agents_dir.clone()));
+            match local_registry.load() {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!(
+                            target: "hkask.mcp.swarm",
+                            dir = %config.local_agents_dir,
+                            count,
+                            "loaded local agent cards"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "hkask.mcp.swarm",
+                        "failed to load local agent cards: {e}"
+                    );
+                }
+            }
             Ok(SwarmServer::new(
                 ctx.webid,
                 std::sync::Arc::new(SwarmClient::new(
@@ -1931,6 +2178,7 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
                     config,
                 )),
                 std::sync::Arc::new(ConsentStore::default()),
+                local_registry,
             ))
         },
         vec![CredentialRequirement::optional(
@@ -2405,5 +2653,166 @@ mod tests {
         store
             .consume(&token, "delegate", "ws-123", 1000)
             .expect("refunded delegate token should re-consume");
+    }
+
+    // ── SwarmMode parsing (v2 §15 Slice 8) ───────────────────────────────────
+
+    #[test]
+    fn swarm_mode_default_is_abw() {
+        assert_eq!(SwarmMode::default(), SwarmMode::Abw);
+    }
+
+    #[test]
+    fn swarm_mode_from_str_parses_abw() {
+        assert_eq!("abw".parse::<SwarmMode>().unwrap(), SwarmMode::Abw);
+        assert_eq!("ABW".parse::<SwarmMode>().unwrap(), SwarmMode::Abw);
+        assert_eq!(" abw ".parse::<SwarmMode>().unwrap(), SwarmMode::Abw);
+    }
+
+    #[test]
+    fn swarm_mode_from_str_parses_local() {
+        assert_eq!("local".parse::<SwarmMode>().unwrap(), SwarmMode::Local);
+        assert_eq!("LOCAL".parse::<SwarmMode>().unwrap(), SwarmMode::Local);
+    }
+
+    #[test]
+    fn swarm_mode_from_str_rejects_unknown() {
+        assert!("hybrid".parse::<SwarmMode>().is_err());
+        assert!("".parse::<SwarmMode>().is_err());
+        assert!("remote".parse::<SwarmMode>().is_err());
+    }
+
+    #[test]
+    fn swarm_mode_display_roundtrips() {
+        assert_eq!(SwarmMode::Abw.to_string(), "abw");
+        assert_eq!(SwarmMode::Local.to_string(), "local");
+    }
+
+    #[test]
+    fn swarm_config_default_mode_is_abw() {
+        let config = SwarmConfig::default();
+        assert_eq!(config.mode, SwarmMode::Abw);
+        assert_eq!(config.local_agents_dir, "agents/local/curated");
+    }
+
+    // ── LocalAgentRegistry (v2 §15 Slice 8) ─────────────────────────────────
+
+    #[test]
+    fn local_registry_missing_dir_loads_zero() {
+        let dir = std::env::temp_dir().join("hkask_swarm_test_nonexistent_dir");
+        let _ = std::fs::remove_dir_all(&dir); // clean slate
+        let registry = LocalAgentRegistry::new(dir.to_string_lossy().to_string());
+        assert!(!registry.is_loaded());
+        let count = registry.load().expect("missing dir should not error");
+        assert_eq!(count, 0);
+        assert!(registry.is_loaded());
+        assert!(registry.list().is_empty());
+        assert!(registry.get("any_agent").is_none());
+    }
+
+    #[test]
+    fn local_registry_loads_cards_from_dir() {
+        let dir = std::env::temp_dir().join("hkask_swarm_test_local_registry");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("alpha_agent")).unwrap();
+        std::fs::write(
+            dir.join("alpha_agent").join("agent_card.json"),
+            serde_json::json!({
+                "agent_id": "alpha_agent",
+                "agent_type": "research",
+                "description": "Alpha test agent",
+                "accepts": ["query"],
+                "produces": ["analysis"],
+                "dependencies": { "required": [], "optional": [] },
+                "capabilities": {
+                    "model": "ollama/qwen3:8b",
+                    "min_provider_class": "local",
+                    "system_prompt": "You are alpha."
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("beta_agent")).unwrap();
+        std::fs::write(
+            dir.join("beta_agent").join("agent_card.json"),
+            serde_json::json!({
+                "agent_id": "beta_agent",
+                "agent_type": "sentiment"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let registry = LocalAgentRegistry::new(dir.to_string_lossy().to_string());
+        let count = registry.load().expect("load should succeed");
+        assert_eq!(count, 2);
+        let cards = registry.list();
+        // Sorted by agent_id.
+        assert_eq!(cards[0].agent_id, "alpha_agent");
+        assert_eq!(cards[1].agent_id, "beta_agent");
+        let alpha = registry.get("alpha_agent").expect("alpha should be found");
+        assert_eq!(alpha.agent_type, "research");
+        assert_eq!(alpha.accepts, vec!["query".to_string()]);
+        assert_eq!(alpha.produces, vec!["analysis".to_string()]);
+        assert_eq!(alpha.capabilities.model, "ollama/qwen3:8b");
+        assert_eq!(alpha.capabilities.min_provider_class, "local");
+        // Beta has minimal fields — defaults should fill in.
+        let beta = registry.get("beta_agent").expect("beta should be found");
+        assert!(beta.accepts.is_empty());
+        assert!(beta.produces.is_empty());
+        assert!(beta.dependencies.required.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_registry_skips_dirs_without_card() {
+        let dir = std::env::temp_dir().join("hkask_swarm_test_skip_dirs");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("has_card")).unwrap();
+        std::fs::write(
+            dir.join("has_card").join("agent_card.json"),
+            serde_json::json!({ "agent_id": "has_card", "agent_type": "test" }).to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("no_card")).unwrap(); // no agent_card.json
+
+        let registry = LocalAgentRegistry::new(dir.to_string_lossy().to_string());
+        let count = registry.load().expect("load should succeed");
+        assert_eq!(count, 1);
+        assert!(registry.get("has_card").is_some());
+        assert!(registry.get("no_card").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_registry_reload_replaces_cache() {
+        let dir = std::env::temp_dir().join("hkask_swarm_test_reload");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("first")).unwrap();
+        std::fs::write(
+            dir.join("first").join("agent_card.json"),
+            serde_json::json!({ "agent_id": "first", "agent_type": "test" }).to_string(),
+        )
+        .unwrap();
+
+        let registry = LocalAgentRegistry::new(dir.to_string_lossy().to_string());
+        assert_eq!(registry.load().unwrap(), 1);
+        assert!(registry.get("first").is_some());
+
+        // Add a second card and reload.
+        std::fs::create_dir_all(dir.join("second")).unwrap();
+        std::fs::write(
+            dir.join("second").join("agent_card.json"),
+            serde_json::json!({ "agent_id": "second", "agent_type": "test" }).to_string(),
+        )
+        .unwrap();
+        assert_eq!(registry.load().unwrap(), 2);
+        assert!(registry.get("first").is_some());
+        assert!(registry.get("second").is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
