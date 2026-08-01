@@ -169,6 +169,18 @@ struct WorkspaceInfo {
     workspace_remaining: Option<u64>,
 }
 
+/// Extract the algedonic wallet balance from a tool response. The server
+/// wraps tool output in `{"content": {...}}` and attaches `wallet.balance`
+/// when authenticated. Returns `None` when absent — never a fabricated zero.
+fn extract_wallet_balance(output: &str) -> Option<i64> {
+    let value: serde_json::Value = serde_json::from_str(output).ok()?;
+    value
+        .get("content")
+        .and_then(|c| c.get("wallet"))
+        .and_then(|w| w.get("balance"))
+        .and_then(|b| b.as_i64())
+}
+
 // ── Panel ──────────────────────────────────────────────────────────────────
 
 pub struct SwarmPanel {
@@ -181,6 +193,24 @@ pub struct SwarmPanel {
     query_editor: Entity<Editor>,
     _subscriptions: [gpui::Subscription; 1],
     search_task: Option<Task<()>>,
+    /// Current ABW wallet balance (the algedonic channel). `None` = unknown
+    /// (unauthenticated or the balance query failed) — never a fabricated zero.
+    wallet_balance: Option<i64>,
+    /// In-flight consent prompt for a hire action: the agent being considered
+    /// plus its pre-flight cost estimate. `Some` renders the consent banner.
+    pending_hire: Option<PendingHire>,
+}
+
+/// A hire awaiting operator consent. The gate holds the pre-flight estimate
+/// and blocks the (v2) spend until the operator explicitly authorizes it.
+#[derive(Clone, Debug)]
+struct PendingHire {
+    agent_name: String,
+    total_hire_cost: u64,
+    required_cost: u64,
+    optional_cost: u64,
+    within_budget: bool,
+    max_credits: u32,
 }
 
 impl SwarmPanel {
@@ -205,6 +235,8 @@ impl SwarmPanel {
                 query_editor,
                 _subscriptions: subscriptions,
                 search_task: None,
+                wallet_balance: None,
+                pending_hire: None,
             };
             this.fetch_all(cx);
             this
@@ -236,6 +268,11 @@ impl SwarmPanel {
                     .await;
                 this.update(cx, |this, cx| {
                     this.is_fetching = false;
+                    if let Ok(balance) = &result
+                        && let Some(b) = extract_wallet_balance(balance)
+                    {
+                        this.wallet_balance = Some(b);
+                    }
                     match result {
                         Ok(output) => match serde_json::from_str::<AgentListResponse>(&output) {
                             Ok(response) => {
@@ -285,35 +322,40 @@ impl SwarmPanel {
                 .invoke_tool(SWARM_SERVER, "swarm_get_swarm", json!({}))
                 .await;
             this.update(cx, |this, cx| match result {
-                Ok(output) => match serde_json::from_str::<WorkspaceListResponse>(&output) {
-                    Ok(response) => {
-                        let swarms = response
-                            .workspaces
-                            .into_iter()
-                            .map(|w| {
-                                SwarmEntry::Swarm(SwarmCard {
-                                    id: w.id.unwrap_or_default(),
-                                    name: w.name.unwrap_or_default(),
-                                    description: w.description.unwrap_or_default(),
-                                    agent_count: w.agent_count.unwrap_or(0),
-                                    budget: w.workspace_budget.unwrap_or(0),
-                                    remaining: w.workspace_remaining.unwrap_or(0),
+                Ok(output) => {
+                    if let Some(b) = extract_wallet_balance(&output) {
+                        this.wallet_balance = Some(b);
+                    }
+                    match serde_json::from_str::<WorkspaceListResponse>(&output) {
+                        Ok(response) => {
+                            let swarms = response
+                                .workspaces
+                                .into_iter()
+                                .map(|w| {
+                                    SwarmEntry::Swarm(SwarmCard {
+                                        id: w.id.unwrap_or_default(),
+                                        name: w.name.unwrap_or_default(),
+                                        description: w.description.unwrap_or_default(),
+                                        agent_count: w.agent_count.unwrap_or(0),
+                                        budget: w.workspace_budget.unwrap_or(0),
+                                        remaining: w.workspace_remaining.unwrap_or(0),
+                                    })
                                 })
-                            })
-                            .collect::<Vec<_>>();
-                        // Replace swarm entries, keep agent entries.
-                        this.entries.retain(|e| matches!(e, SwarmEntry::Agent(_)));
-                        let mut swarms = swarms;
-                        swarms.extend(this.entries.drain(..));
-                        this.entries = swarms;
-                        this.filter_entries(cx);
+                                .collect::<Vec<_>>();
+                            // Replace swarm entries, keep agent entries.
+                            this.entries.retain(|e| matches!(e, SwarmEntry::Agent(_)));
+                            let mut swarms = swarms;
+                            swarms.extend(this.entries.drain(..));
+                            this.entries = swarms;
+                            this.filter_entries(cx);
+                        }
+                        Err(err) => {
+                            this.fetch_error =
+                                Some(format!("Failed to parse workspaces: {err}").into());
+                            this.filter_entries(cx);
+                        }
                     }
-                    Err(err) => {
-                        this.fetch_error =
-                            Some(format!("Failed to parse workspaces: {err}").into());
-                        this.filter_entries(cx);
-                    }
-                },
+                }
                 Err(err) => {
                     // Auth failures here are expected when no key is configured —
                     // degrade to agents-only rather than an error state.
@@ -324,6 +366,105 @@ impl SwarmPanel {
             .ok();
         })
         .detach();
+    }
+
+    /// Fetch the pre-flight hire cost for an agent and open the consent gate.
+    /// This is the entry point to the cost/consent flow: read-only, spends
+    /// nothing, and populates `pending_hire` so the banner renders.
+    fn begin_hire(&mut self, agent_name: String, cx: &mut Context<Self>) {
+        let Some(invoker) = kask_panel::shared_tool_invoker() else {
+            self.fetch_error = Some("Tool invoker not wired.".into());
+            cx.notify();
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = invoker
+                .invoke_tool(
+                    SWARM_SERVER,
+                    "swarm_hire_cost",
+                    json!({ "agent_name": agent_name }),
+                )
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(output) => {
+                        if let Some(b) = extract_wallet_balance(&output) {
+                            this.wallet_balance = Some(b);
+                        }
+                        // Parse the pre-flight estimate out of the content envelope.
+                        let parsed: Option<serde_json::Value> = serde_json::from_str(&output)
+                            .ok()
+                            .and_then(|v: serde_json::Value| v.get("content").cloned().or(Some(v)));
+                        match parsed {
+                            Some(content) => {
+                                this.pending_hire = Some(PendingHire {
+                                    agent_name: agent_name.clone(),
+                                    total_hire_cost: content
+                                        .get("total_hire_cost")
+                                        .and_then(|c| c.as_u64())
+                                        .unwrap_or(0),
+                                    required_cost: content
+                                        .get("required_cost")
+                                        .and_then(|c| c.as_u64())
+                                        .unwrap_or(0),
+                                    optional_cost: content
+                                        .get("optional_cost")
+                                        .and_then(|c| c.as_u64())
+                                        .unwrap_or(0),
+                                    within_budget: content
+                                        .get("within_budget")
+                                        .and_then(|c| c.as_bool())
+                                        .unwrap_or(true),
+                                    max_credits: content
+                                        .get("max_credits_per_dispatch")
+                                        .and_then(|c| c.as_u64())
+                                        .unwrap_or(50)
+                                        as u32,
+                                });
+                            }
+                            None => {
+                                this.fetch_error =
+                                    Some(format!("Failed to parse hire cost: {output}").into());
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        this.fetch_error =
+                            Some(format!("Failed to estimate hire cost: {err}").into());
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Operator authorized the hire. v1: the spend tool is not yet built, so
+    /// this records the consent decision and clears the gate. When the v2
+    /// `swarm_hire` tool lands, it will require this authorization to proceed.
+    fn confirm_hire(&mut self, cx: &mut Context<Self>) {
+        if let Some(pending) = self.pending_hire.take() {
+            log::info!(
+                "swarm-panel: operator authorized hire of '{}' for up to {} credits (gate passed)",
+                pending.agent_name,
+                pending.total_hire_cost
+            );
+            // TODO(slice 5): invoke `swarm_hire` with a signed
+            // `credits_authorized` token derived from this consent.
+        }
+        cx.notify();
+    }
+
+    /// Operator declined the hire — clear the gate without spending.
+    fn cancel_hire(&mut self, cx: &mut Context<Self>) {
+        if let Some(pending) = self.pending_hire.take() {
+            log::info!(
+                "swarm-panel: operator declined hire of '{}' (gate aborted)",
+                pending.agent_name
+            );
+        }
+        cx.notify();
     }
 
     fn filter_entries(&mut self, cx: &mut Context<Self>) {
@@ -388,41 +529,63 @@ impl SwarmPanel {
         cards
     }
 
-    fn render_card(&mut self, entry: SwarmEntry, _cx: &mut Context<Self>) -> MarketplaceCard {
+    fn render_card(&mut self, entry: SwarmEntry, cx: &mut Context<Self>) -> MarketplaceCard {
         match entry {
-            SwarmEntry::Agent(agent) => MarketplaceCard::new().child(
-                h_flex()
-                    .w_full()
-                    .gap_2()
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .flex_1()
-                            .gap_1()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(Label::new(agent.id.clone()).color(Color::Default))
-                                    .child(
-                                        Label::new(agent.agent_type.clone()).color(Color::Accent),
+            SwarmEntry::Agent(agent) => {
+                let agent_name = agent.id.clone();
+                MarketplaceCard::new().child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            v_flex()
+                                .min_w_0()
+                                .flex_1()
+                                .gap_1()
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(Label::new(agent.id.clone()).color(Color::Default))
+                                        .child(
+                                            Label::new(agent.agent_type.clone())
+                                                .color(Color::Accent),
+                                        )
+                                        .child(
+                                            Label::new(format!("▶ {}", agent.executions))
+                                                .color(Color::Muted),
+                                        )
+                                        .child(
+                                            Label::new(format!("by {}", agent.author))
+                                                .color(Color::Muted),
+                                        ),
+                                )
+                                .child(Label::new(agent.description.clone()).color(Color::Muted)),
+                        )
+                        .child(
+                            v_flex()
+                                .gap_1()
+                                .items_end()
+                                .child(
+                                    Label::new("Agent")
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                                .child(
+                                    Button::new(
+                                        SharedString::from(format!("hire-{agent_name}")),
+                                        "Hire…",
                                     )
-                                    .child(
-                                        Label::new(format!("▶ {}", agent.executions))
-                                            .color(Color::Muted),
-                                    )
-                                    .child(
-                                        Label::new(format!("by {}", agent.author))
-                                            .color(Color::Muted),
-                                    ),
-                            )
-                            .child(Label::new(agent.description.clone()).color(Color::Muted)),
-                    )
-                    .child(
-                        Label::new("Agent")
-                            .size(LabelSize::XSmall)
-                            .color(Color::Muted),
-                    ),
-            ),
+                                    .style(ButtonStyle::Subtle)
+                                    .label_size(LabelSize::XSmall)
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| {
+                                            this.begin_hire(agent_name.clone(), cx);
+                                        },
+                                    )),
+                                ),
+                        ),
+                )
+            }
             SwarmEntry::Swarm(swarm) => MarketplaceCard::new().child(
                 h_flex()
                     .w_full()
@@ -542,6 +705,96 @@ impl SwarmPanel {
 
         marketplace_empty_state(message, self.fetch_error.is_some())
     }
+
+    /// The cost/consent gate banner. Renders only when a hire is pending
+    /// operator authorization. Shows the pre-flight estimate and blocks the
+    /// spend until the operator explicitly confirms or cancels — the
+    /// enforcement point for the `.rules` "advertised invariants need
+    /// enforcement points" trap (the gate blocks, it does not just warn).
+    fn render_consent_banner(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let pending = self.pending_hire.clone()?;
+        let border = cx.theme().colors().border;
+        let warning = cx.theme().status().warning;
+
+        let cost_line = if pending.optional_cost > 0 {
+            format!(
+                "Hire '{}' — {} credits (required {} + optional {})",
+                pending.agent_name,
+                pending.total_hire_cost,
+                pending.required_cost,
+                pending.optional_cost
+            )
+        } else {
+            format!(
+                "Hire '{}' — {} credits",
+                pending.agent_name, pending.total_hire_cost
+            )
+        };
+
+        let budget_note = if pending.within_budget {
+            format!("Within your {}-credit dispatch limit.", pending.max_credits)
+        } else {
+            format!(
+                "Exceeds your {}-credit dispatch limit — confirm to override.",
+                pending.max_credits
+            )
+        };
+
+        Some(
+            v_flex()
+                .w_full()
+                .gap_2()
+                .p_3()
+                .rounded_sm()
+                .border_1()
+                .border_color(border)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(Label::new("Confirm spend").color(Color::Default))
+                        .child(Label::new(cost_line).size(LabelSize::Small).color(
+                            if pending.within_budget {
+                                Color::Muted
+                            } else {
+                                Color::Warning
+                            },
+                        )),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(Label::new(budget_note).size(LabelSize::XSmall).color(
+                            if pending.within_budget {
+                                Color::Muted
+                            } else {
+                                Color::Warning
+                            },
+                        ))
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("confirm-hire", "Confirm")
+                                .style(ButtonStyle::Filled)
+                                .label_size(LabelSize::XSmall)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.confirm_hire(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("cancel-hire", "Cancel")
+                                .style(ButtonStyle::Subtle)
+                                .label_size(LabelSize::XSmall)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.cancel_hire(cx);
+                                })),
+                        ),
+                )
+                .when(!pending.within_budget, |this| {
+                    this.child(div().w_full().h(px(2.)).bg(warning))
+                }),
+        )
+    }
 }
 
 impl Render for SwarmPanel {
@@ -560,8 +813,24 @@ impl Render for SwarmPanel {
                             .w_full()
                             .gap_1p5()
                             .justify_between()
-                            .child(Headline::new("Agent Swarm").size(HeadlineSize::Large)),
+                            .child(Headline::new("Agent Swarm").size(HeadlineSize::Large))
+                            // The algedonic channel: the operator's ABW credit
+                            // balance is always visible when known, so a spend
+                            // never happens out of sight. Hidden when unknown
+                            // (unauthenticated) — never a fabricated zero.
+                            .when_some(self.wallet_balance, |this, balance| {
+                                this.child(
+                                    Label::new(format!("⛽ {balance} credits"))
+                                        .size(LabelSize::Small)
+                                        .color(if balance <= 0 {
+                                            Color::Warning
+                                        } else {
+                                            Color::Muted
+                                        }),
+                                )
+                            }),
                     )
+                    .children(self.render_consent_banner(cx))
                     .child(
                         h_flex()
                             .w_full()
@@ -677,8 +946,30 @@ mod tests {
         // These strings must match the #[tool] fn names in
         // `hkask-mcp-swarm/src/hkask_mcp_swarm.rs`.
         assert_eq!(SWARM_SERVER, "swarm");
-        for tool in ["swarm_list_agents", "swarm_get_swarm"] {
+        for tool in ["swarm_list_agents", "swarm_get_swarm", "swarm_hire_cost"] {
             assert!(tool.starts_with("swarm_"));
         }
+    }
+
+    // The algedonic wallet signal must survive the content envelope and never
+    // be fabricated. These pin the extraction against the server's actual
+    // output shape (`{"content": {..., "wallet": {"balance": N}}}`).
+    #[test]
+    fn extract_wallet_balance_reads_content_envelope() {
+        let out = r#"{"content":{"count":2,"wallet":{"balance":9977}}}"#;
+        assert_eq!(extract_wallet_balance(out), Some(9977));
+    }
+
+    #[test]
+    fn extract_wallet_balance_absent_when_no_wallet() {
+        // Catalogue-only mode: no wallet key → None, never a fabricated zero.
+        let out = r#"{"content":{"count":2,"authenticated":false}}"#;
+        assert_eq!(extract_wallet_balance(out), None);
+    }
+
+    #[test]
+    fn extract_wallet_balance_absent_on_garbage() {
+        assert_eq!(extract_wallet_balance("not json"), None);
+        assert_eq!(extract_wallet_balance("{}"), None);
     }
 }
