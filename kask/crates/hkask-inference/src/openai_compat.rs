@@ -71,7 +71,13 @@ fn redact_secret_tokens(body: &str) -> String {
                     .map(|prefix| prefix.len())
                     .max()
                     .unwrap_or(0);
-                let token_start = start + prefix_len;
+                // Skip whitespace after the prefix — for "Authorization: Basic abc123"
+                // the token follows a space, and without this the scan stops at
+                // that space and the secret survives.
+                let token_start = start
+                    + prefix_len
+                    + (body[start + prefix_len..].len()
+                        - body[start + prefix_len..].trim_start().len());
                 cursor = body[token_start..]
                     .find(char::is_whitespace)
                     .map(|offset| token_start + offset)
@@ -281,6 +287,17 @@ mod tests {
         let sanitized = sanitize_error_body(body);
         assert!(!sanitized.contains("abc123XYZ"), "{sanitized}");
         assert!(!sanitized.contains("hunter2"), "{sanitized}");
+    }
+
+    #[test]
+    fn sanitize_error_body_redacts_authorization_without_bearer() {
+        // The token may follow the prefix after whitespace without a "Bearer"
+        // marker (e.g. "Authorization: Basic abc123" in a proxy error page) —
+        // the redaction must skip that whitespace, not stop at it.
+        let body = "proxy error. Authorization: Basic abc123 done";
+        let sanitized = sanitize_error_body(body);
+        assert!(!sanitized.contains("abc123"), "{sanitized}");
+        assert!(sanitized.contains("done"), "{sanitized}");
     }
 
     #[test]
