@@ -313,32 +313,6 @@ mod tests {
     /// and produce non-deterministic derivation results.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// Acquire the env lock and set a test master key.
-    /// Returns a guard that must be held for the duration of the test.
-    fn set_test_master_key() -> std::sync::MutexGuard<'static, ()> {
-        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: set_var is unsafe in Rust 2024. Serialized via ENV_LOCK.
-        unsafe {
-            std::env::set_var(
-                "HKASK_MASTER_KEY",
-                "xXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxXxX",
-            );
-        }
-        guard
-    }
-
-    fn set_test_master_key_hex() -> std::sync::MutexGuard<'static, ()> {
-        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: test-only env var mutation. Serialized via ENV_LOCK.
-        unsafe {
-            std::env::set_var(
-                "HKASK_MASTER_KEY",
-                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-            );
-        }
-        guard
-    }
-
     #[test]
     fn db_passphrase_string_preserves_configured_text() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

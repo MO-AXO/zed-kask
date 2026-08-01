@@ -27,24 +27,12 @@ use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Salt used for the initial Argon2id master key derivation.
-///
-/// Fixed so that the same passphrase always produces the same master key.
-/// This is not a security weakness — the Argon2id memory-hardness provides
-/// the security, and the salt's purpose is domain separation, not secrecy.
-const MASTER_KEY_SALT: [u8; 16] = [
-    b'h', b'k', b'a', b's', b'k', b'-', b'm', b'a', b's', b't', b'e', b'r', b'-', b'2', b'0', b'2',
-];
-
 /// HKDF-Extract salt for sub-key derivation.
 /// Uses a fixed application-specific salt for domain separation.
 const HKDF_SALT: &[u8; 13] = b"hkask-hkdf-v1";
 
 /// Output length for HKDF expansion (256 bits = 32 bytes = AES-256 / HMAC-SHA256 key size).
 const SUB_KEY_LEN: usize = 32;
-
-/// Current key version.
-pub const CURRENT_KEY_VERSION: u32 = 1;
 
 /// Derive a 32-byte sub-key from a master key using HKDF-SHA256.
 ///
@@ -98,12 +86,6 @@ pub fn derive_sub_key_with_version(
     derive_sub_key(master_key, &versioned_context)
 }
 
-/// Derive a versioned sub-key and return it as a hex-encoded string.
-fn derive_sub_key_hex_versioned(master_key: &[u8], context: &str, key_version: u32) -> String {
-    let sub_key = derive_sub_key_with_version(master_key, context, key_version);
-    hex::encode(&*sub_key)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,27 +116,5 @@ mod tests {
         let v1_b = derive_sub_key_with_version(&master_key, context, 1);
 
         assert_eq!(&*v1_a, &*v1_b, "Same version must produce same key");
-    }
-
-    #[test]
-    fn derive_all_secrets_with_version_is_deterministic() {
-        let passphrase = "test-passphrase-for-versioning";
-
-        let secrets_a = derive_all_internal_secrets_with_version(passphrase, 1);
-        let secrets_b = derive_all_internal_secrets_with_version(passphrase, 1);
-
-        assert_eq!(secrets_a.a2a_secret, secrets_b.a2a_secret);
-        assert_eq!(secrets_a.ocap_secret, secrets_b.ocap_secret);
-    }
-
-    #[test]
-    fn derive_all_secrets_different_versions_differ() {
-        let passphrase = "test-passphrase-for-versioning";
-
-        let secrets_v1 = derive_all_internal_secrets_with_version(passphrase, 1);
-        let secrets_v2 = derive_all_internal_secrets_with_version(passphrase, 2);
-
-        assert_ne!(secrets_v1.a2a_secret, secrets_v2.a2a_secret);
-        assert_ne!(secrets_v1.ocap_secret, secrets_v2.ocap_secret);
     }
 }
