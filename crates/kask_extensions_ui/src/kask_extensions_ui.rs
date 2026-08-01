@@ -12,8 +12,8 @@ use cloud_api_types::{ExtensionProvides, GetKaskSkillsResponse, KaskSkillMetadat
 use editor::Editor;
 use extension_host::ExtensionStore;
 use gpui::{
-    App, Context, Entity, EventEmitter, Focusable, InteractiveElement, ParentElement, Render,
-    Styled, Task, UniformListScrollHandle, Window, actions, point, uniform_list,
+    App, Context, Entity, EventEmitter, Focusable, ParentElement, Render, Styled, Task,
+    UniformListScrollHandle, Window, actions, point, uniform_list,
 };
 use marketplace_ui_common::{MarketplaceCard, marketplace_empty_state, marketplace_search_bar};
 use ui::{
@@ -22,7 +22,7 @@ use ui::{
 };
 use workspace::{
     Workspace,
-    item::{Item, ItemEvent, Settings},
+    item::{Item, ItemEvent},
 };
 
 actions!(
