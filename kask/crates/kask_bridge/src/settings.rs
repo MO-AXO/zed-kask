@@ -12,7 +12,7 @@ use settings::{RegisterSetting, Settings};
 use settings_content::{
     KaskCodegraphSettingsContent, KaskCompaniesSettingsContent, KaskCondenserSettingsContent,
     KaskCorpusSettingsContent, KaskCuratorEmailSettingsContent, KaskCuratorSettingsContent,
-    KaskDataServiceSettingsContent, KaskFusionSettingsContent, KaskGuardSettingsContent,
+    KaskDataServiceSettingsContent, KaskFusionSettingsContent,
     KaskInferenceProvidersSettingsContent, KaskMcpSettingsContent, KaskMediaSettingsContent,
     KaskMemorySettingsContent, KaskModelsSettingsContent, KaskScenariosSettingsContent,
     KaskSettingsContent, KaskTrainingSettingsContent,
@@ -23,7 +23,7 @@ use collections::HashMap;
 /// Kask-specific settings (the `"kask"` section in settings.json).
 ///
 /// Non-secret configuration for hKask features: MCP server load set,
-/// data-service toggles, curator/regulation/guard/memory/condenser settings.
+/// data-service toggles, curator/regulation/memory/condenser settings.
 /// API keys are stored in the keychain via `CredentialsProvider` (D9b).
 ///
 /// `Default` is the single source of truth for every subsection's defaults.
@@ -41,9 +41,6 @@ pub struct KaskSettings {
 
     /// Curator configuration.
     pub curator: KaskCuratorSettings,
-
-    /// Guard / regulation configuration.
-    pub guard: KaskGuardSettings,
 
     /// Memory consolidation and recall configuration.
     pub memory: KaskMemorySettings,
@@ -1186,7 +1183,6 @@ impl From<KaskSettingsContent> for KaskSettings {
             mcp: c.mcp.map(Into::into).unwrap_or_default(),
             data_services: c.data_services.map(Into::into).unwrap_or_default(),
             curator: c.curator.map(Into::into).unwrap_or_default(),
-            guard: c.guard.map(Into::into).unwrap_or_default(),
             memory: c.memory.map(Into::into).unwrap_or_default(),
             condenser: c.condenser.map(Into::into).unwrap_or_default(),
             codegraph: c.codegraph.map(Into::into).unwrap_or_default(),
