@@ -1733,11 +1733,12 @@ impl SwarmPanel {
                                         .style(ButtonStyle::Subtle)
                                         .label_size(LabelSize::XSmall)
                                         .disabled(self.spend_in_flight.is_some())
-                                        .on_click(
+                                        .on_click({
+                                            let agent_name = agent_name.clone();
                                             cx.listener(move |this, _, _, cx| {
                                                 this.clone_to_local(agent_name.clone(), cx);
-                                            }),
-                                        ),
+                                            })
+                                        }),
                                     )
                                 })
                                 .when(show_push, |this| {
@@ -1750,11 +1751,12 @@ impl SwarmPanel {
                                         .style(ButtonStyle::Subtle)
                                         .label_size(LabelSize::XSmall)
                                         .disabled(self.spend_in_flight.is_some())
-                                        .on_click(
+                                        .on_click({
+                                            let agent_name = agent_name.clone();
                                             cx.listener(move |this, _, _, cx| {
                                                 this.push_to_cloud(agent_name.clone(), cx);
-                                            }),
-                                        ),
+                                            })
+                                        }),
                                     )
                                 }),
                         ),
