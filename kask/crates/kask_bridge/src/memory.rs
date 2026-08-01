@@ -16,6 +16,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -41,19 +42,14 @@ use crate::inference::LanguageModelEmbeddingPort;
 pub struct RealMemoryPort {
     episodic: Arc<EpisodicMemory>,
     semantic: Arc<SemanticMemory>,
-    /// Curator's sovereign semantic store — written to `agents/curator/pod.db`,
-    /// the same DB the curator MCP server reads from. `None` when the curator
-    /// DB cannot be opened (graceful degradation — the curator copy is skipped
-    /// but the user's episodic + semantic records still persist).
-    curator_semantic: Option<Arc<SemanticMemory>>,
-    /// Curator's sovereign episodic store — written to `agents/curator/pod.db`,
-    /// mirroring `curator_semantic`. Used when `ingest_turn` receives a
-    /// `TurnRecord` whose `agent_id` is the Curator: the turn is stored as a
-    /// curator-perspective episodic h_mem (Private, `curator_webid`) so the
-    /// curator can recall its own first-person experience. `None` when the
-    /// curator DB cannot be opened — curator-perspective episodic ingestion is
-    /// skipped but the curator semantic copy (if available) still persists.
-    curator_episodic: Option<Arc<EpisodicMemory>>,
+    /// The curator's sovereign stores (`agents/curator/pod.db`) behind a
+    /// self-healing handle: when the curator DB cannot be opened at startup
+    /// (locked by a previous MCP server instance, transient I/O), the stores
+    /// are `None` and every access re-attempts the open. A successful
+    /// re-open restores curator memory without an app restart; persistent
+    /// failure is signaled with a warn-once per healing attempt, never
+    /// silently.
+    curator_stores: Arc<CuratorStores>,
     embedding_port: LanguageModelEmbeddingPort,
     embedding_model: String,
     user_webid: WebID,
@@ -65,9 +61,9 @@ pub struct RealMemoryPort {
     /// Consolidation service for the curator's stores — promotes the
     /// curator's episodic h_mems (curator-perspective first-person turns) to
     /// the curator's semantic memory, mirroring the user's consolidation loop.
-    /// `None` when consolidation is disabled OR when the curator stores are
-    /// unavailable (`curator_episodic` / `curator_semantic` is `None`).
-    curator_consolidation: Option<Arc<ConsolidationService>>,
+    /// Rebuilt when the curator stores heal after an open failure; `None`
+    /// when consolidation is disabled OR the curator stores are unavailable.
+    curator_consolidation: RwLock<Option<Arc<ConsolidationService>>>,
     /// Consolidation cadence in seconds. `0` disables the trigger for both
     /// the user and curator consolidation services.
     consolidation_cadence_secs: u64,

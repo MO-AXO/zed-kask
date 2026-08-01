@@ -36,22 +36,32 @@ pub const KASK_SKILLS_S3_PREFIX: &str = "kask-skills";
 /// server without breaking Zed account auth.
 ///
 /// Resolution order:
-/// 1. `HKASK_MARKETPLACE_URL` env var — operator/dev override.
-/// 2. `http://localhost:3000` — dev default (local kask collab server).
-///    This matches the pre-isolation `.zed/settings.json` override.
+/// 1. `HKASK_MARKETPLACE_URL` env var — operator/dev override for the
+///    split-auth case (Zed account on zed.dev, skill traffic elsewhere).
+/// 2. The client's own `server_url` (`http_client.base_url()`) — the normal
+///    self-hosted case: the kask collab server already serves
+///    `/api/kask-skills`, so no second URL is needed.
+/// 3. `http://localhost:3000` — dev fallback when the client has no URL
+///    (e.g. not logged in).
 ///
 /// Returns the base URL with no trailing slash.
-fn kask_marketplace_base_url(_http_client: &HttpClientWithUrl) -> String {
+fn kask_marketplace_base_url(http_client: &HttpClientWithUrl) -> String {
     match std::env::var("HKASK_MARKETPLACE_URL") {
         Ok(val) if !val.trim().is_empty() => val.trim_end_matches('/').to_string(),
         _ => {
-            log::warn!(
-                "HKASK_MARKETPLACE_URL not set — falling back to localhost:3000. \
-                 Marketplace operations (publish/install/vote) will fail unless a \
-                 marketplace server is running locally. Set HKASK_MARKETPLACE_URL \
-                 to point to a production marketplace."
-            );
-            "http://localhost:3000".to_string()
+            let server_url = http_client.base_url();
+            if server_url.trim().is_empty() {
+                log::warn!(
+                    "HKASK_MARKETPLACE_URL not set and the client has no server_url — \
+                     falling back to localhost:3000. Marketplace operations \
+                     (publish/install/vote) will fail unless a marketplace server \
+                     is running locally. Set HKASK_MARKETPLACE_URL to point to a \
+                     production marketplace, or log in so server_url is populated."
+                );
+                "http://localhost:3000".to_string()
+            } else {
+                server_url.trim_end_matches('/').to_string()
+            }
         }
     }
 }
