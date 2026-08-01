@@ -548,3 +548,49 @@ pub fn generate_version() -> String {
         now.hour()
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // zed-kask: pin the marketplace URL resolution order (env override →
+    // client server_url → localhost dev fallback) per the `.rules` trap
+    // "Tests must pin deliberate zed-kask deviations from upstream".
+    #[test]
+    fn env_override_wins() {
+        assert_eq!(
+            resolve_marketplace_base(
+                Some("https://market.example.com/".to_string()),
+                "https://collab.example.com".to_string(),
+            ),
+            "https://market.example.com"
+        );
+    }
+
+    #[test]
+    fn server_url_is_default() {
+        assert_eq!(
+            resolve_marketplace_base(None, "https://collab.example.com/".to_string()),
+            "https://collab.example.com"
+        );
+    }
+
+    #[test]
+    fn blank_env_override_falls_through() {
+        assert_eq!(
+            resolve_marketplace_base(
+                Some("  ".to_string()),
+                "https://collab.example.com".to_string(),
+            ),
+            "https://collab.example.com"
+        );
+    }
+
+    #[test]
+    fn empty_server_url_falls_back_to_localhost() {
+        assert_eq!(
+            resolve_marketplace_base(None, String::new()),
+            "http://localhost:3000"
+        );
+    }
+}
