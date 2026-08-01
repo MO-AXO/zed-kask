@@ -595,7 +595,7 @@ impl SwarmPanel {
                         }
                         match serde_json::from_str::<WorkspaceListResponse>(&output) {
                             Ok(response) => {
-                                let swarms = response
+                                let mut swarms = response
                                     .workspaces
                                     .into_iter()
                                     .map(|w| {
@@ -611,8 +611,7 @@ impl SwarmPanel {
                                     .collect::<Vec<_>>();
                                 // Replace swarm entries, keep agent entries.
                                 this.entries.retain(|e| matches!(e, SwarmEntry::Agent(_)));
-                                let mut swarms = swarms;
-                                swarms.extend(this.entries.drain(..));
+                                swarms.append(&mut this.entries);
                                 this.entries = swarms;
                                 // Default the hire target to the first swarm if unset,
                                 // or re-validate it if the selected swarm disappeared.
@@ -1398,7 +1397,7 @@ impl SwarmPanel {
                                                 .color(Color::Muted),
                                         ),
                                 )
-                                .child(Label::new(agent.description.clone()).color(Color::Muted)),
+                                .child(Label::new(agent.description).color(Color::Muted)),
                         )
                         .child(
                             v_flex()
@@ -1457,7 +1456,7 @@ impl SwarmPanel {
                                         .color(Color::Muted),
                                     ),
                             )
-                            .child(Label::new(swarm.description.clone()).color(Color::Muted)),
+                            .child(Label::new(swarm.description).color(Color::Muted)),
                     )
                     .child(
                         Label::new("Swarm")
