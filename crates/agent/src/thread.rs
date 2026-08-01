@@ -4734,9 +4734,7 @@ impl Thread {
         for (server_id, server_tools) in self.context_server_registry.read(cx).servers() {
             // Kask panel per-tab scoping: when the thread is scoped to a
             // specific MCP server, skip all other servers' tools.
-            if let Some(ref scope) = self.mcp_server_scope
-                && server_id.0.as_ref() != scope.as_ref()
-            {
+            if !mcp_server_in_scope(self.mcp_server_scope.as_deref(), server_id.0.as_ref()) {
                 continue;
             }
             for (tool_name, tool) in server_tools {
@@ -5525,6 +5523,15 @@ fn filter_conditional_rules(mut context: ProjectContext, active_paths: &[&str]) 
 /// tools list, the model name, the date, the user's global AGENTS.md, the
 /// sandboxing flag, and the platform flags. Stable across Rust versions
 /// (SHA-256, not `DefaultHasher`).
+/// Whether a context-server id passes the kask panel's per-tab MCP scope.
+/// `None` (upstream Zed and non-kask threads) passes every server; `Some`
+/// passes only the exact server id (case-sensitive — server ids are
+/// registry keys, not display names). Extracted as a free function so the
+/// contract is testable without constructing a `Thread`.
+fn mcp_server_in_scope(scope: Option<&str>, server_id: &str) -> bool {
+    scope.is_none_or(|s| s == server_id)
+}
+
 fn system_prompt_digest(
     project: &ProjectContext,
     available_tools: &[SharedString],
@@ -7826,6 +7833,28 @@ mod tests {
     use serde_json::json;
     use settings::LanguageModelProviderSetting;
     use std::sync::Arc;
+
+    // ── Kask panel per-tab MCP scoping ──────────────────────────────────
+
+    /// The scoping contract: no scope = all servers pass; a scope passes
+    /// only its exact server id. This pins the enforcement half of the kask
+    /// panel's per-tab tool scoping — the per-tab prompt declares "only the
+    /// `{server}` server's tools are available", and this predicate is what
+    /// makes that true in `enabled_tools`.
+    #[test]
+    fn mcp_server_scope_filters_to_named_server() {
+        // No scope — upstream Zed behavior, everything passes.
+        assert!(mcp_server_in_scope(None, "companies"));
+        assert!(mcp_server_in_scope(None, "curator"));
+        assert!(mcp_server_in_scope(None, "anything-else"));
+
+        // Scoped — exact match only.
+        assert!(mcp_server_in_scope(Some("companies"), "companies"));
+        assert!(!mcp_server_in_scope(Some("companies"), "curator"));
+        assert!(!mcp_server_in_scope(Some("companies"), "Companies")); // case-sensitive
+        assert!(!mcp_server_in_scope(Some("companies"), "company"));
+        assert!(!mcp_server_in_scope(Some("kata-kanban"), "kata_kanban"));
+    }
 
     async fn setup_thread_for_test(cx: &mut TestAppContext) -> (Entity<Thread>, ThreadEventStream) {
         cx.update(|cx| {

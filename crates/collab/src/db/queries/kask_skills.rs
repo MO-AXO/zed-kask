@@ -26,10 +26,14 @@ impl Database {
     /// a fresh self-hosted collab server 500ing on `/api/kask-skills` with
     /// no signal. Mirrors the `initialize_notification_kinds` pattern:
     /// called from `setup_app_database` when the server serves API mode.
-    pub async fn ensure_kask_skill_tables(&self) -> Result<()> {
-        let backend = self.pool.get_database_backend();
-
-        let mut statements = vec![
+    /// zed-kask: Builds the CREATE TABLE IF NOT EXISTS statements for the
+    /// kask skill marketplace. Pure statement construction, extracted for
+    /// testability (a live-Database test requires the test-support harness).
+    fn kask_skill_table_statements() -> (
+        Vec<sea_orm::sea_query::TableCreateStatement>,
+        Vec<sea_orm::sea_query::IndexCreateStatement>,
+    ) {
+        let tables = vec![
             Table::create()
                 .table(kask_skill::Entity)
                 .if_not_exists()
@@ -171,7 +175,7 @@ impl Database {
                 .to_owned(),
         ];
 
-        let index_statements = vec![
+        let indexes = vec![
             Index::create()
                 .name("index_kask_skills_source_user_skill_name")
                 .table(kask_skill::Entity)
@@ -188,11 +192,17 @@ impl Database {
                 .to_owned(),
         ];
 
-        for statement in statements.drain(..) {
-            self.pool.execute(backend.build(&statement)).await?;
+        (tables, indexes)
+    }
+
+    pub async fn ensure_kask_skill_tables(&self) -> Result<()> {
+        let backend = self.pool.get_database_backend();
+        let (tables, indexes) = Self::kask_skill_table_statements();
+        for statement in &tables {
+            self.pool.execute(backend.build(statement)).await?;
         }
-        for statement in index_statements {
-            self.pool.execute(backend.build(&statement)).await?;
+        for statement in &indexes {
+            self.pool.execute(backend.build(statement)).await?;
         }
         Ok(())
     }
@@ -582,5 +592,56 @@ fn metadata_from_skill_and_version(
         download_count: skill.total_download_count as u64,
         upvote_count: skill.upvote_count,
         downvote_count: skill.downvote_count,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sea_orm::sea_query::{PostgresQueryBuilder, SqliteQueryBuilder};
+
+    /// zed-kask: pin the self-heal schema — all statements must be
+    /// idempotent (IF NOT EXISTS) and cover the three marketplace tables.
+    /// A live-Database test requires the test-support harness; rendering
+    /// the statements pins the contract without one.
+    #[test]
+    fn kask_skill_table_statements_are_idempotent() {
+        let (tables, indexes) = Database::kask_skill_table_statements();
+
+        let table_names: Vec<String> = tables
+            .iter()
+            .map(|t| {
+                let sql = t.to_string(PostgresQueryBuilder);
+                assert!(
+                    sql.contains("IF NOT EXISTS"),
+                    "CREATE TABLE must be idempotent: {sql}"
+                );
+                sql
+            })
+            .collect();
+        assert!(table_names.iter().any(|s| s.contains("\"kask_skills\"")));
+        assert!(table_names.iter().any(|s| s.contains("\"kask_skill_versions\"")));
+        assert!(table_names.iter().any(|s| s.contains("\"kask_skill_votes\"")));
+
+        // SQLite must render too (collab supports it via the `sqlite` feature).
+        for t in &tables {
+            t.to_string(SqliteQueryBuilder);
+        }
+
+        let index_sql: Vec<String> = indexes
+            .iter()
+            .map(|i| i.to_string(PostgresQueryBuilder))
+            .collect();
+        assert!(
+            index_sql
+                .iter()
+                .all(|s| s.contains("IF NOT EXISTS")),
+            "CREATE INDEX must be idempotent: {index_sql:?}"
+        );
+        assert!(
+            index_sql
+                .iter()
+                .any(|s| s.contains("index_kask_skills_source_user_skill_name") && s.contains("UNIQUE"))
+        );
     }
 }
