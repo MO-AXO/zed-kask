@@ -2,8 +2,8 @@
 title: "Agent Bestiary World (ABW) Swarm Intelligence — Integration Plan"
 audience: [zed-kask integrators, hKask architects, ABW partnership]
 last_updated: 2026-08-01
-version: "0.4.0"
-status: "Slices 1–2 built and verified live (settings + registry + hkask-mcp-swarm with 4 read/consult tools); slice 3 (panel) next"
+version: "0.5.0"
+status: "Slices 1–3 built (settings + registry + MCP server + SwarmPanel card UI); slice 4 (cost/consent gate) next"
 domain: "composition"
 mds_categories: [composition, trust, lifecycle, curation]
 ---
@@ -329,7 +329,7 @@ graph TD
 | 0 | ~~Verify ABW API~~ **Done (2026-08-01)** — surface discovered via `/static/docs/*.md` + frontend bundles + live probes. Remaining: confirm auth header format + authenticated endpoint bodies with a real Pro API key. | Auth header format | Slices 2+ |
 | 1 | ~~**Add `BuiltinMcpServer` entry + `KaskSwarmSettings` subsection**~~ **Done (2026-08-01)** — `swarm` entry added to `BUILT_IN_MCP_SERVERS` + `IDS` + `PAIRS` (all 12 registry tests pass); `KaskSwarmSettings` (api_url, max_credits_per_dispatch=50) with `Default` as source of truth; `KaskSwarmSettingsContent` in settings_content; `HKASK_ABW_API_KEY` added to `DATA_SERVICE_CREDENTIALS`. kask_panel count test bumped 10→11. | Server registers; settings resolve; 101/101 kask_bridge + 25/25 kask_panel tests pass. | — |
 | 2 | ~~**Build `hkask-mcp-swarm` binary**~~ **Done (2026-08-01, v1 read surface)** — new crate at `kask/mcp-servers/hkask-mcp-swarm` (workspace member). `SwarmConfig` (default + env override), `SwarmError` (8 variants incl. body-embedded `AgentNotFunded`/`UpstreamModelError`), `SwarmClient` seam. **4 tools** (not 7 — spend tools deferred to v2 behind the consent gate): `swarm_list_agents` (keyless-capable), `swarm_get_swarm`, `swarm_execute_agent`, `swarm_curate`. Verified end-to-end via an MCP stdio probe against the live API with the real key: catalogue returns real agents, `get_swarm` returns the operator's real workspaces. 6/6 unit tests. | Agent can call all 4 tools against the live API; body-embedded error mapping exercised. | Slice 1 |
-| 3 | **Build `SwarmPanel` shell** — `Toggle`/`ToggleFocus`, `register_serializable_item`, status-bar button, empty tab strip. | Panel opens from View menu; focus transfers on first click (`.rules` deploy-and-focus trap). | Slice 1 |
+| 3 | ~~**Build `SwarmPanel` shell**~~ **Done (2026-08-01, redesigned to card UI)** — new crate `crates/swarm_panel` (workspace member, zed dep). Rather than a bare shell, the panel mirrors the **Kask Extensions** card layout per user direction: `MarketplaceCard` rows of ABW **agents** (catalogue) and **swarms** (workspaces), with headline, search bar, and an All/Swarms/Agents filter toggle. Data flows through the governed `ToolInvoker` hook (`kask_panel::shared_tool_invoker`, newly public) into `hkask-mcp-swarm` — no ad-hoc HTTP. `Toggle`/`ToggleFocus` actions (declared in-crate via `actions!`), View menu entry, `SwarmPanelButton` status-bar button, `swarm_panel::init(cx)` in main.rs. Deploy-and-focus and Toggle-vs-ToggleFocus traps applied. Degrades to agents-only when no ABW key. 1/1 test (tool-name pin). zed binary compiles. | Panel opens from View menu + status bar; cards render; focus transfers on first click. | Slice 1 |
 | 4 | **Build cost/consent gate** — `DispatchIntent`, `GateDecision`, modal. The ethically load-bearing slice. | Modal shows `estimated_credits` + `data_shared`; `swarm_dispatch` returns `ConsentDenied` without signed token. | Slices 2, 3 |
 | 5 | **Wire `SwarmRunView`** — per-agent status, cost meter, curator output rendering with sanitization. | Panel renders live swarm state via `cx.notify()`; no busy-spin (`.rules` turn-loop trap). | Slices 2, 3, 4 |
 | 6 | **Wire algedonic channel** — 402 / consent-revoke / curator-data-sharing events bypass normal flow to operator. | Operator sees 402 immediately, not on next poll. | Slices 4, 5 |
