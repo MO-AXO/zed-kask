@@ -626,3 +626,26 @@ The same pattern applies to any panel that calls
 `kask_panel::shared_tool_invoker()`. Found in `SwarmPanel::fetch_all`, where
 the agents and swarms lists were always empty because the typed deserialize
 targeted the inner content shape but the response was envelope-wrapped.
+
+## `PtySender::resize` logs ERROR after the PTY event loop exits — downgrade, don't fix the send
+
+When the alacritty `EventLoop` thread exits before the `Terminal` entity is
+dropped (child process exit, EOF, `drain_on_exit`), the `mpsc::Sender<Msg>`
+inside `Notifier` loses its receiver. Subsequent `InternalEvent::Resize`
+events from pane layout changes call `pty_tx.resize()`
+(`crates/terminal/src/alacritty.rs:93`), which previously logged
+`ERROR failed to resize alacritty pty: sending on a closed channel` once per
+resize tick until `Terminal` was dropped — observed as ~15 ERROR lines per
+2-minute window in operator logs.
+
+This is expected post-exit noise, not a real error: the term-grid resize
+(`resize(term, new_bounds)` at `terminal.rs:1669`) runs unconditionally and
+is the only resize that matters once the PTY is gone. The fix is to detect
+the closed channel and downgrade the log to `debug!` (or skip the send).
+Note `Notifier.0` wraps `EventLoopSender { sender: std::sync::mpsc::Sender }`
+— `std::sync::mpsc::Sender` has **no `is_closed()` method**, so liveness
+must be tracked separately (e.g. `Arc<AtomicBool>` set from the event-loop
+exit path) or detected from the `send()` result itself (the current code
+already branches on `Err` — just lower the log level there). The same
+`debug!`-on-closed-channel discipline is already used by `PtySender::shutdown`
+in the same file.
