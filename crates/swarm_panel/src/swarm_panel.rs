@@ -102,13 +102,14 @@ fn steer_system_prompt(selected_workspace: Option<&str>) -> SharedString {
          steering. When the operator asks to compose, configure, tune, or steer a \
          swarm toward a target condition, invoke the `swarm-intelligence` skill \
          with the swarm id and the operator's task. The skill runs a SENSE → ORIENT \
-         → DECIDE → ACT → CHECK → CONVERGE loop and emits gated \
-         `swarm_update_swarm`/`swarm_delegate` calls with a `DispatchIntent` \
-         consent gate.\n\
+         → DECIDE → ACT → CHECK → CONVERGE loop.\n\
          \n\
-         Do not hire or delegate without the skill's consent gate producing a \
-         `GateDecision::Proceed`. The consent gate is the enforcement point — \
-         it must actually block, not just warn.\n"
+         The consent gate is enforced by `swarm_request_consent` (mints a \
+         single-use, action+target-scoped token) and `swarm_hire`/`swarm_delegate` \
+         (consume the token before spending). Do not hire or delegate without \
+         first calling `swarm_request_consent` and passing the returned token to \
+         the spend tool. The consent gate is the enforcement point — it must \
+         actually block, not just warn.\n"
     )
     .into()
 }
@@ -2288,6 +2289,35 @@ mod tests {
         assert!(
             prompt.contains("No swarm"),
             "steer prompt must guide the operator when no workspace is selected"
+        );
+    }
+
+    // KA-04: the steer prompt must not reference MCP tools that do not exist
+    // in the swarm server. The prior prompt advertised `swarm_update_swarm`,
+    // `DispatchIntent`, and `GateDecision::Proceed` — none of which are
+    // implemented. An advertised consent gate with no enforcement point is
+    // the `.rules` trap. This test pins that the prompt references only the
+    // actual ConsentStore-backed flow.
+    #[test]
+    fn steer_prompt_references_only_existing_tools() {
+        let prompt = steer_system_prompt(Some("ws_test"));
+        // Tools that do not exist in the MCP server.
+        assert!(
+            !prompt.contains("swarm_update_swarm"),
+            "steer prompt must not reference nonexistent swarm_update_swarm tool"
+        );
+        assert!(
+            !prompt.contains("DispatchIntent"),
+            "steer prompt must not reference nonexistent DispatchIntent type"
+        );
+        assert!(
+            !prompt.contains("GateDecision"),
+            "steer prompt must not reference nonexistent GateDecision type"
+        );
+        // The actual consent flow it should reference.
+        assert!(
+            prompt.contains("swarm_request_consent"),
+            "steer prompt must reference the actual swarm_request_consent tool"
         );
     }
 }

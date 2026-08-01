@@ -466,6 +466,22 @@ fn url_encode_segment(segment: &str) -> String {
     out
 }
 
+/// Build an ABW workspace slug from a name base and a timestamp. ABW slugs
+/// allow only lowercase letters, digits, and underscores. The timestamp suffix
+/// disambiguates swarms created with the same name. Extracted from
+/// `swarm_create_swarm` for testability (KA-03: the prior inline version
+/// panicked on a pre-epoch clock via `&string[..4]` on an empty string).
+fn make_swarm_slug(slug_base: &str, now: std::time::SystemTime) -> String {
+    let suffix = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_else(|_| "0".to_string())
+        .get(..4)
+        .unwrap_or("0")
+        .to_string();
+    format!("{}_{}", slug_base.trim_matches('_'), suffix)
+}
+
 /// Sanitize an ABW agent or Xaman Ek response before returning it to the MCP
 /// client (the zed-kask agent). ABW agents and the curator are third-party
 /// surfaces that could return prompt-injection vectors (e.g. "ignore previous
@@ -706,6 +722,9 @@ impl SwarmServer {
     )]
     pub async fn swarm_list_agents(&self, parameters: Parameters<ListAgentsRequest>) -> String {
         execute_tool_semantic(self, "swarm_list_agents", Some("dublin-core"), async {
+            self.client
+                .require_auth()
+                .map_err(SwarmError::into_tool_error)?;
             let req = parameters.0;
             let data = self
                 .client
@@ -736,10 +755,14 @@ impl SwarmServer {
                 })
                 .take(limit)
                 .map(|a| {
+                    // Sanitize the description field (KA-01): agent descriptions
+                    // are ABW/LLM-generated and can carry injection payloads.
+                    let desc = a.get("description").and_then(|d| d.as_str());
+                    let sanitized_desc = desc.map(|d| sanitize_abw_response(Some(&serde_json::Value::String(d.to_string()))));
                     serde_json::json!({
                         "agent_id": a.get("agent_id"),
                         "agent_type": a.get("agent_type"),
-                        "description": a.get("description"),
+                        "description": sanitized_desc.unwrap_or_else(|| a.get("description").cloned().unwrap_or(serde_json::Value::Null)),
                         "author": a.get("author"),
                         "tags": a.get("tags"),
                         "model": a.get("capabilities").and_then(|c| c.get("model")),
@@ -1244,11 +1267,34 @@ impl SwarmServer {
                 .await
                 .map_err(SwarmError::into_tool_error)?;
 
+            // Sanitize each message's content (KA-01): workspace chat history
+            // is the primary injection vector — ABW agents can echo prompt-
+            // injection payloads in their messages. Map over the messages
+            // array and route each message's content/response field through
+            // sanitize_abw_response.
+            let empty = Vec::new();
+            let messages = data
+                .get("messages")
+                .and_then(|m| m.as_array())
+                .unwrap_or(&empty);
+            let sanitized_messages: Vec<serde_json::Value> = messages
+                .iter()
+                .map(|msg| {
+                    let sanitized =
+                        sanitize_abw_response(msg.get("content").or_else(|| msg.get("response")));
+                    let mut msg = msg.clone();
+                    if let Some(obj) = msg.as_object_mut() {
+                        obj.insert("content".to_string(), sanitized);
+                    }
+                    msg
+                })
+                .collect();
+
             Ok(self
                 .client
                 .with_wallet(serde_json::json!({
                     "workspace_id": req.workspace_id,
-                    "messages": data,
+                    "messages": sanitized_messages,
                 }))
                 .await)
         })
@@ -1280,7 +1326,17 @@ impl SwarmServer {
                 )
                 .await
                 .map_err(SwarmError::into_tool_error)?;
-            Ok(data)
+            // Sanitize the LLM-generated prompt field (KA-01): ABW's response
+            // carries the generated prompt in a `prompt` or `response` field.
+            // Route through sanitize_abw_response so injection prefixes are
+            // stripped and the content is wrapped in the {content, source,
+            // trust} container.
+            let sanitized =
+                sanitize_abw_response(data.get("prompt").or_else(|| data.get("response")));
+            Ok(serde_json::json!({
+                "prompt": sanitized,
+                "raw": data,
+            }))
         })
         .await
     }
@@ -1306,7 +1362,16 @@ impl SwarmServer {
                 )
                 .await
                 .map_err(SwarmError::into_tool_error)?;
-            Ok(data)
+            // Sanitize the LLM-generated ontology field (KA-01): ABW's
+            // response carries the generated ER diagram in an `ontology` or
+            // `response` field. Route through sanitize_abw_response so
+            // injection prefixes are stripped.
+            let sanitized =
+                sanitize_abw_response(data.get("ontology").or_else(|| data.get("response")));
+            Ok(serde_json::json!({
+                "ontology": sanitized,
+                "raw": data,
+            }))
         })
         .await
     }
@@ -1359,6 +1424,23 @@ impl SwarmServer {
                 .await
                 .map_err(SwarmError::into_tool_error)?;
 
+            // Sanitize the description field in the response (KA-01): ABW
+            // may augment or regenerate the agent description. The operator-
+            // supplied system_prompt is echoed back but is operator-authored,
+            // not LLM output — leave it untouched.
+            let mut data = data;
+            let desc_to_sanitize = data
+                .get("description")
+                .and_then(|d| d.as_str())
+                .map(|d| d.to_string());
+            if let Some(desc) = desc_to_sanitize {
+                if let Some(obj) = data.as_object_mut() {
+                    obj.insert(
+                        "description".to_string(),
+                        sanitize_abw_response(Some(&serde_json::Value::String(desc))),
+                    );
+                }
+            }
             Ok(self.client.with_wallet(data).await)
         })
         .await
@@ -1388,14 +1470,7 @@ impl SwarmServer {
                 .chars()
                 .map(|c| if c.is_alphanumeric() { c } else { '_' })
                 .collect();
-            let slug = format!(
-                "{}_{}",
-                slug_base.trim_matches('_'),
-                &std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis().to_string())
-                    .unwrap_or_default()[..4]
-            );
+            let slug = make_swarm_slug(&slug_base, std::time::SystemTime::now());
             let team = self
                 .client
                 .post(
@@ -2016,5 +2091,42 @@ mod tests {
         let token = store.mint("curate", "xaman", 0);
         let wrong = store.consume(&token, "curate", "session-abc-123", 0);
         assert!(matches!(wrong, Err(SwarmError::ConsentDenied(_))));
+    }
+
+    // ── Slug generation (KA-03) ────────────────────────────────────────────
+    // The slug must not panic on a pre-epoch clock. The prior inline version
+    // used `&string[..4]` on an empty string (from `unwrap_or_default()` on
+    // a pre-epoch `duration_since`), which panicked. The extracted helper
+    // uses safe slicing.
+    #[test]
+    fn make_swarm_slug_handles_pre_epoch_clock() {
+        // A time before UNIX_EPOCH — duration_since returns Err.
+        let pre_epoch = std::time::SystemTime::UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("construct pre-epoch time");
+        let slug = make_swarm_slug("my_swarm", pre_epoch);
+        // Must not panic, must produce a valid slug.
+        assert!(slug.starts_with("my_swarm_"));
+        assert!(!slug.is_empty());
+    }
+
+    #[test]
+    fn make_swarm_slug_produces_suffix() {
+        let now = std::time::SystemTime::now();
+        let slug = make_swarm_slug("test", now);
+        assert!(slug.starts_with("test_"));
+        // The suffix is the first 4 digits of the millisecond timestamp.
+        let suffix = slug.strip_prefix("test_").unwrap_or("");
+        assert!(suffix.len() >= 1);
+    }
+
+    #[test]
+    fn make_swarm_slug_trims_underscores_from_base() {
+        let now = std::time::SystemTime::now();
+        let slug = make_swarm_slug("__leading_and_trailing__", now);
+        assert!(
+            !slug.contains("__leading"),
+            "leading underscores must be trimmed"
+        );
     }
 }
