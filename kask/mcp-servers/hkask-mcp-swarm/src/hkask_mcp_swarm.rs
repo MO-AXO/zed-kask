@@ -184,6 +184,19 @@ impl ConsentStore {
         }
         Ok(grant.credits_authorized)
     }
+
+    /// Refund a consumed grant so the operator can retry after a transient
+    /// failure (network drop, ABW 5xx) without re-confirming. The grant is
+    /// re-inserted with its original scope and ceiling; it remains single-use
+    /// per *successful* spend — a refunded token is consumed again on the next
+    /// attempt and removed for good once the spend succeeds. No-op if the grant
+    /// was never consumed (defensive against double-refund).
+    fn refund(&self, grant: ConsentGrant) {
+        self.grants
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(grant.token.clone(), grant);
+    }
 }
 
 /// A tiny FNV-1a hash so consent tokens are not trivially guessable from the
@@ -1001,9 +1014,14 @@ impl SwarmServer {
                     "action and target must be non-empty".to_string(),
                 ));
             }
-            if req.credits_authorized == 0 {
+            // Curator calls (action "curate") read task content but spend no
+            // credits, so a zero ceiling is correct for them. Spend actions
+            // ("hire", "delegate") must authorize a positive ceiling — a zero
+            // ceiling would authorize nothing and is almost certainly a caller
+            // bug. Reject zero only for spend actions.
+            if req.credits_authorized == 0 && req.action != "curate" {
                 return Err(McpToolError::invalid_argument(
-                    "credits_authorized must be > 0".to_string(),
+                    "credits_authorized must be > 0 for spend actions (hire/delegate)".to_string(),
                 ));
             }
             let token = self
@@ -1036,8 +1054,12 @@ impl SwarmServer {
             }
 
             // The consent gate is the enforcement point: consume the token
-            // (single-use) and verify it authorizes this exact hire.
-            self.consent
+            // (single-use) and verify it authorizes this exact hire. Capture
+            // the grant so we can refund it if the spend fails transiently
+            // (network drop, ABW 5xx) — the operator should not lose consent
+            // to a failure they didn't cause.
+            let grant = self
+                .consent
                 .consume(
                     &req.consent_token,
                     "hire",
@@ -1045,6 +1067,15 @@ impl SwarmServer {
                     req.credits_authorized,
                 )
                 .map_err(SwarmError::into_tool_error)?;
+            // Reconstruct the grant for refund — `consume` returns only the
+            // ceiling, so we re-mint the same scope. The token string is the
+            // key; refund re-inserts it.
+            let refund_grant = ConsentGrant {
+                action: "hire".to_string(),
+                target: req.agent_name.clone(),
+                credits_authorized: grant,
+                token: req.consent_token.clone(),
+            };
 
             // Re-verify the hire cost against ABW immediately before spending.
             // The consent token's `credits_authorized` is whatever the caller
@@ -1059,12 +1090,33 @@ impl SwarmServer {
                     url_encode_segment(&req.agent_name)
                 ))
                 .await
-                .map_err(SwarmError::into_tool_error)?;
-            let actual_cost = deps
-                .get("total_hire_cost")
-                .and_then(|c| c.as_u64())
-                .unwrap_or(0);
+                .map_err(|e| {
+                    // Refund before propagating: the spend never happened.
+                    self.consent.refund(refund_grant.clone());
+                    SwarmError::into_tool_error(e)
+                })?;
+            // Do not fabricate cost = 0 on a missing field — a missing
+            // `total_hire_cost` means ABW changed its response shape or the
+            // agent doesn't exist. The `.rules` trap: a failed measurement
+            // must be distinguishable from a measured zero. Mirrors the
+            // `swarm_hire_cost` fix (§12.4).
+            let actual_cost = match deps.get("total_hire_cost").and_then(|c| c.as_u64()) {
+                Some(cost) => cost,
+                None => {
+                    tracing::warn!(
+                        target: "reg.swarm",
+                        agent = %req.agent_name,
+                        "swarm_hire: ABW re-verify response missing total_hire_cost — cost unknown"
+                    );
+                    self.consent.refund(refund_grant.clone());
+                    return Err(McpToolError::internal(
+                        "hire cost unknown — ABW re-verify response missing total_hire_cost field"
+                            .to_string(),
+                    ));
+                }
+            };
             if actual_cost > u64::from(req.credits_authorized) {
+                self.consent.refund(refund_grant.clone());
                 return Err(SwarmError::PaymentRequired(format!(
                     "actual hire cost {actual_cost} exceeds authorized {} — \
                      re-request consent with the updated cost",
@@ -1083,7 +1135,11 @@ impl SwarmServer {
                     }),
                 )
                 .await
-                .map_err(SwarmError::into_tool_error)?;
+                .map_err(|e| {
+                    // Refund before propagating: the spend never happened.
+                    self.consent.refund(refund_grant.clone());
+                    SwarmError::into_tool_error(e)
+                })?;
 
             Ok(self
                 .client
@@ -1117,7 +1173,8 @@ impl SwarmServer {
                 ));
             }
 
-            self.consent
+            let grant = self
+                .consent
                 .consume(
                     &req.consent_token,
                     "delegate",
@@ -1125,6 +1182,12 @@ impl SwarmServer {
                     req.credits_authorized,
                 )
                 .map_err(SwarmError::into_tool_error)?;
+            let refund_grant = ConsentGrant {
+                action: "delegate".to_string(),
+                target: req.workspace_id.clone(),
+                credits_authorized: grant,
+                token: req.consent_token.clone(),
+            };
 
             // ABW delegation is an @mention message in the workspace chat.
             let data = self
@@ -1137,7 +1200,11 @@ impl SwarmServer {
                     &serde_json::json!({ "content": format!("@{} {}", req.agent_name, req.task) }),
                 )
                 .await
-                .map_err(SwarmError::into_tool_error)?;
+                .map_err(|e| {
+                    // Refund before propagating: the spend never happened.
+                    self.consent.refund(refund_grant.clone());
+                    SwarmError::into_tool_error(e)
+                })?;
 
             Ok(self
                 .client
@@ -1365,11 +1432,70 @@ impl SwarmServer {
                     }));
                     continue;
                 };
-                // Consume the consent token for this specific hire.
-                if let Err(e) = self.consent.consume(token, "hire", agent, 5) {
+                // Consume the consent token for this specific hire. The token's
+                // `credits_authorized` ceiling was set by the panel from the
+                // real `swarm_hire_cost` estimate; we re-verify the actual cost
+                // against ABW below before spending (mirroring `swarm_hire`).
+                let grant = match self.consent.consume(token, "hire", agent, 0) {
+                    Ok(ceiling) => ceiling,
+                    Err(e) => {
+                        hire_errors.push(serde_json::json!({
+                            "agent": agent,
+                            "error": e.to_string(),
+                        }));
+                        continue;
+                    }
+                };
+                let refund_grant = ConsentGrant {
+                    action: "hire".to_string(),
+                    target: agent.clone(),
+                    credits_authorized: grant,
+                    token: token.clone(),
+                };
+                // Re-verify the actual hire cost against ABW before spending.
+                // A missing `total_hire_cost` is unknown, not zero (the
+                // `.rules` trap). Refund and record the error on failure.
+                let deps = match self
+                    .client
+                    .get(&format!(
+                        "/agents/{}/dependencies",
+                        url_encode_segment(agent)
+                    ))
+                    .await
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        self.consent.refund(refund_grant);
+                        hire_errors.push(serde_json::json!({
+                            "agent": agent,
+                            "error": format!("re-verify failed: {e}"),
+                        }));
+                        continue;
+                    }
+                };
+                let actual_cost = match deps.get("total_hire_cost").and_then(|c| c.as_u64()) {
+                    Some(c) => c,
+                    None => {
+                        tracing::warn!(
+                            target: "reg.swarm",
+                            agent = %agent,
+                            "swarm_create_swarm: ABW re-verify missing total_hire_cost — cost unknown"
+                        );
+                        self.consent.refund(refund_grant);
+                        hire_errors.push(serde_json::json!({
+                            "agent": agent,
+                            "error": "hire cost unknown — ABW re-verify response missing total_hire_cost",
+                        }));
+                        continue;
+                    }
+                };
+                if actual_cost > u64::from(grant) {
+                    self.consent.refund(refund_grant);
                     hire_errors.push(serde_json::json!({
                         "agent": agent,
-                        "error": e.to_string(),
+                        "error": format!(
+                            "actual hire cost {actual_cost} exceeds authorized {grant} — re-request consent"
+                        ),
                     }));
                     continue;
                 }
@@ -1382,10 +1508,14 @@ impl SwarmServer {
                     .await
                 {
                     Ok(_) => hired.push(agent.clone()),
-                    Err(e) => hire_errors.push(serde_json::json!({
-                        "agent": agent,
-                        "error": e.to_string(),
-                    })),
+                    Err(e) => {
+                        // Refund: the spend never happened.
+                        self.consent.refund(refund_grant);
+                        hire_errors.push(serde_json::json!({
+                            "agent": agent,
+                            "error": e.to_string(),
+                        }));
+                    }
                 }
             }
 
@@ -1430,7 +1560,11 @@ impl SwarmServer {
             // `swarm_request_consent` (action "curate"). When `true`, the
             // operator has globally opted in and the token is optional.
             if !self.client.config().curator_consent_default {
-                let target = req.session_id.as_deref().unwrap_or("xaman");
+                // Use a fixed target "xaman" for all curate consent consumes.
+                // The session_id is an ABW detail that changes across
+                // continuation calls; scoping consent to it would force a
+                // fresh token per message and produce opaque scope-mismatch
+                // errors on session continuation (BH-09).
                 let Some(token) = req.consent_token.as_deref() else {
                     return Err(SwarmError::ConsentDenied(
                         "Xaman Ek curator call requires a consent token (action 'curate') — \
@@ -1440,7 +1574,7 @@ impl SwarmServer {
                     .into_tool_error());
                 };
                 self.consent
-                    .consume(token, "curate", target, 0)
+                    .consume(token, "curate", "xaman", 0)
                     .map_err(SwarmError::into_tool_error)?;
             }
 
@@ -1813,5 +1947,74 @@ mod tests {
     fn config_curator_consent_default_is_false_by_default() {
         let c = SwarmConfig::default();
         assert!(!c.curator_consent_default);
+    }
+
+    // ── Consent refund (BH-04) ─────────────────────────────────────────────
+    // A refunded grant must be re-consumable so the operator can retry after a
+    // transient failure without re-confirming. The grant retains its original
+    // scope and ceiling.
+    #[test]
+    fn consent_refund_restores_grant_for_retry() {
+        let store = ConsentStore::default();
+        let token = store.mint("hire", "market_analyst", 20);
+        let ceiling = store
+            .consume(&token, "hire", "market_analyst", 20)
+            .expect("first consume");
+        assert_eq!(ceiling, 20);
+        // Refund the consumed grant (simulating a network failure after consume).
+        store.refund(ConsentGrant {
+            action: "hire".to_string(),
+            target: "market_analyst".to_string(),
+            credits_authorized: 20,
+            token: token.clone(),
+        });
+        // The refunded token must be consumable again.
+        let ceiling2 = store
+            .consume(&token, "hire", "market_analyst", 20)
+            .expect("refunded token should consume");
+        assert_eq!(ceiling2, 20);
+    }
+
+    #[test]
+    fn consent_refund_is_noop_for_never_consumed_token() {
+        // Defensive: refunding a grant that was never consumed (or already
+        // refunded) must not panic and must leave the store usable.
+        let store = ConsentStore::default();
+        store.refund(ConsentGrant {
+            action: "hire".to_string(),
+            target: "ghost".to_string(),
+            credits_authorized: 5,
+            token: "hkask-consent-never".to_string(),
+        });
+        // The inserted grant is consumable.
+        let ceiling = store
+            .consume("hkask-consent-never", "hire", "ghost", 5)
+            .expect("refunded ghost grant should consume");
+        assert_eq!(ceiling, 5);
+    }
+
+    // ── Curate consent target stability (BH-09) ─────────────────────────────
+    // A curate token minted for "xaman" must be consumable regardless of
+    // whether a session_id is present — the server uses a fixed "xaman"
+    // target, not the session_id.
+    #[test]
+    fn curate_consume_uses_fixed_xaman_target() {
+        let store = ConsentStore::default();
+        let token = store.mint("curate", "xaman", 0);
+        // Consume with the fixed target the server now uses.
+        store
+            .consume(&token, "curate", "xaman", 0)
+            .expect("curate token for xaman should consume");
+    }
+
+    #[test]
+    fn curate_consume_rejects_session_id_target_mismatch() {
+        // A token minted for "xaman" must not be consumable for a different
+        // target — this pins that the server's fixed "xaman" target is the
+        // only valid scope for curate consent.
+        let store = ConsentStore::default();
+        let token = store.mint("curate", "xaman", 0);
+        let wrong = store.consume(&token, "curate", "session-abc-123", 0);
+        assert!(matches!(wrong, Err(SwarmError::ConsentDenied(_))));
     }
 }

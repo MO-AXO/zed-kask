@@ -309,8 +309,17 @@ pub struct SwarmPanel {
     project: Entity<Project>,
     fs: std::sync::Arc<dyn Fs>,
     list: UniformListScrollHandle,
-    is_fetching: bool,
-    fetch_error: Option<SharedString>,
+    /// Number of fetch operations currently in flight (agents + swarms spawn
+    /// independently). `is_fetching()` is true while any are in the air —
+    /// avoids one fetch's completion hiding the other's spinner.
+    in_flight: usize,
+    /// Per-source fetch errors. Split so a slow agents fetch can't clobber a
+    /// swarms error (and vice versa) — the H1 cross-clobber finding.
+    agents_error: Option<SharedString>,
+    swarms_error: Option<SharedString>,
+    /// Error from the hire/consent flow (begin_hire, confirm_hire). Surfaced
+    /// near the consent banner, distinct from fetch errors.
+    hire_error: Option<SharedString>,
     filter: SwarmFilter,
     entries: Vec<SwarmEntry>,
     filtered_entry_indices: Vec<usize>,
@@ -461,8 +470,10 @@ impl SwarmPanel {
                 project,
                 fs,
                 list: scroll_handle,
-                is_fetching: false,
-                fetch_error: None,
+                in_flight: 0,
+                agents_error: None,
+                swarms_error: None,
+                hire_error: None,
                 filter: SwarmFilter::All,
                 entries: Vec::new(),
                 filtered_entry_indices: Vec::new(),
@@ -484,10 +495,21 @@ impl SwarmPanel {
         })
     }
 
+    /// True while any fetch (agents or swarms) is in the air.
+    fn is_fetching(&self) -> bool {
+        self.in_flight > 0
+    }
+
+    /// The single visible error, preferring agents then swarms. Rendered as a
+    /// status strip whenever present (not only in the empty state).
+    fn visible_error(&self) -> Option<&SharedString> {
+        self.agents_error.as_ref().or(self.swarms_error.as_ref())
+    }
+
     /// Fetch agents and swarms via the governed MCP tool path.
     fn fetch_all(&mut self, cx: &mut Context<Self>) {
         let Some(invoker) = kask_panel::shared_tool_invoker() else {
-            self.fetch_error = Some(
+            self.agents_error = Some(
                 "Tool invoker not wired — the swarm MCP server is unavailable. \
                  Ensure kask MCP servers are enabled (kask.mcp.load_default)."
                     .into(),
@@ -496,8 +518,9 @@ impl SwarmPanel {
             return;
         };
 
-        self.is_fetching = true;
-        self.fetch_error = None;
+        self.in_flight = 2;
+        self.agents_error = None;
+        self.swarms_error = None;
         cx.notify();
 
         // Agents (keyless-capable).
@@ -508,7 +531,7 @@ impl SwarmPanel {
                     .invoke_tool(SWARM_SERVER, "swarm_list_agents", json!({ "limit": 200 }))
                     .await;
                 this.update(cx, |this, cx| {
-                    this.is_fetching = false;
+                    this.in_flight = this.in_flight.saturating_sub(1);
                     if let Ok(balance) = &result
                         && let Some(b) = extract_wallet_balance(balance)
                     {
@@ -536,17 +559,18 @@ impl SwarmPanel {
                                 // Replace agent entries, keep swarm entries.
                                 this.entries.retain(|e| matches!(e, SwarmEntry::Swarm(_)));
                                 this.entries.extend(agents);
-                                this.fetch_error = None;
+                                this.agents_error = None;
                                 this.filter_entries(cx);
                             }
                             Err(err) => {
-                                this.fetch_error =
+                                this.agents_error =
                                     Some(format!("Failed to parse agents: {err}").into());
                                 this.filter_entries(cx);
                             }
                         },
                         Err(err) => {
-                            this.fetch_error = Some(format!("Failed to list agents: {err}").into());
+                            this.agents_error =
+                                Some(format!("Failed to list agents: {err}").into());
                             this.filter_entries(cx);
                         }
                     }
@@ -562,57 +586,72 @@ impl SwarmPanel {
             let result = invoker
                 .invoke_tool(SWARM_SERVER, "swarm_get_swarm", json!({}))
                 .await;
-            this.update(cx, |this, cx| match result {
-                Ok(output) => {
-                    if let Some(b) = extract_wallet_balance(&output) {
-                        this.wallet_balance = Some(b);
-                    }
-                    match serde_json::from_str::<WorkspaceListResponse>(&output) {
-                        Ok(response) => {
-                            let swarms = response
-                                .workspaces
-                                .into_iter()
-                                .map(|w| {
-                                    SwarmEntry::Swarm(SwarmCard {
-                                        id: w.id.unwrap_or_default(),
-                                        name: w.name.unwrap_or_default(),
-                                        description: w.description.unwrap_or_default(),
-                                        agent_count: w.agent_count.unwrap_or(0),
-                                        budget: w.workspace_budget.unwrap_or(0),
-                                        remaining: w.workspace_remaining.unwrap_or(0),
+            this.update(cx, |this, cx| {
+                this.in_flight = this.in_flight.saturating_sub(1);
+                match result {
+                    Ok(output) => {
+                        if let Some(b) = extract_wallet_balance(&output) {
+                            this.wallet_balance = Some(b);
+                        }
+                        match serde_json::from_str::<WorkspaceListResponse>(&output) {
+                            Ok(response) => {
+                                let swarms = response
+                                    .workspaces
+                                    .into_iter()
+                                    .map(|w| {
+                                        SwarmEntry::Swarm(SwarmCard {
+                                            id: w.id.unwrap_or_default(),
+                                            name: w.name.unwrap_or_default(),
+                                            description: w.description.unwrap_or_default(),
+                                            agent_count: w.agent_count.unwrap_or(0),
+                                            budget: w.workspace_budget.unwrap_or(0),
+                                            remaining: w.workspace_remaining.unwrap_or(0),
+                                        })
                                     })
-                                })
-                                .collect::<Vec<_>>();
-                            // Replace swarm entries, keep agent entries.
-                            this.entries.retain(|e| matches!(e, SwarmEntry::Agent(_)));
-                            let mut swarms = swarms;
-                            swarms.extend(this.entries.drain(..));
-                            this.entries = swarms;
-                            // Default the hire target to the first swarm if unset.
-                            if this.selected_workspace.is_none() {
-                                this.selected_workspace =
-                                    this.entries.iter().find_map(|e| match e {
-                                        SwarmEntry::Swarm(s) if !s.id.is_empty() => {
-                                            Some(s.id.clone())
-                                        }
-                                        _ => None,
+                                    .collect::<Vec<_>>();
+                                // Replace swarm entries, keep agent entries.
+                                this.entries.retain(|e| matches!(e, SwarmEntry::Agent(_)));
+                                let mut swarms = swarms;
+                                swarms.extend(this.entries.drain(..));
+                                this.entries = swarms;
+                                // Default the hire target to the first swarm if unset,
+                                // or re-validate it if the selected swarm disappeared.
+                                let selected_still_present =
+                                    this.selected_workspace.as_ref().is_some_and(|sel| {
+                                        this.entries.iter().any(|e| match e {
+                                            SwarmEntry::Swarm(s) => &s.id == sel,
+                                            _ => false,
+                                        })
                                     });
+                                if !selected_still_present {
+                                    this.selected_workspace =
+                                        this.entries.iter().find_map(|e| match e {
+                                            SwarmEntry::Swarm(s) if !s.id.is_empty() => {
+                                                Some(s.id.clone())
+                                            }
+                                            _ => None,
+                                        });
+                                }
+                                this.swarms_error = None;
+                                this.filter_entries(cx);
                             }
-                            this.filter_entries(cx);
-                        }
-                        Err(err) => {
-                            this.fetch_error =
-                                Some(format!("Failed to parse workspaces: {err}").into());
-                            this.filter_entries(cx);
+                            Err(err) => {
+                                this.swarms_error =
+                                    Some(format!("Failed to parse workspaces: {err}").into());
+                                this.filter_entries(cx);
+                            }
                         }
                     }
+                    Err(err) => {
+                        // Auth failures here are expected when no key is configured —
+                        // degrade to agents-only rather than an error state.
+                        log::warn!(
+                            "swarm-panel: could not fetch workspaces (agents-only mode): {err}"
+                        );
+                        this.filter_entries(cx);
+                    }
                 }
-                Err(err) => {
-                    // Auth failures here are expected when no key is configured —
-                    // degrade to agents-only rather than an error state.
-                    log::warn!("swarm-panel: could not fetch workspaces (agents-only mode): {err}");
-                    this.filter_entries(cx);
-                }
+                cx.notify();
             })
             .ok();
         })
@@ -953,7 +992,10 @@ impl SwarmPanel {
 
         cx.spawn(async move |this, cx| {
             // Mint a consent token per agent to hire (each hire is gated).
+            // A spend path must not silently degrade: if any consent mint
+            // fails, abort the create rather than hiring a partial team.
             let mut consent_tokens = Vec::new();
+            let mut consent_failures = Vec::new();
             for agent in &agents {
                 match invoker
                     .invoke_tool(
@@ -972,12 +1014,37 @@ impl SwarmPanel {
                                     .and_then(|t| t.as_str())
                                     .map(str::to_string)
                             });
-                        if let Some(t) = token {
-                            consent_tokens.push(t);
+                        match token {
+                            Some(t) => consent_tokens.push(t),
+                            None => {
+                                log::warn!("swarm-panel: consent mint for '{agent}' returned no token");
+                                consent_failures.push(agent.clone());
+                            }
                         }
                     }
-                    Err(_) => {}
+                    Err(err) => {
+                        log::warn!("swarm-panel: consent mint for '{agent}' failed: {err}");
+                        consent_failures.push(agent.clone());
+                    }
                 }
+            }
+
+            // Abort on any consent failure — do not create a swarm with a
+            // silently under-consented team.
+            if !consent_failures.is_empty() {
+                this.update(cx, |this, cx| {
+                    this.compose.busy = false;
+                    this.compose.status = Some(
+                        format!(
+                            "Consent failed for {} — swarm not created.",
+                            consent_failures.join(", ")
+                        )
+                        .into(),
+                    );
+                    cx.notify();
+                })
+                .ok();
+                return;
             }
 
             let result = invoker
