@@ -134,7 +134,7 @@ pub fn init(cx: &mut App) {
                 if let Some(existing) = existing {
                     workspace.activate_item(&existing, true, true, window, cx);
                 } else {
-                    let swarm_panel = SwarmPanel::new(window, cx);
+                    let swarm_panel = SwarmPanel::new(workspace, window, cx);
                     workspace.add_item_to_active_pane(
                         Box::new(swarm_panel.clone()),
                         None,
@@ -399,10 +399,19 @@ struct PendingHire {
 }
 
 impl SwarmPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Entity<Self> {
-        let workspace = cx.entity().downgrade();
-        let project = cx.entity().read(cx).project().clone();
-        let fs = cx.entity().read(cx).app_state().fs.clone();
+    pub fn new(
+        workspace: &Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) -> Entity<Self> {
+        // Read `project` and `fs` through the borrowed `&Workspace` rather than
+        // `cx.entity().read(cx)` — the `Toggle` action handler already holds
+        // an `update` lease on the `Workspace` entity, so a re-entrant `read`
+        // triggers `double_lease_panic` ("cannot read workspace::Workspace
+        // while it is already being updated"). Mirrors `KaskPanel::new`.
+        let workspace_handle = workspace.weak_handle();
+        let project = workspace.project().clone();
+        let fs = workspace.app_state().fs.clone();
         cx.new(|cx| {
             let query_editor = cx.new(|cx| {
                 let mut input = Editor::single_line(window, cx);
@@ -473,7 +482,7 @@ impl SwarmPanel {
             };
 
             let mut this = Self {
-                workspace,
+                workspace: workspace_handle,
                 project,
                 fs,
                 list: scroll_handle,
@@ -2192,7 +2201,9 @@ impl SerializableItem for SwarmPanel {
         // Stateless item — nothing to persist beyond the fact that it's open.
         // The panel reconstructs its state from ABW on first render.
         cx.spawn(async move |cx| {
-            workspace.update_in(cx, |_workspace, window, cx| SwarmPanel::new(window, cx))
+            workspace.update_in(cx, |workspace, window, cx| {
+                SwarmPanel::new(workspace, window, cx)
+            })
         })
     }
 
