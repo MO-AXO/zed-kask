@@ -1480,7 +1480,10 @@ impl SwarmServer {
             let data = self
                 .client
                 .post(
-                    &format!("/xaman/sessions/{session_id}/message"),
+                    &format!(
+                        "/xaman/sessions/{}/message",
+                        url_encode_segment(&session_id)
+                    ),
                     &serde_json::json!({ "message": req.message }),
                 )
                 .await

@@ -551,20 +551,84 @@ The audit confirmed the following are correctly implemented:
 
 ### 12.17 Summary verdict
 
-The implementation is **substantially complete for slices 1–4 and the highest-risk GPUI traps are correctly handled**. The consent gate *blocks* spend for `swarm_hire`/`swarm_delegate` (not just warns), the credential allowlisting is clean, and the settings follow the `Default`-as-source-of-truth pattern. The deliberate deviations (card UI, banner-not-modal, in-crate actions) are documented in the plan's own slice-status notes.
+> **Re-verified 2026-08-01 (post-slice-5).** All Critical and High gaps
+> from the original audit are now closed. The consent gate is honest: it
+> blocks unauthorized spend, sanitizes curator output, re-verifies cost
+> against ABW, and requires opt-in for curator data-sharing. The
+> `swarm-intelligence` skill's `loop_closure` convergence invariant
+> (§13) is now truthful — a closed loop means the gate actually blocked.
 
-The **single most important gap** is the **prompt-injection → unauthorized-spend chain** (§12.1): `swarm_request_consent` is unauthenticated, the consent token is not cryptographically signed, and `swarm_curate` output is unsanitized. Together these allow a prompt-injected agent to self-authorize credit spends by minting a consent token and calling `swarm_hire`. The one-line `require_auth()` fix on `swarm_request_consent` closes the unauthenticated-mint vector immediately; the panel-secret binding and output sanitization close the rest. **This should be addressed before any operator uses the swarm panel against a paid ABW account.**
+The implementation is **substantially complete for slices 1–5**. The
+consent gate *blocks* spend for `swarm_hire`/`swarm_delegate` (not just
+warns), the credential allowlisting is clean, and the settings follow the
+`Default`-as-source-of-truth pattern. The deliberate deviations (card UI,
+banner-not-modal, in-crate actions) are documented in the plan's own
+slice-status notes.
 
-The secondary gap is the **missing consent gate on `swarm_curate`** (§12.2) — the plan's §3.7 opt-in default for curator involvement is not implemented at all, neither as a settings field nor as a per-call gate. This means an agent can send arbitrary task content to Xaman Ek without operator opt-in, which is the FINER Ethics finding made concrete.
+**Slice 5 closure status (re-verified 2026-08-01):**
 
-**Recommended priority for slice 5+:**
-1. Add `require_auth()` to `swarm_request_consent` (one-line fix, §12.1).
-2. Add consent gate to `swarm_curate` (§12.2).
-3. Re-verify hire cost against ABW before spending (§12.3).
-4. Fix `swarm_hire_cost` `unwrap_or(0)` on cost (§12.4).
-5. Add `curator_consent_default` to `KaskSwarmSettings` (§12.5).
-6. Implement `SerializableItem` for `SwarmPanel` (§12.6).
-7. Add swarm-specific credential-filtering tests (§12.7).
-8. Add reqwest timeout + retry (§12.11).
-9. Fix `swarm_curate` error mapping to preserve 402/429 (§12.10).
-10. URL-encode path parameters (§12.12).
+| § | Gap | Status |
+|---|---|---|
+| 12.1 | `swarm_request_consent` missing `require_auth()` | ✅ Fixed |
+| 12.1 | `swarm_curate` output unsanitized | ✅ Fixed (`sanitize_abw_response`) |
+| 12.2 | `swarm_curate` no consent gate | ✅ Fixed (`curator_consent_default` + token) |
+| 12.3 | `swarm_hire` trusts client `credits_authorized` | ✅ Fixed (re-fetch `/dependencies`) |
+| 12.4 | `swarm_hire_cost` `unwrap_or(0)` | ✅ Fixed (`Err` + `tracing::warn!`) |
+| 12.5 | `curator_consent_default` absent | ✅ Fixed (settings field, default `false`) |
+| 12.6 | `SwarmPanel` missing `SerializableItem` | ✅ Fixed |
+| 12.7 | no swarm credential-filtering test | ✅ Fixed |
+| 12.10 | `swarm_curate` swallows 402 | ✅ Fixed (explicit `PaymentRequired`/`RateLimited` arms) |
+| 12.11 | reqwest no timeout | ✅ Fixed (`connect_timeout(10s)` + `timeout(60s)`) |
+| 12.12 | URL-encoding gaps | ✅ Fixed (`url_encode_segment` on all path params) |
+| 12.13 | `within_budget` fail-open | ✅ Fixed (`unwrap_or(false)`) |
+| 12.14 | `max_credits` hardcoded `50` in panel | Documented smell (comment + sync note) |
+| 12.8 | tool count 9 vs ≤7 | Deferred (v2 grouping) |
+| 12.9 | missing fire/import/version tools | Deferred (v2) |
+
+**Remaining for slice 6 (skill wiring, see §13):** the `swarm-intelligence`
+skill is registry-complete and validated (33/33 checks) but not yet
+invocable from `SwarmPanel`. With the consent gate now honest, the skill's
+`loop_closure` convergence invariant is truthful, and slice 6 is unblocked.
+---
+
+## 13. Companion Skill: `swarm-intelligence`
+
+A registry skill exists that operationalizes the composition PDCA described in
+§4 of this plan: **`swarm-intelligence`** (`kask/registry/manifests/swarm-intelligence.yaml`).
+
+- **Design document:** `kask/docs/plans/swarm-intelligence-skill-design.md`
+- **What it does:** SENSE → ORIENT → DECIDE → ACT → CHECK → CONVERGE loop.
+  Senses swarm state against Onto4MAT (alignment/cohesion/separation) + the
+  ABW workspace/wallet APIs; orients by classifying the gap (variety deficit,
+  coherence deficit, loop-break); decides composition adjustments isomorphic
+  to PSO/ACO/Reynolds tuning; acts via gated `swarm_update_swarm`/
+  `swarm_delegate`; converges via a Cauchy criterion on a deterministic
+  swarm-state distance metric.
+- **Validation:** 33/33 `skill-maintenance-validate` checks pass (R12, Z6,
+  X5, E10).
+- **Relationship to this plan:** the skill is the *decision process* that
+  this plan's §4 cybernetic analysis calls for. The panel (§3.2) and MCP
+  server (§3.3) are the *substrate* the skill acts on.
+
+### Wiring gap (open)
+
+The skill is **not yet invocable from `SwarmPanel`**. The panel calls MCP
+tools directly via `shared_tool_invoker` (browse, hire, consent), but the
+skill is a FlowDef manifest executed by the `ManifestExecutor`, which is
+reachable only through the agent's `SkillTool` (`crates/agent/src/tools/
+skill_tool.rs`) — not through the `ToolInvoker` trait the panel uses.
+
+Two integration paths were identified (see the skill design doc §8):
+- **Option A:** embed a `ConversationView` in `SwarmPanel` (mirror
+  `KaskPanel`'s per-tab agent pattern), scoped to `Agent::Curator` with the
+  swarm server's tools. The operator asks the curator to compose/steer; the
+  curator's `SkillTool` invokes `swarm-intelligence`. Substantial addition.
+- **Option B:** add a `swarm_steer` MCP tool to `hkask-mcp-swarm` that calls
+  back into the `ManifestExecutor`. Keeps the panel thin but requires a new
+  bridge from the MCP server process to the `ManifestExecutor` (which lives
+  in the GPUI/agent process).
+
+This wiring is **slice 6** work. With slice 5 now complete (the §12
+audit gaps closed — see §12.17), the consent gate is honest and the
+skill's `loop_closure` convergence invariant is truthful, so slice 6 is
+unblocked.

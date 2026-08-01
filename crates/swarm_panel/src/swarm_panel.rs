@@ -12,6 +12,13 @@
 //! empty state that surfaces fetch errors. v1 is read-only — hire/fire and
 //! spend actions are gated behind the cost/consent gate (see
 //! `kask/docs/plans/abw-swarm-intelligence.md` §3.6).
+//!
+//! **Steer mode** hosts a `ConversationView` scoped to the swarm MCP server,
+//! mirroring `KaskPanel`'s per-tab agent pattern. The operator asks the
+//! curator to compose/steer a swarm; the curator's `SkillTool` invokes the
+//! `swarm-intelligence` cascade (see `kask/docs/plans/abw-swarm-intelligence.md`
+//! §13). The conversation is not persisted — re-clicking Steer after a
+//! restart starts a fresh composition conversation.
 
 mod panel_button;
 
@@ -22,11 +29,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 use editor::Editor;
+use fs::Fs;
 use gpui::{
     App, Context, Entity, EventEmitter, Focusable, Render, Task, UniformListScrollHandle,
     WeakEntity, Window, actions, uniform_list,
 };
 use marketplace_ui_common::{MarketplaceCard, marketplace_empty_state, marketplace_search_bar};
+use project::Project;
 use serde::Deserialize;
 use serde_json::json;
 use ui::{
@@ -38,6 +47,14 @@ use workspace::{
     item::{Item, ItemEvent, SerializableItem},
     register_serializable_item,
 };
+
+// Steer mode: a `ConversationView` scoped to the swarm MCP server, mirroring
+// `KaskPanel`'s per-tab agent pattern. The curator's `SkillTool` invokes the
+// `swarm-intelligence` cascade when the operator asks to compose/steer a
+// swarm. See `kask/docs/plans/abw-swarm-intelligence.md` §13.
+use agent::ThreadStore;
+use agent_ui::{Agent, AgentConnectionStore, AgentThreadSource, ConversationView};
+use gpui::SharedString;
 
 actions!(
     swarm_panel,
@@ -52,6 +69,49 @@ actions!(
 
 /// The MCP server id (matches `BUILT_IN_MCP_SERVERS`).
 const SWARM_SERVER: &str = "swarm";
+
+/// The system prompt injected into the Steer mode `ConversationView`. Tells
+/// the curator it is scoped to the swarm MCP server and that the
+/// `swarm-intelligence` skill is available for composition/steering. The
+/// curator's `SkillTool` discovers the skill from the `<available_skills>`
+/// list in its base system prompt; this prompt adds the swarm-specific
+/// context (active workspace, the skill's purpose).
+fn steer_system_prompt(selected_workspace: Option<&str>) -> SharedString {
+    let workspace_note = match selected_workspace {
+        Some(id) => format!(
+            "The operator's active swarm (ABW workspace) is `{id}`. \
+             When the operator asks to compose or steer a swarm without naming \
+             one, assume this workspace."
+        ),
+        None => "No swarm (ABW workspace) is currently selected. If the operator \
+            asks to compose a swarm, ask them to select one in the Browse tab first."
+            .to_string(),
+    };
+    format!(
+        "## Agent Swarm Panel — Steer Mode\n\
+         \n\
+         You are operating in the Agent Swarm panel's Steer mode, scoped to the \
+         `{SWARM_SERVER}` MCP server. The swarm server's tools \
+         (`swarm_list_agents`, `swarm_get_swarm`, `swarm_hire_cost`, \
+         `swarm_request_consent`, `swarm_hire`, `swarm_delegate`, `swarm_xaman`) \
+         are available in this conversation.\n\
+         \n\
+         {workspace_note}\n\
+         \n\
+         The `swarm-intelligence` skill is available for swarm composition and \
+         steering. When the operator asks to compose, configure, tune, or steer a \
+         swarm toward a target condition, invoke the `swarm-intelligence` skill \
+         with the swarm id and the operator's task. The skill runs a SENSE → ORIENT \
+         → DECIDE → ACT → CHECK → CONVERGE loop and emits gated \
+         `swarm_update_swarm`/`swarm_delegate` calls with a `DispatchIntent` \
+         consent gate.\n\
+         \n\
+         Do not hire or delegate without the skill's consent gate producing a \
+         `GateDecision::Proceed`. The consent gate is the enforcement point — \
+         it must actually block, not just warn.\n"
+    )
+    .into()
+}
 
 pub fn init(cx: &mut App) {
     register_serializable_item::<SwarmPanel>(cx);
@@ -116,6 +176,11 @@ enum PanelMode {
     Browse,
     Author,
     Compose,
+    /// Steer: a `ConversationView` scoped to the swarm MCP server. The
+    /// operator asks the curator to compose/steer a swarm; the curator's
+    /// `SkillTool` invokes the `swarm-intelligence` cascade. Mirrors
+    /// `KaskPanel`'s per-tab `ConversationView` pattern.
+    Steer,
 }
 
 // ── View model ─────────────────────────────────────────────────────────────
@@ -240,6 +305,9 @@ fn extract_agent_mentions(content: &serde_json::Value) -> Vec<String> {
 // ── Panel ──────────────────────────────────────────────────────────────────
 
 pub struct SwarmPanel {
+    workspace: WeakEntity<Workspace>,
+    project: Entity<Project>,
+    fs: std::sync::Arc<dyn Fs>,
     list: UniformListScrollHandle,
     is_fetching: bool,
     fetch_error: Option<SharedString>,
@@ -260,12 +328,21 @@ pub struct SwarmPanel {
     selected_workspace: Option<String>,
     /// A spend currently in flight (after consent), shown as a busy state.
     spend_in_flight: Option<String>,
-    /// Which surface is active: browse, author, or compose.
+    /// Which surface is active: browse, author, compose, or steer.
     mode: PanelMode,
     /// Authoring form state.
     author: AuthorForm,
     /// Composition form state.
     compose: ComposeForm,
+    /// Lazily-constructed `ConversationView` for Steer mode, scoped to the
+    /// swarm MCP server. `None` until the operator first selects Steer.
+    /// Mirrors `KaskPanel`'s `threads: HashMap<usize, Entity<ConversationView>>`
+    /// — one retained view, reused across re-renders.
+    steer_conversation: Option<Entity<ConversationView>>,
+    /// Per-view connection store for the Steer `ConversationView`. Mirrors
+    /// `KaskPanel`'s per-tab `connection_stores` (one store = one connection
+    /// = one prompt, preventing cross-view prompt bleed).
+    steer_connection_store: Option<Entity<AgentConnectionStore>>,
 }
 
 /// State for the agent-authoring surface.
@@ -313,6 +390,9 @@ struct PendingHire {
 
 impl SwarmPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Workspace>) -> Entity<Self> {
+        let workspace = cx.entity().downgrade();
+        let project = cx.entity().read(cx).project().clone();
+        let fs = cx.entity().read(cx).app_state().fs.clone();
         cx.new(|cx| {
             let query_editor = cx.new(|cx| {
                 let mut input = Editor::single_line(window, cx);
@@ -377,6 +457,9 @@ impl SwarmPanel {
             };
 
             let mut this = Self {
+                workspace,
+                project,
+                fs,
                 list: scroll_handle,
                 is_fetching: false,
                 fetch_error: None,
@@ -393,6 +476,8 @@ impl SwarmPanel {
                 mode: PanelMode::Browse,
                 author,
                 compose,
+                steer_conversation: None,
+                steer_connection_store: None,
             };
             this.fetch_all(cx);
             this
@@ -732,6 +817,57 @@ impl SwarmPanel {
     fn set_mode(&mut self, mode: PanelMode, cx: &mut Context<Self>) {
         self.mode = mode;
         cx.notify();
+    }
+
+    /// Lazily construct the `ConversationView` for Steer mode if it doesn't
+    /// exist yet. Mirrors `KaskPanel::ensure_thread_for_tab`: constructs a
+    /// `CuratorAgentServer` scoped to the swarm MCP server, with a system
+    /// prompt that tells the curator about the `swarm-intelligence` skill and
+    /// the active swarm. The curator's `SkillTool` invokes the cascade when
+    /// the operator asks to compose/steer a swarm.
+    ///
+    /// `window` is required because `ConversationView::new` may focus its
+    /// inner `MessageEditor`.
+    fn ensure_steer_conversation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.steer_conversation.is_some() {
+            return;
+        }
+
+        let thread_store = ThreadStore::global(cx);
+        let agent_server = std::rc::Rc::new(
+            agent::CuratorAgentServer::new(self.fs.clone(), thread_store)
+                .with_extra_static_context(steer_system_prompt(self.selected_workspace.as_deref()))
+                .with_mcp_server_scope(SWARM_SERVER.into()),
+        );
+
+        let connection_store = self
+            .steer_connection_store
+            .get_or_insert_with(|| cx.new(|cx| AgentConnectionStore::new(self.project.clone(), cx)))
+            .clone();
+
+        let thread_id = agent_ui::ThreadId::new();
+        let conversation_view = cx.new(|cx| {
+            ConversationView::new(
+                agent_server,
+                connection_store,
+                Agent::Curator,
+                None, // no resume session
+                Some(thread_id),
+                None, // no work_dirs
+                None, // no title
+                None, // no initial content — the system prompt is injected
+                // via `with_extra_static_context`; the input editor starts
+                // empty so the operator types their composition intent.
+                self.workspace.clone(),
+                self.project.clone(),
+                None, // no thread_store — steer conversations are not persisted
+                AgentThreadSource::AgentPanel,
+                window,
+                cx,
+            )
+        });
+
+        self.steer_conversation = Some(conversation_view);
     }
 
     /// Create a new agent from the authoring form.
@@ -1552,6 +1688,12 @@ impl SwarmPanel {
 
 impl Render for SwarmPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // If deserialized into Steer mode (or the operator switched via a
+        // path that didn't go through the toggle handler), ensure the
+        // conversation exists before rendering.
+        if matches!(self.mode, PanelMode::Steer) {
+            self.ensure_steer_conversation(window, cx);
+        }
         v_flex()
             .size_full()
             .bg(cx.theme().colors().editor_background)
@@ -1609,6 +1751,13 @@ impl Render for SwarmPanel {
                                             this.set_mode(PanelMode::Compose, cx);
                                         }),
                                     ),
+                                    ToggleButtonSimple::new(
+                                        "Steer",
+                                        cx.listener(|this, _event, window, cx| {
+                                            this.set_mode(PanelMode::Steer, cx);
+                                            this.ensure_steer_conversation(window, cx);
+                                        }),
+                                    ),
                                 ],
                             )
                             .style(ToggleButtonGroupStyle::Outlined)
@@ -1619,6 +1768,7 @@ impl Render for SwarmPanel {
                                 PanelMode::Browse => 0,
                                 PanelMode::Author => 1,
                                 PanelMode::Compose => 2,
+                                PanelMode::Steer => 3,
                             })
                             .into_any_element(),
                         ),
@@ -1685,6 +1835,30 @@ impl Render for SwarmPanel {
                         PanelMode::Author => this.child(self.render_author(cx)).into_any_element(),
                         PanelMode::Compose => {
                             this.child(self.render_compose(cx)).into_any_element()
+                        }
+                        PanelMode::Steer => {
+                            // The `ConversationView` is lazily constructed
+                            // in the Steer toggle handler; render it here. If
+                            // it's somehow absent (e.g. the panel was
+                            // deserialized into Steer mode), render a
+                            // placeholder — the operator can re-click Steer.
+                            match &self.steer_conversation {
+                                Some(view) => this.child(view.clone()).into_any_element(),
+                                None => this
+                                    .child(
+                                        h_flex()
+                                            .flex_1()
+                                            .items_center()
+                                            .justify_center()
+                                            .child(
+                                                Label::new(
+                                                    "Steer mode — re-click Steer to start a composition conversation",
+                                                )
+                                                .color(Color::Muted),
+                                            ),
+                                    )
+                                    .into_any_element(),
+                            }
                         }
                         PanelMode::Browse => {
                             let count = self.filtered_entry_indices.len();
@@ -1804,6 +1978,9 @@ mod tests {
         for tool in [
             "swarm_list_agents",
             "swarm_get_swarm",
+            "swarm_get_agent",
+            "swarm_list_apps",
+            "swarm_ontology_templates",
             "swarm_hire_cost",
             "swarm_request_consent",
             "swarm_hire",
@@ -1813,6 +1990,8 @@ mod tests {
             "swarm_generate_ontology",
             "swarm_create_agent",
             "swarm_create_swarm",
+            "swarm_xaman",
+            "swarm_create_app",
         ] {
             assert!(tool.starts_with("swarm_"));
         }
@@ -1838,5 +2017,34 @@ mod tests {
     fn extract_wallet_balance_absent_on_garbage() {
         assert_eq!(extract_wallet_balance("not json"), None);
         assert_eq!(extract_wallet_balance("{}"), None);
+    }
+
+    // Steer mode: the system prompt must name the `swarm-intelligence` skill
+    // and the swarm MCP server scope, so the curator knows to invoke the
+    // skill for composition/steering requests. Pins the §13 wiring.
+    #[test]
+    fn steer_system_prompt_names_skill_and_server() {
+        let prompt = steer_system_prompt(Some("ws_test"));
+        assert!(
+            prompt.contains("swarm-intelligence"),
+            "steer prompt must name the swarm-intelligence skill"
+        );
+        assert!(
+            prompt.contains(SWARM_SERVER),
+            "steer prompt must name the swarm MCP server scope"
+        );
+        assert!(
+            prompt.contains("ws_test"),
+            "steer prompt must include the selected workspace id"
+        );
+    }
+
+    #[test]
+    fn steer_system_prompt_handles_no_workspace() {
+        let prompt = steer_system_prompt(None);
+        assert!(
+            prompt.contains("No swarm"),
+            "steer prompt must guide the operator when no workspace is selected"
+        );
     }
 }
