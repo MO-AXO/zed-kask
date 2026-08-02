@@ -1562,7 +1562,7 @@ pub struct KaskSettingsContent {
 pub struct KaskCollabSettingsContent {
     /// Whether to auto-launch the local collab server at startup.
     pub enabled: Option<bool>,
-    /// SQLite connection string (e.g. `sqlite:./kask_marketplace.db`).
+    /// SQLite connection string (e.g. `sqlite:kask_marketplace.db?mode=rwc`).
     pub database_url: Option<String>,
     /// HTTP port the collab server listens on.
     pub http_port: Option<u16>,

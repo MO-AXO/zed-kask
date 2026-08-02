@@ -215,7 +215,7 @@ impl Default for KaskCollabSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            database_url: "sqlite:./kask_marketplace.db".into(),
+            database_url: "sqlite:kask_marketplace.db?mode=rwc".into(),
             http_port: 3000,
             zed_environment: "development".into(),
             marketplace_url: "http://localhost:3000".into(),
@@ -1468,7 +1468,7 @@ mod tests {
             default.enabled,
             "KaskCollabSettings::default() must be enabled"
         );
-        assert_eq!(default.database_url, "sqlite:./kask_marketplace.db");
+        assert_eq!(default.database_url, "sqlite:kask_marketplace.db?mode=rwc");
         assert_eq!(default.http_port, 3000);
         assert_eq!(default.zed_environment, "development");
         assert_eq!(default.marketplace_url, "http://localhost:3000");
@@ -1497,7 +1497,10 @@ mod tests {
         let settings = KaskSettings::from(content);
         assert!(settings.collab.enabled);
         assert_eq!(settings.collab.http_port, 3000);
-        assert_eq!(settings.collab.database_url, "sqlite:./kask_marketplace.db");
+        assert_eq!(
+            settings.collab.database_url,
+            "sqlite:kask_marketplace.db?mode=rwc"
+        );
     }
 
     #[test]

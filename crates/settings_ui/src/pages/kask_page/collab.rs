@@ -28,7 +28,7 @@ pub(crate) fn render_collab_page(
     let database_url_input = kask_string_input(
         "kask-collab-database-url",
         "Database URL",
-        "sqlite:./kask_marketplace.db",
+        "sqlite:kask_marketplace.db?mode=rwc",
         database_url,
         "collab",
         "database_url",
@@ -137,7 +137,7 @@ pub(crate) fn render_collab_page(
                 .child(
                     Label::new(
                         "SQLite connection string for the local collab server \
-                         (e.g. sqlite:./kask_marketplace.db).",
+                         (e.g. sqlite:kask_marketplace.db?mode=rwc).",
                     )
                     .size(LabelSize::Small)
                     .color(Color::Muted),
