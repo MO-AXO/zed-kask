@@ -180,8 +180,12 @@ and `skills` (skill ids). `swarm_delegate_local` declares the card's
 `mcp_tools` to the model and dispatches model tool calls through the zed IPC
 bridge's `ToolInvoke` method (governed `McpRuntime` on the zed side, panel
 token). Tool calls are allowlisted to the card's declared tools. Declared
-`skills` are carried on the card and in create/clone/push, but are **not yet
-executed** in local mode — the skill-exec IPC method is the follow-up.
+`skills` are executed against the task through the zed-side `ManifestExecutor`
+(IPC `SkillExecute` method, capped at 3 per delegation) **before** the LLM
+call; each cascade's output is guard-scanned and injected into the prompt as
+context. A missing/failed skill is recorded (`executed_skills` in the
+response) and the delegation proceeds; a skill output that trips the input
+guard rejects the delegation (an injection from a skill is a finding).
 
 ### 15.4 Backend toggle
 

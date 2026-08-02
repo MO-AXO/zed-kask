@@ -446,6 +446,10 @@ pub struct SwarmPanel {
     /// Current ABW wallet balance (the algedonic channel). `None` = unknown
     /// (unauthenticated or the balance query failed) — never a fabricated zero.
     wallet_balance: Option<i64>,
+    /// Current local ledger balance (v2 §15). `None` = unknown or the local
+    /// runtime isn't initialized. Displayed in the header when the backend
+    /// mode is `local`.
+    local_balance: Option<i64>,
     /// In-flight consent prompt for a hire action: the agent being considered
     /// plus its pre-flight cost estimate. `Some` renders the consent banner.
     pending_hire: Option<PendingHire>,
@@ -613,6 +617,7 @@ impl SwarmPanel {
                 _subscriptions: subscriptions,
                 search_task: None,
                 wallet_balance: None,
+                local_balance: None,
                 pending_hire: None,
                 selected_workspace: None,
                 spend_in_flight: None,
@@ -886,6 +891,31 @@ impl SwarmPanel {
                     cx.notify();
                 })
                 .ok();
+                // Read the local ledger balance (v2 §15), in the async scope
+                // (the update closure above is sync). Independent of the list
+                // fetch; a failure leaves the balance unknown (None), never a
+                // fabricated zero.
+                let balance_result = invoker
+                    .invoke_tool(SWARM_SERVER, "swarm_balance_local", json!({}))
+                    .await;
+                this.update(cx, |this, cx| {
+                    match balance_result {
+                        Ok(output) => {
+                            let parsed = parse_tool_response(&output);
+                            if let Some(content) = parsed {
+                                this.local_balance =
+                                    content.get("balance").and_then(|b| b.as_i64());
+                            }
+                        }
+                        Err(err) => {
+                            log::debug!(
+                                "swarm-panel: local balance fetch failed (non-fatal): {err}"
+                            );
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
             }
         })
         .detach();
@@ -1043,15 +1073,20 @@ impl SwarmPanel {
                                         .get("within_budget")
                                         .and_then(|c| c.as_bool())
                                         .unwrap_or(false),
-                                    // Fallback mirrors `SwarmConfig::default().max_credits_per_dispatch`
-                                    // (50) — the server always sends this field, so the fallback
-                                    // only fires on a malformed response. Keep in sync with the
-                                    // server default if it changes.
+                                    // Fallback mirrors the server default — the
+                                    // server always sends this field, so the
+                                    // fallback only fires on a malformed response.
+                                    // Read from `Default` (single source of truth)
+                                    // rather than a magic number.
                                     max_credits: content
                                         .get("max_credits_per_dispatch")
                                         .and_then(|c| c.as_u64())
-                                        .unwrap_or(50)
-                                        as u32,
+                                        .unwrap_or_else(|| {
+                                            u64::from(
+                                                kask_bridge::KaskSwarmSettings::default()
+                                                    .max_credits_per_dispatch,
+                                            )
+                                        }) as u32,
                                 });
                             }
                             None => {
@@ -2345,7 +2380,27 @@ impl Render for SwarmPanel {
                                             Color::Muted
                                         }),
                                 )
-                            }),
+                            })
+                            // v2 §15: in local mode the algedonic channel is the
+                            // local ledger balance (operator-funded). Shown only
+                            // when the backend mode is local; hidden when unknown
+                            // — never a fabricated zero.
+                            .when(
+                                Self::current_swarm_mode(cx) == kask_bridge::SwarmModeConfig::Local,
+                                |this| {
+                                    this.when_some(self.local_balance, |this, balance| {
+                                        this.child(
+                                            Label::new(format!("■ {balance} local credits"))
+                                                .size(LabelSize::Small)
+                                                .color(if balance <= 0 {
+                                                    Color::Warning
+                                                } else {
+                                                    Color::Muted
+                                                }),
+                                        )
+                                    })
+                                },
+                            ),
                     )
                     // v2 §15: the mode toggle re-routes the swarm server
                     // between ABW (v1) and the local substrate (v2). Writing
@@ -2705,6 +2760,7 @@ mod tests {
             "swarm_create_app",
             // v2 §15 local tools (Slices 9 + 11).
             "swarm_fund_local",
+            "swarm_balance_local",
             "swarm_delegate_local",
             "swarm_list_local_agents",
             "swarm_clone_to_local",
@@ -2897,6 +2953,7 @@ mod tests {
         let prompt = steer_system_prompt(Some("ws_test"), kask_bridge::SwarmModeConfig::Local);
         for tool in [
             "swarm_list_local_agents",
+            "swarm_balance_local",
             "swarm_fund_local",
             "swarm_delegate_local",
             "swarm_clone_to_local",
