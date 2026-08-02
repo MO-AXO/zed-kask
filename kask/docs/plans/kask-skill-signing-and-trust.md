@@ -174,6 +174,28 @@ flowchart TD
     VerifyClient -->|extract| Install
 ```
 
+### Skill lifecycle (reference)
+
+A skill moves through the trust model as a state machine. `expires_at` is set
+at signing time (D2); verification happens at upload (fail closed, 400) and on
+the poll (skip + warn); the catalog filter is the enforcement point and the
+sweep is the cleanup. Re-publishing (a new signature) restarts the clock from
+the new `expires_at` — the only way to relist an expired skill.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Local: skill authored, visibility Private
+    Local --> Published: toggle Public + publish (sign canonical bytes)
+    Published --> Rejected: upload verification fails (400)
+    Published --> Verified: upload verification passes
+    Verified --> Listed: manifest indexed (immediate or poll)
+    Listed --> Expired: expires_at passes (catalog filter)
+    Expired --> Purged: expiry sweep deletes rows
+    Listed --> Local: unpublish (visibility Private)
+    Rejected --> Local: fix manifest and re-sign
+    Purged --> Local: re-publish with new signature
+```
+
 ## Phased plan
 
 ### Phase 1 — Manifest fields + client signing (client-only) ✅ COMPLETE

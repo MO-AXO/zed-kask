@@ -135,15 +135,15 @@ impl CuratorDb {
             .unwrap_or_else(|| {
                 let p = hkask_types::agent_paths::agent_pod_db("curator");
                 let resolved = hkask_types::agent_paths::resolve_under_data_dir(&p);
-                if let Some(parent) = resolved.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        tracing::warn!(
-                            target: "hkask.mcp.curator",
-                            error = %e,
-                            path = ?parent,
-                            "Failed to create curator data directory — DB open will likely fail"
-                        );
-                    }
+                if let Some(parent) = resolved.parent()
+                    && let Err(e) = std::fs::create_dir_all(parent)
+                {
+                    tracing::warn!(
+                        target: "hkask.mcp.curator",
+                        error = %e,
+                        path = ?parent,
+                        "Failed to create curator data directory — DB open will likely fail"
+                    );
                 }
                 resolved.to_string_lossy().to_string()
             });
@@ -243,10 +243,10 @@ impl CuratorDb {
             .last_heal_attempt
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        if let Some(prev) = *last {
-            if now.duration_since(prev) < HEAL_RETRY_INTERVAL {
-                return false;
-            }
+        if let Some(prev) = *last
+            && now.duration_since(prev) < HEAL_RETRY_INTERVAL
+        {
+            return false;
         }
         *last = Some(now);
         true
@@ -363,7 +363,8 @@ impl CuratorServer {
             let stores = self.db.get();
             let queue = stores.escalation_queue()?;
             let events_store = stores.regulation_store()?;
-            let events: Arc<dyn RegulationSink> = Arc::clone(events_store);
+            let events: Arc<dyn RegulationSink> =
+                Arc::clone(events_store) as Arc<dyn RegulationSink>;
             // Attribution is server-side: the MCP request carries no caller
             // identity. The resolution note is recorded in the Regulation
             // event so the audit trail keeps it.
@@ -390,7 +391,8 @@ impl CuratorServer {
             let stores = self.db.get();
             let queue = stores.escalation_queue()?;
             let events_store = stores.regulation_store()?;
-            let events: Arc<dyn RegulationSink> = Arc::clone(events_store);
+            let events: Arc<dyn RegulationSink> =
+                Arc::clone(events_store) as Arc<dyn RegulationSink>;
             match governance::dismiss_direct(queue, &events, &req.id, "curator", Some(&req.reason))
             {
                 Ok(()) => Ok(json!({"dismissed": true, "id": req.id})),

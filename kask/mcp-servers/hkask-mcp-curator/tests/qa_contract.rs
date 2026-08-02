@@ -134,8 +134,11 @@ fn make_server_with_token_registry() -> CuratorServer {
 
 /// Persist a synthetic Regulation event through the archive's
 /// `RegulationSink` surface, as the escalation resolve/dismiss paths do.
+/// Uses the `gas` span category so the event is visible to the algedonic
+/// replay (`query_algedonic` filters on `ALGEDONIC_SPAN_CATEGORIES`, which
+/// does not include `curation`).
 fn persist_regulation_event(store: &RegulationArchive, operation: &str) {
-    let ns = SpanNamespace::try_from(RegulationSpan::Curation).expect("canonical span");
+    let ns = SpanNamespace::try_from(RegulationSpan::Gas).expect("canonical span");
     let record = RegulationRecord::new(
         WebID::from_persona(b"curator"),
         Span::new(ns, operation),
