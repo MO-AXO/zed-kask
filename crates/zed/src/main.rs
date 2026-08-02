@@ -1522,7 +1522,7 @@ fn main() {
                                              http://localhost:{http_port}/api/kask-skills. \
                                              Remediation: build the collab binary \
                                              (`cargo build -p collab --features \
-                                             test-support`) or set \
+                                             sqlite`) or set \
                                              kask.collab.enabled = false in settings."
                                         );
                                     }
@@ -1538,7 +1538,7 @@ fn main() {
                                  kask extensions panel will not be able to fetch skills \
                                  from http://localhost:{} until the binary is built. \
                                  Remediation: build the collab binary \
-                                 (`cargo build -p collab --features test-support`) \
+                                 (`cargo build -p collab --features sqlite`) \
                                  or set kask.collab.enabled = false in settings.",
                                 collab_settings.http_port
                             );

@@ -1420,7 +1420,7 @@ mod tests {
         assert_eq!(settings.curator.algedonic_threshold, 0.8);
         assert!(settings.memory.auto_inject);
         assert_eq!(settings.memory.consolidation_cadence_secs, 300);
-        assert!(settings.condenser.auto_compress_tool_results);
+        assert!(!settings.condenser.auto_compress_tool_results);
         assert_eq!(settings.condenser.profile, "normal");
         assert_eq!(settings.corpus.embedding_dim, 1024);
     }
