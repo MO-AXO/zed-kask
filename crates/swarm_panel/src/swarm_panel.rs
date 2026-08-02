@@ -1138,7 +1138,7 @@ impl SwarmPanel {
         };
         self.swarm_detail = Some(SwarmDetailView {
             workspace_id: workspace_id.clone(),
-            name: name.clone(),
+            name,
             loading: true,
             error: None,
             agents: Vec::new(),
@@ -1196,7 +1196,7 @@ impl SwarmPanel {
             return;
         };
         self.run_status = Some(RunStatusView {
-            name: name.clone(),
+            name,
             loading: true,
             error: None,
             messages: Vec::new(),
@@ -2304,7 +2304,7 @@ impl SwarmPanel {
                 let detail_id = swarm_id.clone();
                 let detail_name = swarm_name.clone();
                 let runs_id = swarm_id.clone();
-                let runs_name = swarm_name.clone();
+                let runs_name = swarm_name;
                 MarketplaceCard::new().child(
                     h_flex()
                         .w_full()
@@ -2325,7 +2325,8 @@ impl SwarmPanel {
                                         .child(
                                             Label::new(format!(
                                                 "⛽ {}/{}",
-                                                swarm.remaining, swarm.budget
+                                                swarm.remaining.map_or("-".to_string(), |v| v.to_string()),
+                                                swarm.budget.map_or("-".to_string(), |v| v.to_string())
                                             ))
                                             .color(Color::Muted),
                                         ),

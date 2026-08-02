@@ -236,10 +236,14 @@ steps:
   - ordinal: 5
     action: select
     description: >
-      IMPLEMENT (Fagan rework — Act phase). User-gated via fix_mode. SKIPPED
-      when fix_mode == 'none' (the default) via step.condition — the review is
-      review-first; setting fix_mode to a non-`none` value IS the user's
-      consent to modify code. For each finding at/above the requested tier with
+      IMPLEMENT (Fagan rework — Act phase). Caller-gated via fix_mode. SKIPPED
+      by step.condition unless fix_mode is one of blockers/should_fix/all
+      (default-deny: absence and 'none' both skip — the review is review-first).
+      The executor cannot obtain interactive consent mid-cascade, so enabling
+      requires a caller that passes fix_mode into context (programmatic/CI, or a
+      future SkillToolInput params extension); the interactive skill tool passes
+      only {name, task} today, so this step is inert on that path. For each finding
+      at/above the requested tier with
       a concrete remedy, produce ONE surgical edit (file, location, exact
       verbatim old_text read from the actual file, new_text). Reuses the
       report's structural remedies. Honors project conventions and .rules.
@@ -248,7 +252,7 @@ steps:
     template_ref: code-review/code-review-implement
     gas_cap: 6144
     timeout_seconds: 120
-    condition: "fix_mode != 'none'"
+    condition: "fix_mode == 'blockers' OR fix_mode == 'should_fix' OR fix_mode == 'all'"
     input_mapping:
       adjudicated_findings: "{{ step_3_result.adjudicated_findings | default([]) }}"
       review: "{{ step_4_result.review | default({}) }}"
