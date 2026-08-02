@@ -223,7 +223,7 @@ pub async fn package_skill_for_publish(
     // operator can distinguish "key stored" from "key regenerated every
     // publish" (`.rules` startup-failure-signal trap).
     let signing_key = match load_signing_key(source_user) {
-        Some(key) => zeroize::Zeroizing::new(key),
+        Some(key) => key,
         None => {
             let key = generate_signing_keypair();
             if let Err(error) = store_signing_key(source_user, &key) {
@@ -671,11 +671,7 @@ mod tests {
         tampered.expires_at = "2099-01-01T00:00:00Z".to_string();
         let tampered_canonical = tampered.canonical_signing_bytes().unwrap();
         assert!(
-            !hkask_keystore::signing::verify(
-                &tampered_canonical,
-                &parsed_signature,
-                &public_key
-            ),
+            !hkask_keystore::signing::verify(&tampered_canonical, &parsed_signature, &public_key),
             "tampered expires_at must invalidate the signature"
         );
     }
