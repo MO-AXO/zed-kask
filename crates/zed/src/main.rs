@@ -2599,7 +2599,6 @@ impl hkask_types::SkillExecPort for AgentSkillExec {
         let name = name.to_string();
         let task = task.to_string();
         Box::pin(async move {
-            use agent::SkillManifestExecutor as _;
             let Some(executor) = agent::manifest_executor_cloned() else {
                 return Err("manifest executor not wired — skills cannot run".to_string());
             };
