@@ -296,8 +296,8 @@ struct SwarmCard {
     name: String,
     description: String,
     agent_count: u64,
-    budget: u64,
-    remaining: u64,
+    budget: Option<u64>,
+    remaining: Option<u64>,
 }
 
 // ── MCP response structs (minimal, mirror hkask-mcp-swarm's tool output) ────
@@ -877,8 +877,8 @@ impl SwarmPanel {
                                                 name: w.name.unwrap_or_default(),
                                                 description: w.description.unwrap_or_default(),
                                                 agent_count: w.agent_count.unwrap_or(0),
-                                                budget: w.workspace_budget.unwrap_or(0),
-                                                remaining: w.workspace_remaining.unwrap_or(0),
+                                                budget: w.workspace_budget,
+                                                remaining: w.workspace_remaining,
                                             })
                                         })
                                         .collect::<Vec<_>>();
