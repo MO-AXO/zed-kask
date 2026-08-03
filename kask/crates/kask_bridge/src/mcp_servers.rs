@@ -158,6 +158,9 @@ pub const BUILT_IN_MCP_SERVERS: &[BuiltinMcpServer] = &[
         description: "Media — image generation and media workflows",
         credentials: Some(&["FALAI_API_KEY", "DEEPINFRA_API_KEY"]),
         config_env: Some(&[
+            // Durable gallery DB path (WS-3). Unencrypted file SQLite — the
+            // media server reads it via std::env::var; absent → in-memory.
+            "HKASK_MEDIA_DB",
             "HKASK_MEDIA_TTS_MODEL",
             "HKASK_MEDIA_STT_MODEL",
             "HKASK_MEDIA_VISION_MODEL",
@@ -646,6 +649,43 @@ mod tests {
         assert!(
             !keys.contains(&"HKASK_SMTP_PASSWORD"),
             "media server must not receive SMTP credentials"
+        );
+    }
+
+    // The media server reads `HKASK_MEDIA_DB` (durable gallery DB path, WS-3)
+    // plus the four `HKASK_MEDIA_*_MODEL` overrides via `std::env::var`, so
+    // those must be in its `config_env` allowlist and unrelated vars must not.
+    // This is the config-env alignment enforcement point (the .rules
+    // "MCP server allowlists must align with actual env-var reads").
+    #[test]
+    fn media_config_env_includes_media_db_and_models() {
+        let mut config_env = std::collections::HashMap::new();
+        config_env.insert("HKASK_MEDIA_DB".to_string(), "/tmp/media.db".to_string());
+        config_env.insert("HKASK_MEDIA_TTS_MODEL".to_string(), "FA/x".to_string());
+        config_env.insert(
+            "HKASK_MEDIA_IMAGE_GEN_MODEL".to_string(),
+            "FA/flux".to_string(),
+        );
+        config_env.insert("UNRELATED_VAR".to_string(), "x".to_string());
+        config_env.insert("HKASK_DB_PASSPHRASE".to_string(), "secret".to_string());
+        let filtered = filter_config_env_for_server("media", &config_env);
+        let keys: Vec<&str> = filtered.keys().map(|k| k.as_str()).collect();
+        assert!(
+            keys.contains(&"HKASK_MEDIA_DB"),
+            "media server reads HKASK_MEDIA_DB — it must be in config_env"
+        );
+        assert!(
+            keys.contains(&"HKASK_MEDIA_TTS_MODEL"),
+            "media server reads HKASK_MEDIA_TTS_MODEL — it must be in config_env"
+        );
+        assert!(
+            !keys.contains(&"UNRELATED_VAR"),
+            "media server must not receive unrelated config env"
+        );
+        assert!(
+            !keys.contains(&"HKASK_DB_PASSPHRASE"),
+            "media gallery DB is unencrypted — it must NOT receive the global \
+             HKASK_DB_PASSPHRASE (credential-blast-radius rule)"
         );
     }
 
