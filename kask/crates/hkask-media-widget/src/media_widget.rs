@@ -145,10 +145,9 @@ impl MediaWidget {
                         }
                     } else if let Some(url) = &resolved.url
                         && let Some(path) = url.as_str().strip_prefix("file://")
+                        && let Err(error) = player.open(std::path::Path::new(path))
                     {
-                        if let Err(error) = player.open(std::path::Path::new(path)) {
-                            self.error = Some(SharedString::from(error.to_string()));
-                        }
+                        self.error = Some(SharedString::from(error.to_string()));
                     }
                 }
                 self.start_playback_loop(cx);
@@ -191,18 +190,17 @@ impl MediaWidget {
     }
 
     fn load_audio_data_uri(&mut self, player: &Arc<AudioPlayer>, url: &str) {
-        if let Some(encoded) = url.strip_prefix("data:audio/") {
-            if let Some((_, data)) = encoded.split_once(',') {
-                match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data) {
-                    Ok(bytes) => {
-                        if let Err(error) = player.play_bytes(bytes) {
-                            self.error = Some(SharedString::from(error.to_string()));
-                        }
+        if let Some(encoded) = url.strip_prefix("data:audio/")
+            && let Some((_, data)) = encoded.split_once(',')
+        {
+            match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data) {
+                Ok(bytes) => {
+                    if let Err(error) = player.play_bytes(bytes) {
+                        self.error = Some(SharedString::from(error.to_string()));
                     }
-                    Err(error) => {
-                        self.error =
-                            Some(SharedString::from(format!("base64 decode failed: {error}")));
-                    }
+                }
+                Err(error) => {
+                    self.error = Some(SharedString::from(format!("base64 decode failed: {error}")));
                 }
             }
         }

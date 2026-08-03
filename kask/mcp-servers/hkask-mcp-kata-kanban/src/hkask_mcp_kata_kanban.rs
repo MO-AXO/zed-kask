@@ -923,16 +923,15 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
                         let relative_path = hkask_types::agent_paths::agent_kanban_db("curator");
                         let default_path =
                             hkask_types::agent_paths::resolve_under_data_dir(&relative_path);
-                        if let Some(Err(error)) = default_path.parent().map(std::fs::create_dir_all) {
-                                tracing::warn!(
-                                    target: "hkask.mcp.kata_kanban",
-                                    path = %default_path.display(),
-                                    %error,
-                                    "Failed to create default kanban DB directory \
-                                     — the subsequent DB open will surface the failure"
-                                );
-                            }
-
+                        if let Some(Err(error)) = default_path.parent().map(std::fs::create_dir_all)
+                        {
+                            tracing::warn!(
+                                target: "hkask.mcp.kata_kanban",
+                                path = %default_path.display(),
+                                %error,
+                                "Failed to create default kanban DB directory \
+                                 — the subsequent DB open will surface the failure"
+                            );
                         }
                         tracing::info!(
                             target: "hkask.mcp.kata_kanban",
