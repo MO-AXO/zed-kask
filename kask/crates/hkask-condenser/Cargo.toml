@@ -10,8 +10,7 @@ description = "Context condensation domain logic — compression algorithms, cla
 path = "src/hkask_condenser.rs"
 
 [dependencies]
-hkask-bridge-dublincore = { path = "../hkask-bridge-dublincore" }
-hkask-mcp-server = { path = "../hkask-mcp-server" }
+hkask-mcp-server.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
