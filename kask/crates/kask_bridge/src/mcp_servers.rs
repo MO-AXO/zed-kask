@@ -625,6 +625,7 @@ mod tests {
             "OPENROUTER_API_KEY",
             "KILOCODE_API_KEY",
             "HKASK_SMTP_PASSWORD",
+            "HKASK_DB_PASSPHRASE",
         ]
         .iter()
         .map(|env| (env.to_string(), "url".to_string()))
@@ -650,6 +651,10 @@ mod tests {
             !keys.contains(&"HKASK_SMTP_PASSWORD"),
             "media server must not receive SMTP credentials"
         );
+        assert!(
+            !keys.contains(&"HKASK_DB_PASSPHRASE"),
+            "media server must not receive the global DB passphrase — gallery DB is unencrypted (credential-blast-radius)"
+        );
     }
 
     // The media server reads `HKASK_MEDIA_DB` (durable gallery DB path, WS-3)
@@ -662,6 +667,11 @@ mod tests {
         let mut config_env = std::collections::HashMap::new();
         config_env.insert("HKASK_MEDIA_DB".to_string(), "/tmp/media.db".to_string());
         config_env.insert("HKASK_MEDIA_TTS_MODEL".to_string(), "FA/x".to_string());
+        config_env.insert("HKASK_MEDIA_STT_MODEL".to_string(), "FA/wizper".to_string());
+        config_env.insert(
+            "HKASK_MEDIA_VISION_MODEL".to_string(),
+            "KC/qwen-vl".to_string(),
+        );
         config_env.insert(
             "HKASK_MEDIA_IMAGE_GEN_MODEL".to_string(),
             "FA/flux".to_string(),
@@ -677,6 +687,14 @@ mod tests {
         assert!(
             keys.contains(&"HKASK_MEDIA_TTS_MODEL"),
             "media server reads HKASK_MEDIA_TTS_MODEL — it must be in config_env"
+        );
+        assert!(
+            keys.contains(&"HKASK_MEDIA_STT_MODEL"),
+            "media server reads HKASK_MEDIA_STT_MODEL — it must be in config_env"
+        );
+        assert!(
+            keys.contains(&"HKASK_MEDIA_VISION_MODEL"),
+            "media server reads HKASK_MEDIA_VISION_MODEL — it must be in config_env"
         );
         assert!(
             !keys.contains(&"UNRELATED_VAR"),
