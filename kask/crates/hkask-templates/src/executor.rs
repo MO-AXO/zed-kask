@@ -1042,7 +1042,7 @@ impl ManifestExecutor {
                         );
                         step_idx = pos;
                         continue;
-                    } else if context.get(&result_key).is_none() {
+                    } else if !context.contains_key(&result_key) {
                         // The step declared a `branching` map but its action did
                         // not emit a `step_{ordinal}_result` key (e.g. `populate`
                         // stores `step_{ordinal}_populated`). The branching map can
