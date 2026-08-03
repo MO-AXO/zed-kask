@@ -9,9 +9,43 @@
 > sections; the two external sources are cited by URL and quoted where
 > load-bearing. When this document disagrees with the code, the code wins.
 >
-> **Status:** reference + findings, 2026-08-02. Not yet implemented — the
-> findings (§7) are proposals ranked by leverage, with implementation
+> **Status:** reference + findings, 2026-08-02 (revision 2). Not yet implemented
+> — the components (§6) are proposals ranked by leverage, with implementation
 > sequencing in §8 governed by the dependency hierarchy (§3).
+
+## Design constraints (this revision)
+
+This revision is governed by four constraints that override the earlier draft:
+
+1. **The fusion system was deprecated and removed.** Verified: `grep` for
+   `fusion|panel_models|MultiModelInferencePort|FusionProvider` in
+   `kask/**/*.rs` returns **zero matches**. Any proposal that relied on
+   `kask.fusion.panel_models` as a judge asset is withdrawn. (The repo `.rules`
+   still carries 5 stale fusion references — see Appendix B; those `.rules`
+   entries are themselves a finding, not a live spec.)
+2. **LLM-as-a-judge is deprecated as a concept.** A probabilistic scorer that
+   rates outputs is not an acceptable evaluation path anywhere in this plan.
+   This rules out the LLM rank-vector judge from S5 (JudgeFlow) and the LLM
+   scoring step from S7 (MASS Stage 1/3 MIPRO). Generation (an LLM *producing*
+   text, e.g. `swarm_generate_prompt` writing a new system prompt) is a
+   different use and remains admissible; only *judging* (scoring/ranking) must
+   be deterministic.
+3. **If we use a judge, it must be deterministic, not probabilistic** — "which
+   isn't usually what is meant by a judge." The acceptable "judge" is a
+   deterministic rule: test pass/fail, schema validation, exit code, regex /
+   reference match, a guard-scan flag, or a deterministic aggregation of those.
+   The responsibility-attribution mechanism ported from S5 is therefore a
+   *deterministic rule over the `delegate` trace*, not an LLM rank — see C5 in
+   §6.
+4. **There are no backward-compatibility requirements.** Fields can be
+   renamed, manifest steps added/removed, `d` restructured, the fusion
+   references deleted outright (not deprecated). No migration notes are
+   needed; this plan proposes the target shape directly.
+
+The frame is **focused on specific value-added components to integrate per
+source** (§6), not broad "partial ports." Each of the seven sources contributes
+one scoped, deterministic component; everything else from that source is
+explicitly dropped with a reason.
 
 ## 0. Sources and reference models
 
@@ -27,8 +61,8 @@
 | S6 | *OFA-MAS / OFA-TAD* (arXiv:2601.12996, WWW 2026) | https://arxiv.org/abs/2601.12996 | Learned topology generator; task-aware sparse-gating encoder (TAGSE) |
 | S7 | *Multi-Agent Design / MASS* (arXiv:2502.02533, ICLR 2026) | https://arxiv.org/abs/2502.02533 | Three-stage interleaved optimization: prompts → topology → prompts |
 
-S1 and S2 are the **frame**; S3–S7 are the **prior deep-reads** whose findings
-this plan reframes cybernetically (see §6).
+S1 and S2 are the **frame**; S3–S7 are the **prior deep-reads** from which §6
+extracts one specific value-added component each.
 
 ### 0.2 The cybernetic lineage (S1 §2, S2)
 
@@ -111,7 +145,7 @@ plan (`abw-swarm-intelligence.md`).
 | **P2** Requisite variety | `min(V(O),V(I)) ≥ V(W)`; hierarchical tool org; **escalation decisions are part of V(O)** (S1 §3.1) | `LocalAgentCard.capabilities.mcp_tools[]`/`skills[]` = V(O); the consent gate's *refusal* (`PaymentRequired`, ceiling exceeded) is an escalation decision = V(O) output; `LazyToolRouter` filters MCP tools to avoid floods = hierarchical compression | **Has** | S1's "selection cost" (large V(O) forces capacity spent navigating own state) is exactly what `LazyToolRouter` addresses. Fit is clean. |
 | **P3** Goal homeostasis, two-level | Inner loop: re-inject original task every k steps, boundary monitors; **outer loop: restructure goal or escalate to human** (S1 §3.1) | `task` passed to SENSE/ORIENT/DECIDE/ACT via `input_mapping` (manifest L130–214) = inner-loop re-injection ✓. **Algedonic override**: 402 / un-acknowledged curator dispatch escalates regardless of `d` (manifest L35–37, L280) = outer-loop escalation ✓ | **Partial** | **No explicit goal-drift boundary monitor.** S1's R-CG2/R-AR2 pattern: classify each requirement done/in-progress/broken; if `m` consecutive checkpoints report the same broken invariant, trigger outer loop. hKask's CONVERGE checks Cauchy on `d`, not goal-drift similarity `sim(q_t, Q) < δ_drift`. The algedonic fires on a *payment* signal, not a *goal-drift* signal. |
 | **P4** Black-box environment modelling | Treat prior knowledge as falsifiable; low-cost probes before consequential actions; treat errors as informative (S1 §3.1) | ABW treated as black box — `abw-swarm-intelligence.md` §0 "API surface (verified live)" + the `swarm_hire` two-phase consume pattern (consume cost=0 to validate scope+single-use, then re-verify real cost vs ABW, refund on failure — `hkask_mcp_swarm.rs` L1356–1420) IS exploratory probing before spend | **Has** | The two-phase consent consume is a textbook P4 probe-then-act. Strong fit. |
-| **P5** Second-order agent regulation | Monitor own inferential process: loop detection, declining confidence, reasoning inconsistency; **confidence-gated escalation to human**. S1 §5.4: *"P5 meta-cognitive monitoring as the highest-value, lowest-cost intervention across all three domains"* | CONVERGE's Cauchy criterion detects *iterate stabilization* (`next_focus` stops changing) = loop detection at the swarm level. The fusion panel (`kask.fusion.panel_models`) exists but is **not wired as a second-order monitor** | **Gap (S1's headline finding)** | S1 §5.4 verdict applies directly: *"P5 is most consistently absent from current systems … low-cost to implement (statistical functions over the action log), expected benefit high."* hKask detects *swarm-state* loops (Cauchy) but not *curator-reasoning* loops (repeated hire→fire→hire→fire, declining output quality, citation cycling). The fusion panel is the unused monitor asset. |
+| **P5** Second-order agent regulation | Monitor own inferential process: loop detection, declining confidence, reasoning inconsistency; **confidence-gated escalation to human**. S1 §5.4: *"P5 meta-cognitive monitoring as the highest-value, lowest-cost intervention across all three domains"* and *"statistical functions over the action log requiring no modifications to the underlying model"* | CONVERGE's Cauchy criterion detects *iterate stabilization* (`next_focus` stops changing) = loop detection at the swarm level. **No statistical monitor over the iteration span log** exists today. (The fusion panel that an earlier draft proposed as the monitor asset has been removed from the codebase — see Design Constraint 1.) | **Gap (S1's headline finding, and deterministic by S1's own framing)** | S1 §5.4: *"P5 is most consistently absent from current systems … low-cost to implement (statistical functions over the action log), expected benefit high."* hKask detects *swarm-state* loops (Cauchy on `d`) but not *curator-reasoning* loops. The monitor is **deterministic by construction** — statistics over the span log, no LLM — which is exactly the determinism Constraint 3 requires. See component C1 in §6. |
 | **P6** Context entropy minimization | Retain content iff it increases `I(a_t; goal | c_t)`; active compression, principled forgetting (S1 §3.1) | Within-skill: CONVERGE feeds only `next_focus` + `lessons_learned` back (compressed ✓). Within-`delegate`: tool-loop appends results as raw user messages across `MAX_TOOL_ROUNDS` (NOT compressed); `executed_skills`/`tool_calls` summaries are returned to the caller, not fed back into the loop | **Partial** | S1 P6: raw interaction history has high entropy / low predictive value; a structured summary carries more mutual information. hKask's summaries are the right shape but aren't compressed into the next round's context. |
 
 ## 3. The three desiderata × hKask (the dependency hierarchy)
@@ -185,133 +219,401 @@ descending (task-failure).** S2's prescribed remedy — Go See as a *fixed
 feedback loop* — is the human-in-the-loop mechanism that compensates for a
 sensor that cannot, by Ashby's law, carry the full variety of task success.
 
-### 5.1 Why Go See cannot be fully automated (the cybernetic bound)
+### 5.1 Why Go See cannot be fully automated (the cybernetic bound, and the determinism constraint)
 
-The prior five papers (S3–S7) all attempt to *automate* the Go See signal:
+The prior five papers (S3–S7) all attempt to *automate* the Go See signal. Under
+this revision's determinism constraint, only the **deterministic** evaluators
+among them survive:
 
-- S3 SwarmAgentic: `J(S)` task-success on a training set.
-- S4 HyEvo: `R(𝒢) = λ1·S + λ2·U_c(C_q) + λ3·U_t(T_q)`.
-- S5 JudgeFlow: `φ_eval(a'_M, a)` against ground truth `a`.
-- S6 OFA-MAS: task accuracy on 6 benchmarks (Stage-3 fine-tuning).
-- S7 MASS: `E_D` on a held-out sample.
+- S3 SwarmAgentic: `J(S)` — task-specific verifier (TravelPlanner's constraint
+  checker) or LLM judge (Creative Writing). The **verifier** path is
+  deterministic and admissible; the LLM-judge path is deprecated (Constraint 2).
+- S4 HyEvo: `R(𝒢)`'s `S_q` term — accuracy (math) or pass@1 (code). Both are
+  **deterministic** (exact match / test pass). Admissible. The `U_c`/`U_t`
+  cost/latency terms are deterministic measurements. Admissible.
+- S5 JudgeFlow: `φ_eval(a'_M, a)` — in the paper's math/code benchmarks this is
+  **exact-match / pass@1**, a deterministic evaluator. Admissible as the
+  *failure predicate*. The *responsibility attribution* step (the LLM that
+  produces the rank vector `r_i`) is **deprecated** (Constraint 2) — C5 in §6
+  replaces it with a deterministic rule over the trace.
+- S6 OFA-MAS: task accuracy on 6 benchmarks (Stage-3 fine-tuning) —
+  deterministic, but tied to a learned generator that is not portable.
+- S7 MASS: `E_D` on a held-out sample — the metric is task-dependent; where it
+  is accuracy/pass@1 it is deterministic and admissible; the MIPRO optimizer's
+  *scoring* of candidate prompts would need a deterministic scorer, not an LLM
+  judge.
 
-Every one of them hit the same blocking unknown: **`a`, the ground-truth
-answer**, on open-ended tasks. S1's P6 (Shannon-Wiener channel capacity) is the
-formal reason: `H(output) ≥ H(E) − C_channel`. No automated sensor can carry the
-full variety of "is this actually right" — the channel is finite. **The
-cybernetic argument implies Go See cannot be fully automated away; the best the
-swarm can do is reduce the *frequency* of descents by improving the sensor, not
-eliminate them.** The five papers' evaluators reduce descent frequency; S2's
-Go See is the irreducible human check that the upgraded sensor still isn't
-filtering truth.
+The blocking unknown in every case was **`a`, the ground-truth answer**, on
+open-ended tasks. S1's P6 (Shannon-Wiener channel capacity) is the formal
+reason: `H(output) ≥ H(E) − C_channel`. No automated sensor can carry the full
+variety of "is this actually right" — the channel is finite. **The cybernetic
+argument implies Go See cannot be fully automated away; the best the swarm can
+do is reduce the *frequency* of descents by improving the deterministic sensor,
+not eliminate them.** Constraint 2 (no LLM judge) sharpens this: the
+deterministic evaluator can only ever cover tasks with a deterministic oracle
+(tests, schemas, regex, exit codes, reference answers); open tasks without an
+oracle fall back to the human Go See, not to an LLM judge.
 
-**The complete design:** upgrade `d` with a task-success term (automate part of
-Go See) **AND** schedule a fixed Go See feedback loop (the irreducible human
-check). They are complements, not alternatives.
+**The complete design:** add a deterministic task-success term `s` to `d`
+(automate part of Go See, for oracle tasks only) **AND** schedule a fixed Go
+See feedback loop (the irreducible human check that the deterministic sensor
+still isn't filtering truth, covering the open-task gap the deterministic
+sensor cannot reach). They are complements, not alternatives.
 
-## 6. The five prior deep-reads, reframed cybernetically
+## 6. Specific value-added components to integrate (one per source)
 
-| Paper | Mechanism | Cybernetic principle it automates | hKask gap it points at | Portable? |
-|---|---|---|---|---|
-| **S3 SwarmAgentic** | Population `N=5`, pbest/gbest, `LLM_flaw` system-wide diagnosis, `J(S)` task-success | P1 (closed loop over candidates) + P5 (flaw diagnosis) + D1 objective | G1 (no task-success `s`) | Partial — population search is expensive under the consent gate (each candidate hire needs a token); better for the Steer curator than the automated cascade |
-| **S4 HyEvo** | Heterogeneous LLM+code nodes, multi-island MAP-Elites, `R(𝒢)` tri-objective, reflect-then-generate over failure logs | P1 + P5 (reflect over `L_parent`) + P6 (code nodes reduce context entropy) | G2 (prompt/node-logic axis frozen) + C3 (no second-order monitor) | Partial — `compute_ref` is a closed registry (the pattern HyEvo rejects); `lisp.eval` is operator-authored not synthesized. The 19×/16× cost/latency gain needs code nodes hKask lacks. |
-| **S5 JudgeFlow** | Block judge, `B_sel = argmin Σ r_k^{(t)}`, Modify Block (re-prompt), greedy top-1 focus | P5 (per-agent blame) + G2 (re-prompt action) | G3 (ORIENT emits deficit class, not per-agent rank) + G2 (no Modify action) | **Yes (cleanest port)** — formula `B_sel = argmin_{B_k} Σ_{t=1}^T r_k^{(t)}` (S5 §3.2.1 L293) is a sum + argmin; the Judge prompt (S5 App.C L697–719) adapts directly ("block" → "agent"); the fusion panel is the unused judge asset. Blocking unknown: ground-truth `a` / failure predicate `s < ε`. |
-| **S6 OFA-MAS** | TAGSE task-gated sparse-gating encoder, MoE learned generator, Stage-3 outcome fine-tuning | P2 (task-gated variety) | C2 (task-gated alignment in SENSE) | **One portable idea** — TAGSE's task-gated sparse edge relevance in SENSE's `alignment` (structural port, no training). The learned generator, the 16 experts, the 19-role pool, Stage-3 outcome feedback are NOT portable (no training infra; closed pool incompatible with open `agent_type`; output format weaker than `LocalAgentCard`). |
-| **S7 MASS** | Three-stage interleaved: block-level prompt opt → topology → global prompt opt; influence-weighted rejection sampling | P3 (interleaved goals) + G2 (prompt axis) | G2 (prompt axis frozen) + G1 (no task-metric `E_D`) | Partial — Stage 1 (MIPRO prompt opt) and Stage 3 (global joint) are the prompt axis hKask lacks. A `reconfigure_agent` DECIDE class is only well-founded if it carries (i) validation metric `E_ai`, (ii) candidate generator `M×K`, (iii) conditioning on upstream `produces[]` — otherwise it's theatrical (the `.rules` "Advertised invariants need enforcement points" trap). |
+This is the core of the revision. Each source contributes **one scoped,
+deterministic component**. Everything else from that source is dropped with a
+reason. The precondition C0 (deterministic task-success evaluator) spans
+S3/S4/S5/S7 and is presented first because it gates three of the components.
 
-**The convergent finding across S3–S7 + S1 + S2:** four of the five papers
-optimize **task-success against an evaluator**; hKask's `d` optimizes
-**swarm-health**. This is the precondition for faithfully porting any of the
-four mechanisms. S2 explains *why* it's hard to fix: by Ashby, no automated
-sensor carries the full variety of task success — Go See is the irreducible
-human check.
+### C0 — Precondition: deterministic task-success evaluator `s` (spans S3, S4, S5, S7)
 
-## 7. The actionable findings (ranked by leverage)
+- **What:** a deterministic predicate `s(task, swarm_output) ∈ {pass, fail}`
+  (or a numeric score from a deterministic source) that becomes a fourth term
+  in `d`. Acceptable `s`: test pass/fail, schema validation, exit code, regex /
+  reference match, or an operator/curator-asserted expected answer compared by
+  equality. **Not acceptable:** any LLM-produced score or rank (Constraint 2).
+  For open tasks with no oracle, `s` is *absent* and the task falls back to the
+  Go See loop (C2) — do not fake `s` with an LLM.
+- **Integration point:** a new CHECK input `task_success` carrying `s` (or
+  `null`); `d` gains a `(1 − s)²` term when `s` is non-null and is unchanged
+  when `s` is null (open task).
+- **Why value-added:** it is the precondition for C1's sensor-truth divergence
+  signal, C3's failed-edit memory (needs to know an edit failed), C5's fault
+  attribution (needs `s < ε` to know there *was* a fault), C7's influence score
+  (needs `E` deltas). Without it those four have no signal.
+- **Gates:** C1, C3, C5, C7.
 
-Findings G1–G3 are from the prior five-paper deep-read; C1–C6 are from this
-cybernetic frame. They are cross-referenced — the cybernetic frame *reframes*
-G1 as C2 and adds the human-side mechanisms C1, C4, C5.
+### C1 — S1 Agent Cybernetics: P5 statistical second-order monitor over the span log
 
-| # | Finding | Source | Cybernetic principle | Blocking? | Needs training infra? | Reuses existing? |
+- **What:** a deterministic statistical monitor over the
+  `reg.skill.swarm-intelligence.*` iteration span log. S1 §5.4 is explicit:
+  *"statistical functions over the action log requiring no modifications to the
+  underlying model."* Two signals:
+  1. **Reasoning loop** — `(deficit_class, decision_action)` repeats across `m`
+     consecutive iterations with no `d` improvement.
+  2. **Sensor-truth divergence** — `d` improves while a deterministic
+     task-success signal `s` (C0) declines, i.e. the swarm looks healthier but
+     is failing more tasks. This is the cybernetic Go See diagnosis (§5)
+     automated as a cheap statistic.
+- **Integration point:** a new CONVERGE-side `compute` step
+  (`action: compute`, `compute_ref:` a new deterministic primitive, e.g.
+  `swarm.second_order_monitor`) reading the last `k` iterations' spans.
+- **Why value-added:** S1 §5.4 names this the "highest-value, lowest-cost
+  intervention" and it is **deterministic by S1's own framing** — exactly what
+  Constraint 3 requires. No LLM, no fusion. It is the cheapest signal in this
+  plan and it detects the exact failure mode (sensor filters truth) that §5
+  identifies as the central gap.
+- **Dropped from S1:** the full 6-principle re-architecture; only P5's monitor is
+  ported. P1/P2/P4 are already satisfied (§2); P3's outer-loop goal
+  restructuring is covered by C2 (Go See); P6's context compression is a
+  separate, lower-priority concern.
+- **Needs C0:** yes (for signal 2).
+
+### C2 — S2 ThoughtWorks: Go See as a scheduled fixed feedback loop
+
+- **What:** a scheduled descend cadence — every `N` swarm-intelligence
+  convergences (or on C1's sensor-truth-divergence trigger), force a Steer
+  `ConversationView` descend with a deterministic checklist:
+  1. Is the deterministic sensor `s` (C0) filtering out task-failure truth?
+  2. Are the `.rules` priors still verified against the codebase? (grep the
+     cited symbols; a stale `.rules` entry is itself a finding — see Appendix B
+     for the fusion entries this revision found stale.)
+  3. Are the Steer guides (the system prompt naming the gate/ceiling/skill)
+     having the intended effect on the curator's decisions?
+- **Integration point:** a CONVERGE-side counter + a deterministic trigger that
+  emits a Steer descend directive (no spend — Steer conversations are not
+  persisted and do not consume consent tokens, §15.5). The checklist is the
+  double-loop learning S2 prescribes.
+- **Why value-added:** S2's load-bearing claim is that Go See is "a fixed
+  feedback loop in the human-on-the-loop system," not an on-demand option.
+  hKask's Steer mode is operator-initiated today (§15.5: "Conversations are not
+  persisted"). Scheduling it makes the human's model (`.rules`, plan doc) a
+  *verified* model rather than an assumed one — the Conant-Ashby discipline.
+- **Dropped from S2:** the broader VSM/management-craft framing; only the Go
+  See cadence + checklist is ported. The attenuation/amplification framing is
+  already satisfied by hKask's consent banner / Steer prompt (§4).
+- **Needs C0:** no (it is the human fallback *for when C0 is absent* on open
+  tasks). Complements C1.
+
+### C3 — S3 SwarmAgentic: failed-edit memory `F(v_i)` (minus the LLM)
+
+- **What:** S3 §4.3's "Failure-Aware Velocity Update" records prior failed
+  velocity updates and avoids them. The deterministic core (minus S3's LLM
+  `LLM_flaw`, deprecated by Constraint 2): CONVERGE logs each iteration's
+  `(decision_action, swarm_state_signature, d_delta)`; DECIDE rejects a
+  re-proposal whose `(decision_action, swarm_state_signature)` matches a prior
+  entry with `d_delta ≤ 0`.
+- **Integration point:** a CONVERGE-side accumulator (deterministic set of
+  failed-edit signatures) + a DECIDE guard that filters proposed actions
+  against it. `swarm_state_signature` = a deterministic hash of the deficit
+  class + the current roster's `agent_type` multiset.
+- **Why value-added:** S3's ablation (Tab. 5) shows the failure-memory term is
+  the difference between a stuck single-trajectory search and one that escapes
+  local optima. hKask's CONVERGE checks Cauchy stabilization but does *not*
+  record "what I tried and that failed to improve `d`" — so DECIDE can
+  re-propose the same hire/fire cycle indefinitely. This is the cheapest
+  anti-loop mechanism in the plan and it is purely deterministic.
+- **Dropped from S3:** the population search `N=5` + pbest/gbest (expensive
+  under the consent gate — each candidate hire needs a token; better suited to
+  the Steer curator reasoning over candidates without spending, not the
+  automated cascade); the `LLM_flaw` system-wide diagnosis (probabilistic,
+  deprecated); the executable-code search space (hKask's `delegate` pipeline is
+  fixed by design — a safety feature, not a limitation to remove).
+- **Needs C0:** yes (to know an edit "failed" = `d_delta ≤ 0` *and* `s` did
+  not improve; `d` alone is the sensor-truth risk).
+
+### C4 — S4 HyEvo: latency measurement `T_q` in `LocalDelegateResult`
+
+- **What:** S4's reward `R(𝒢) = λ1·S + λ2·U_c(C_q) + λ3·U_t(T_q)` (§3 Eq.6)
+  measures both cost (`C_q`, tokens — hKask has `tokens_used`/`cost`) and
+  latency (`T_q`, end-to-end — hKask does **not** record). Port only the
+  *measurement* of `T_q`: add `latency_ms` to `LocalDelegateResult`, captured
+  by a `SystemTime` span around `delegate` (`local_runtime.rs` L366–638).
+- **Integration point:** a new field on `LocalDelegateResult` (no backward-compat
+  per Constraint 4 — add directly) + a span attribute on the
+  `reg.skill.swarm-intelligence.*` delegation span.
+- **Why value-added:** hKask already measures `C_q` (the 1cr/1000tok debit)
+  but is blind to `T_q`. S4's headline empirical result (19× cost / 16×
+  latency reduction on MBPP) comes from offloading deterministic ops to code
+  nodes — *not* portable (C4 below). But the *measurement* that made that
+  finding visible is portable, cheap, and deterministic, and it unblocks any
+  future cost-aware decision (e.g. C8's influence score could weight by
+  cost/latency, not just `d`). Measurement before optimization.
+- **Dropped from S4:** the heterogeneous LLM+code nodes (`compute_ref` is a
+  closed registry and `lisp.eval` is operator-authored — adding meta-agent-
+  synthesized code is a new security surface, not in scope); the multi-island
+  MAP-Elites evolution (no evolutionary substrate in hKask — grep
+  `island|elite_archive|MAP-Elites` → 0 hits); the reflect-then-generate LLM
+  (probabilistic, deprecated); the tri-objective reward `R(𝒢)` (needs the
+  evolution it drives).
+- **Needs C0:** no (pure measurement).
+
+### C5 — S5 JudgeFlow: deterministic fault attribution + blame aggregation (LLM Judge replaced by a rule)
+
+- **What:** S5's pipeline shape (Evaluate → attribute → aggregate → focus) with
+  the **LLM Judge replaced by a deterministic rule** over the `delegate` trace.
+  S5's aggregation `B_sel = argmin_{B_k} Σ_t r_k^{(t)}` (§3.2.1 L293) assumes
+  *rank* semantics (rank 1 = most responsible = smallest number, argmin picks
+  most-consistently-blamed). The deterministic analogue: per failed task,
+  attribute blame to **exactly one agent** by a deterministic rule, increment a
+  counter, and select `agent_sel = argmax_agent blame_count[agent]`.
+  The deterministic attribution rule, in priority order:
+  1. If `s < ε` (C0's deterministic evaluator failed on the terminal output),
+     attribute to the **terminal agent** (the one whose `produces[]` the task
+     metric scored).
+  2. Else if any agent's `tool_calls[].ok = false` (a dispatch failed,
+     `local_runtime.rs` L568–578) or `"not in declared mcp_tools allowlist"`
+     (L581–591), attribute to the **earliest such agent** in delegation order.
+  3. Else if any agent's `executed_skills[].ok = false` (a declared skill
+     cascade failed, L442–454), attribute to the **earliest such agent**.
+  4. Else if a guard redaction occurred on an agent's tool output
+     (`scan_input` rejected, L550–557), attribute to that agent.
+  5. Tie-break by delegation order (deterministic).
+- **Integration point:** ORIENT emits `agent_at_fault` (deterministic, per the
+  rule above) for each failed task; CONVERGE aggregates
+  `blame_count[agent] += 1` across iterations and surfaces
+  `agent_sel = argmax blame_count`; the per-fault record `(task, expected,
+  actual, per_agent_output)` is appended to a per-`agent_sel` failure log
+  `L_{agent_sel}` (S5 §3.2.1 L290) and fed as context to DECIDE.
+- **Why value-added:** this is the cleanest port of a responsibility mechanism
+  that is **deterministic by construction** (Constraint 3). It explicitly
+  diverges from S5's LLM Judge — and the divergence is the point: a
+  deterministic judge "isn't usually what is meant by a judge" (Constraint 3),
+  but it is what hKask should build. The trace data already exists
+  (`executed_skills`/`tool_calls` with `ok`/`error`, `local_runtime.rs`
+  L628–668); C5 only aggregates it.
+- **Dropped from S5:** the LLM Judge and its App.C prompt (probabilistic,
+  deprecated by Constraint 2); the `seq`/`for`/`cond` block primitives (ABW
+  forbids delegation chains — `swarm-intelligence.yaml` L8–10 — so a `for`/`cond`
+  over agents is not representable in the current topology); the Top-K
+  candidate pool + softmax resampling (S5 Eq.4–5) — orthogonal to blame
+  attribution, and hKask's Cauchy-convergent single-state loop can stay.
+- **The Modify action (re-prompt) is retained** as a shared component with S7
+  — see C6. Re-prompting via `swarm_generate_prompt` is *generation* (an LLM
+  producing a new prompt), not *judging*, so it is admissible under Constraint 2.
+- **Needs C0:** yes (the failure predicate `s < ε` is C0).
+
+### C6 — S5 + S7: `reconfigure_agent` DECIDE action (Modify Block / MASS prompt axis)
+
+- **What:** a new DECIDE action that rewrites a blamed agent's
+  `system_prompt` in place — the Modify-Block action from S5 §3.2.2 and the
+  prompt axis from S7 Stages 1+3. The action is: pick `agent_sel` (from C5),
+  call `swarm_generate_prompt` seeded with the agent's current `system_prompt`
+  + the per-fault log `L_{agent_sel}` (the deterministic trace of why it
+  failed), write the new prompt to `agent_card.json`, and reload via
+  `LocalAgentRegistry::load` (which re-reads on staleness, `local_registry.rs`
+  L131). The *scoring* of candidate prompts must be deterministic (C0's `s`),
+  not an LLM judge.
+- **Integration point:** a new DECIDE decision class `reconfigure_agent`;
+  `agent_card.json` rewrite + `LocalAgentRegistry::load`.
+- **Why value-added:** hKask's `system_prompt` is frozen at hire time; the only
+  DECIDE levers today are hire/fire (topology). S5's case study (§4.3 L569)
+  shows the blamed block is often better *re-prompted* than fired. S7's §2.1
+  finding ("optimize agents locally before scaling their topology") is the
+  same insight. This adds the prompt axis that §6's gap analysis (and the prior
+  5-paper deep-read's G2) identifies as the axis hKask's loop never touches.
+- **Dropped:** S7's MIPRO joint instruction+exemplar optimization loop (its
+  scoring step is LLM-based, deprecated; the deterministic scorer C0 is weaker
+  than MIPRO's validation-set metric but admissible); S7's Stage 3 global joint
+  re-optimization (needs an end-to-end task metric over a held-out sample =
+  C0 + a sample, future work).
+- **Needs C0:** yes (to score candidate prompts deterministically and to know
+  the reconfiguration improved `s`).
+
+### C7 — S7 MASS: influence-weighted rejection in DECIDE (Stage 2, minus the LLM optimizer)
+
+- **What:** S7 Stage 2's influence-weighted rejection sampling (Alg.1 L9–17),
+  reduced to its deterministic core. Maintain a per-`agent_type` influence
+  score `I_{agent_type} = (Σ d_delta after hiring agent_type) − (Σ d_delta
+  before)` — a deterministic running sum from CHECK. DECIDE rejects a re-hire
+  of an `agent_type` whose `I_{agent_type} ≤ 0` over the last `k` hires (the
+  agent type has been measured to degrade the swarm). S7 §2.2: "in HotpotQA,
+  only debate brings 3% gain while others fail to improve or even degrade" —
+  prune before searching.
+- **Integration point:** a CONVERGE-side per-`agent_type` accumulator +
+  a DECIDE guard that rejects re-hire of negatively-influential types with a
+  recorded reason.
+- **Why value-added:** hKask's DECIDE hires to *cover* `required_transforms`
+  (variety deficit) but never *rejects* agent types that have been measured to
+  *degrade* the swarm. This is the deterministic version of S7's "prune before
+  search" and it closes a P2 (requisite variety) gap: a swarm that keeps
+  re-hiring a harmful agent type has V(O) without effective variety.
+- **Dropped from S7:** the MIPRO prompt optimization (covered by C6); the
+  softmax temperature sampling (S7 uses `t=0.05`; hKask's loop is deterministic
+  single-trajectory, no sampling needed); the N=10 candidate evaluation (needs
+  a batch evaluation harness hKask lacks).
+- **Needs C0:** yes (to know a hire "degraded" the swarm = `d_delta ≤ 0` *and*
+  `s` did not improve).
+
+### C8 — S6 OFA-MAS: task-gated sparse alignment in SENSE (TAGSE structural port)
+
+- **What:** S6's Task-Aware Graph State Encoder (§3.2 Eq.5) applies a
+  task-conditioned, L1-regularized gate to node features. The **structural**
+  idea (not the learned weights) ports to SENSE: replace the current uniform
+  `produces/accepts` overlap density (manifest L118–120) with
+  **task-conditional edge relevance**, where an edge `v_j → v_i` contributes to
+  `alignment` proportional to how task-relevant `v_j.produces ∩ v_i.accepts` is
+  to the task's `required_transforms`, regularized toward sparsity (most edges
+  → 0 for a given task).
+- **Integration point:** SENSE template only — a deterministic relevance
+  weighting function over the delegation graph. No substrate change, no
+  training, no LLM.
+- **Why value-added:** SENSE currently measures all Onto4MAT properties every
+  iteration regardless of task; the alignment score weights every
+  `produces/accepts` edge equally. S6's ablation (Table 3, `w/o TAGSE` −2.00)
+  shows task-gating matters. This is the **only portable idea from S6** and it
+  is a pure template change.
+- **Dropped from S6:** the autoregressive DAG generator (needs the trained MoE
+  + TAGSE weights — no training infra); the 16 learned expert MLPs (no training
+  infra); the closed 19-role pool (incompatible with ABW's open `agent_type`);
+  Stage-3 outcome fine-tuning (no per-composition task-outcome telemetry); the
+  unlabelled-DAG output format (strictly weaker than `LocalAgentCard`'s typed
+  ports — porting it would *lose* information).
+- **Needs C0:** no (it is a SENSE measurement refinement, independent of `s`).
+
+## 7. Integration plan (components, ranked and sequenced)
+
+The components from §6, with blocking relationships and the determinism /
+no-backward-compat constraints applied. C0 is the precondition; the rest follow
+the dependency hierarchy (§3): D1 reliability mechanisms (C1, C5, C6, C7) gate
+D2 lifelong-running mechanisms (C3, C4, C8) which gate D3 (none here — D3 is
+out of scope per §3).
+
+| Step | Component | Source | Deterministic? | Gates | Needs C0? | Reuses |
 |---|---|---|---|---|---|---|
-| **G1 / C2** | Add a task-success `s` to `d` (evaluator for tasks-with-oracle, self-consistency proxy for open tasks) — `d` is the sensor filtering out truth | S3–S7 + S1 P6 + S2 Go See | P6 (channel capacity bound on sensors) | **yes — blocks G2, G3, C3** | no | `delegate` trace, fusion panel |
-| **C1** | Schedule a **fixed Go See feedback loop** — Steer descend every N convergences with the "is `d` filtering truth? are `.rules` priors verified?" checklist = double-loop learning | S2 (Go See is "a fixed feedback loop") | P3 outer loop (escalate + restructure) | no | no | Steer `ConversationView` (§15.5), `.rules`, plan doc |
-| **C3** | **P5 second-order monitor** over the iteration span log — flag repeated `(deficit_class, decision_action)` with no `d` improvement (reasoning loop) or output-quality decline while `d` improves (sensor-truth divergence). Fusion panel as monitor. S1 §5.4: "highest-value, lowest-cost" | S1 P5 §5.4 | P5 (second-order regulation) | no (needs G1 for the quality-decline signal) | no | span log, `kask.fusion.panel_models` |
-| **G2** | `reconfigure_agent` DECIDE action — seeded by `swarm_generate_prompt`, scored by G1's `s`, conditioned on upstream `produces[]`. Add exemplar slot to `LocalAgentCard.capabilities` (S7 Table 9: joint instruction+exemplar > instruction-only) | S5 Modify Block + S7 Stages 1+3 | G2 (prompt axis) | no (needs G1) | no | `swarm_generate_prompt`, `agent_card.json` rewrite + `LocalAgentRegistry::load` |
-| **G3** | Per-agent responsibility scoring in ORIENT — fusion panel as Judge with S5 App.C prompt adapted; `B_sel = argmin Σ r` accumulator in CONVERGE; per-agent failure log `L_{agent_sel}` | S5 §3.2.1 L293 + App.C | P5 (per-agent blame) | no (needs G1) | no | `delegate` trace, `kask.fusion.panel_models`, `LocalAgentRegistry::load` |
-| **C4** | **Learn escalation thresholds** from operator feedback — track consent-grant amounts + override frequency; recommend ceiling adjustments. S1 §4.1: "learning escalation thresholds from operator feedback over time" | S1 §4.1 | D1 (reliability gate adapts) | no | no | consent store, `HKASK_ABW_MAX_CREDITS` |
-| **C5** | **Three-tier irreversibility gate** — classify the 28 tools by `r(a) ∈ {read, recoverable, destructive}`; gate `recoverable` (fire, clone, push) on fusion confidence `> τ_r` without a token; keep `destructive` (hire, delegate, xaman, create_swarm, delete_*) on the full consent gate. S1 §5.2: `Execute(a) iff read ∨ (recoverable ∧ Conf > τ_r) ∨ (destructive ∧ Conf > τ_d ∧ HumanApprove)`, `τ_d ≫ τ_r` | S1 §5.2 | D1 (bound irreversibility) | no | no | tool surface, fusion panel |
-| **C6** | Task-gated sparse alignment in SENSE — replace uniform `produces/accepts` overlap density with task-conditional edge relevance, regularized toward sparsity (most edges → 0) | S6 TAGSE Eq.5 + L1 | P2 (task-gated variety) | no | no | SENSE template only |
-| **G5** | Influence-weighted pruning in DECIDE — maintain per-`agent_type` influence `I_a = E(a_i*)/E(a_0*)` from CHECK `d` deltas; reject re-hire of `agent_type` with negative historical influence | S7 Stage 2 | P2 (prune before search) | no (needs G1) | no | CHECK `d` deltas |
+| 1 | **C0** deterministic task-success `s` (oracle tasks: test/schema/regex/exit-code/reference; open tasks: null → Go See) | S3/S4/S5/S7 | yes | C1, C3, C5, C6, C7 | — | CHECK input, `delegate` trace |
+| 2 | **C2** scheduled Go See fixed feedback loop | S2 | yes (cadence + checklist) | — | no (it is the human fallback *for when C0 is null*) | Steer `ConversationView`, `.rules`, plan doc |
+| 3 | **C1** P5 statistical second-order monitor over the span log | S1 | yes (S1 §5.4 explicit) | — | yes (signal 2) | `reg.skill.swarm-intelligence.*` span log |
+| 4 | **C4** latency `T_q` in `LocalDelegateResult` | S4 | yes (`SystemTime`) | — | no | `delegate` span |
+| 5 | **C5** deterministic fault attribution + blame aggregation | S5 (LLM Judge replaced) | yes (rule over trace) | C6 | yes | `delegate` trace (`executed_skills`/`tool_calls`), `LocalAgentRegistry::load` |
+| 6 | **C6** `reconfigure_agent` DECIDE action (Modify) | S5 + S7 | generation is LLM (admissible); scoring is C0 (deterministic) | — | yes | `swarm_generate_prompt`, `agent_card.json` rewrite |
+| 7 | **C7** influence-weighted rejection in DECIDE | S7 (Stage 2) | yes (running sum) | — | yes | CHECK `d` deltas, per-`agent_type` accumulator |
+| 8 | **C8** task-gated sparse alignment in SENSE | S6 (TAGSE) | yes (relevance function) | — | no | SENSE template only |
 
-### 7.1 Explicitly NOT recommended (grounded reasons)
+### 7.1 Explicitly NOT integrated (grounded reasons, per Constraint 4)
 
-- **S3 SwarmAgentic population search (N=5) + pbest/gbest:** each candidate
-  hire needs its own consent token; the 3-layer gate makes "try multiple
-  candidates" expensive at the skill layer. If wanted, route through the Steer
-  curator (reasons over candidates without spending), not the automated cascade.
-- **S4 HyEvo multi-island + MAP-Elites:** zero evolutionary substrate in hKask
-  (grep `island|elite_archive|MAP-Elites|population` → 0 hits). Net-new
-  infrastructure; the ring-migration + behavior-grid don't compose with the
-  consent gate.
-- **S4 HyEvo synthesized code nodes (`c_src`):** `compute_ref` is a *closed*
-  registry (`compute.rs` rejects unknown names); `lisp.eval` is operator-authored
-  not meta-agent-synthesized. Adding meta-agent-synthesized code is a new
-  security surface needing its own allowlist/governance — do not let a cloned ABW
-  card declare an arbitrary handler (the existing `mcp_tools` provenance-filter
+- **S3 population search (N=5) + pbest/gbest:** each candidate hire needs its
+  own consent token; the 3-layer gate makes multi-candidate search expensive at
+  the skill layer. If population reasoning is wanted, route it through the
+  Steer curator (reasons over candidates without spending), not the automated
+  cascade. The LLM `LLM_flaw` is deprecated (Constraint 2).
+- **S4 multi-island + MAP-Elites evolution:** zero evolutionary substrate in
+  hKask (`grep island|elite_archive|MAP-Elites|population` → 0 hits). Net-new
+  infrastructure; the ring-migration + behavior-grid do not compose with the
+  consent gate. The reflect-then-generate LLM is deprecated.
+- **S4 synthesized code nodes (`c_src`):** `compute_ref` is a *closed* registry
+  (`compute.rs` rejects unknown names); `lisp.eval` is operator-authored, not
+  meta-agent-synthesized. Adding meta-agent-synthesized code is a new security
+  surface needing its own allowlist/governance — a cloned ABW card must not
+  declare an arbitrary handler (the existing `mcp_tools` provenance-filter
   pattern applies).
-- **S6 OFA-MAS learned generator:** no training infra; the 19-role closed pool
-  is incompatible with ABW's open `agent_type`; the unlabelled-DAG output is
-  weaker than `LocalAgentCard`.
+- **S5 LLM Judge (App.C prompt):** deprecated by Constraint 2. Replaced by the
+  deterministic rule in C5.
+- **S5 `seq`/`for`/`cond` block primitives:** ABW forbids delegation chains
+  (`swarm-intelligence.yaml` L8–10), so a `for`/`cond` over agents is not
+  representable; not in scope.
+- **S6 learned MoE generator + 16 experts + 19-role pool + Stage-3 fine-tuning:**
+  no training infra; the closed pool is incompatible with ABW's open
+  `agent_type`; the unlabelled-DAG output is weaker than `LocalAgentCard`.
+- **S7 MIPRO prompt-optimization loop + softmax sampling + N=10 candidate eval:**
+  the MIPRO scoring step is LLM-based (deprecated); hKask's loop is
+  deterministic single-trajectory (no sampling needed); the batch evaluation
+  harness is absent. The prompt *axis* survives as C6 with a deterministic
+  scorer.
 
 ## 8. Implementation sequencing (the dependency hierarchy constraint)
 
 S1 Appendix A.3: **Reliability gates Lifelong Running gates Self-Improvement.**
-Applied to the findings, the order is:
+Applied to the components:
 
 ```mermaid
 flowchart TD
-  classDef done fill:#1e3a2e,stroke:#a6e3a1,color:#cdd6f4
   classDef block fill:#3a1e1e,stroke:#f38ba8,color:#cdd6f4,stroke-width:2px
   classDef step fill:#181825,stroke:#cba6f7,color:#cdd6f4
+  classDef human fill:#1e3a2e,stroke:#a6e3a1,color:#cdd6f4
 
-  G1["STEP 1 — G1/C2: task-success s in CHECK<br/>(evaluator for oracle tasks,<br/>self-consistency proxy for open)"]:::block
-  C1["STEP 2 — C1: fixed Go See loop<br/>(the irreducible human check<br/>that s isn't filtering truth)"]:::step
-  C3["STEP 3 — C3: P5 second-order monitor<br/>(reasoning-loop + sensor-truth<br/>divergence detection)"]:::step
-  G3["STEP 4 — G3: per-agent rank + argmin Σ r<br/>in ORIENT (JudgeFlow port,<br/>fusion panel as Judge)"]:::step
-  G2["STEP 5 — G2: reconfigure_agent DECIDE action<br/>(seeded by swarm_generate_prompt,<br/>scored by s, conditioned on produces[])"]:::step
-  C6["STEP 6 — C6: task-gated sparse alignment<br/>(OFA-MAS TAGSE, SENSE-only)"]:::step
-  C5["STEP 7 — C5: three-tier irreversibility gate<br/>(read/recoverable/destructive)"]:::step
-  C4["STEP 8 — C4: learned escalation thresholds<br/>(consent store + override freq)"]:::step
-  G5["STEP 9 — G5: influence-weighted pruning<br/>(MASS Stage 2)"]:::step
+  C0["STEP 1 — C0: deterministic task-success s<br/>(oracle tasks: test/schema/regex;<br/>open tasks: null → Go See)"]:::block
+  C2["STEP 2 — C2: scheduled Go See loop<br/>(the irreducible human check<br/>that s isn't filtering truth;<br/>covers the open-task gap)"]:::human
+  C1["STEP 3 — C1: P5 statistical monitor<br/>(reasoning-loop + sensor-truth<br/>divergence; deterministic)"]:::step
+  C4["STEP 4 — C4: latency T_q measurement<br/>(pure measurement, no gate)"]:::step
+  C5["STEP 5 — C5: deterministic fault<br/>attribution + blame aggregation"]:::step
+  C6["STEP 6 — C6: reconfigure_agent<br/>(Modify; generation LLM,<br/>scoring = C0)"]:::step
+  C7["STEP 7 — C7: influence-weighted<br/>rejection in DECIDE"]:::step
+  C8["STEP 8 — C8: task-gated sparse<br/>alignment in SENSE"]:::step
 
-  G1 -->|blocks| G2
-  G1 -->|blocks| G3
-  G1 -->|blocks| C3
-  G1 -->|blocks| G5
-  G3 -->|enables targeted fix for| G2
-  C1 -.->|complements: human verifies s| G1
+  C0 -->|blocks| C1
+  C0 -->|blocks| C5
+  C0 -->|blocks| C6
+  C0 -->|blocks| C7
+  C5 -->|enables targeted fix for| C6
+  C2 -.->|complements: human verifies s| C0
+  C4 -.->|independent, parallel| C0
+  C8 -.->|independent, parallel| C0
 ```
 
 **Rationale:**
-1. **G1 is the precondition, not one finding among nine.** Every other
-   finding assumes a defensible `s`. A population optimizing `d` converges on
-   healthy swarms that fail the task — the worst failure mode because `d`
-   reports success.
-2. **C1 (Go See) is scheduled alongside G1, not after.** S2's argument: the
-   sensor upgrade (G1) and the human check (C1) are complements. G1 reduces
-   descent frequency; C1 is the irreducible check that G1's sensor still isn't
-   filtering truth.
-3. **C3, G3, G2 follow** once `s` exists — they consume the task-success signal
-   (C3 detects sensor-truth divergence; G3 blames the agent for `s<ε`; G2
-   re-prompts to improve `s`).
-4. **C6, C5, C4, G5 are independent refinements** that don't need `s` (C6 is a
-   SENSE template change; C5/C4 are gate mechanics; G5 needs `s` but is low
-   priority). They can proceed in parallel with G1 if scoped narrowly.
+1. **C0 is the precondition, not one component among eight.** C1 (signal 2),
+   C3, C5, C6, C7 all consume the task-success signal. A loop optimizing `d`
+   alone converges on healthy swarms that fail the task — the worst failure
+   mode because `d` reports success (§5).
+2. **C2 (Go See) is scheduled alongside C0, not after.** S2's argument: the
+   deterministic sensor upgrade (C0) and the human check (C2) are complements.
+   C0 reduces descent frequency *for oracle tasks*; C2 is the irreducible check
+   that C0's sensor still isn't filtering truth, and it covers open tasks where
+   C0 is null.
+3. **C1, C4, C8 can proceed in parallel with C0** where they don't need `s`
+   (C1 signal 1 = reasoning loop does not need `s`; C4 = pure measurement; C8 =
+   SENSE template change). C1 signal 2, C5, C6, C7 wait on C0.
+4. **D3 (self-improvement) is out of scope** for this plan. S1's dependency
+   hierarchy says it gates on D1+D2; the components here are D1/D2 refinements.
+   Recursive self-improvement (the `self-improvement` skill wired into
+   swarm-intelligence) is deferred until C0–C8 land.
 
 ## 9. Diagrams
 
-### 9.1 The complete cybernetic swarm map
+### 9.1 The complete cybernetic swarm map (revision 2 — fusion removed, deterministic judge)
 
 ```mermaid
 flowchart TD
@@ -319,6 +621,7 @@ flowchart TD
   classDef inner fill:#181825,stroke:#cba6f7,color:#cdd6f4
   classDef outer fill:#3a2e1e,stroke:#f9e2af,color:#cdd6f4
   classDef gap fill:#3a1e1e,stroke:#f38ba8,color:#cdd6f4
+  classDef det fill:#1e2e3a,stroke:#89b4fa,color:#cdd6f4
 
   H["Human (on-the-loop)<br/>holds model: .rules + plan docs<br/>= Conant-Ashby regulator"]
   STEER["Steer prompt + .rules<br/>= AMPLIFICATION (S2)<br/>encode policy into curator"]
@@ -326,19 +629,19 @@ flowchart TD
   ALGEDONIC["algedonic channel<br/>402 / un-ack curator<br/>= P3 outer-loop escalation (S1)"]
 
   subgraph INNER["Inner loop — swarm-intelligence skill (P1, S1)"]
-    SENSE["SENSE: measure swarm state"]
-    ORIENT["ORIENT: classify deficit"]
-    DECIDE["DECIDE: hire/fire/delegate"]
+    SENSE["SENSE: measure swarm state<br/>(C8: task-gated sparse alignment)"]
+    ORIENT["ORIENT: classify deficit<br/>+ C5: deterministic agent_at_fault"]
+    DECIDE["DECIDE: hire/fire/delegate<br/>+ C6: reconfigure_agent<br/>+ C7: influence rejection"]
     ACT["ACT: gated spend"]
-    CHECK["CHECK: re-measure"]
-    CONVERGE["CONVERGE: Cauchy on d<br/>= loop detection (P5 partial)"]
+    CHECK["CHECK: re-measure<br/>+ C0: deterministic task-success s"]
+    CONVERGE["CONVERGE: Cauchy on d<br/>+ C1: P5 statistical monitor<br/>+ C3: failed-edit memory"]
     SENSE --> ORIENT --> DECIDE --> ACT --> CHECK --> CONVERGE
     CONVERGE -->|next_focus| SENSE
   end
 
   subgraph GEMBA["Go See / Gemba (P3 outer loop, double-loop, S2)"]
-    DESCEND["Steer ConversationView<br/>human descends to curator"]
-    VERIFY["human verifies d isn't<br/>filtering out task-failure truth"]
+    DESCEND["C2: scheduled Steer descend<br/>(every N convergences or on<br/>C1 sensor-truth divergence)"]
+    VERIFY["human verifies s isn't<br/>filtering out task-failure truth<br/>+ .rules priors still verified"]
     UPDATE["update model: .rules / plan / harness"]
   end
 
@@ -346,22 +649,26 @@ flowchart TD
   STEER --> INNER
   INNER -->|attenuate| BANNER --> H
   CONVERGE -->|algedonic| ALGEDONIC --> H
-  H -.->|Go See: fixed feedback loop (C1)| DESCEND
-  DESCEND --> VERIFY --> UPDATE -->|reframe d / add task-success term (G1)| STEER
+  H -.->|Go See: fixed feedback loop (C2)| DESCEND
+  DESCEND --> VERIFY --> UPDATE -->|reframe d / add s term (C0)| STEER
 
-  G1["GAP G1/C2: d has no task-success term<br/>= sensor filters out truth<br/>(the Go See discovery)"]:::gap
-  G2gap["GAP C1: Go See is on-demand, not a<br/>FIXED feedback loop (S2's prescription)"]:::gap
-  G3gap["GAP C3: P5 second-order monitor<br/>(curator reasoning loops, declining<br/>confidence) — fusion panel unused"]:::gap
-  G4gap["GAP C4: escalation threshold (ceiling)<br/>is static, not learned from<br/>operator feedback (S1 §4.1)"]:::gap
+  G1gap["GAP: d has no task-success term<br/>= sensor filters out truth<br/>(the Go See discovery) → C0"]:::gap
+  G2gap["GAP: Go See is on-demand, not a<br/>FIXED feedback loop → C2"]:::gap
+  G3gap["GAP: no P5 second-order monitor<br/>(reasoning loops) → C1"]:::gap
+  G4gap["GAP: ORIENT emits deficit class,<br/>not a blamed agent → C5"]:::gap
 
-  CONVERGE -.-> G1
+  CONVERGE -.-> G1gap
   DESCEND -.-> G2gap
   INNER -.-> G3gap
-  ALGEDONIC -.-> G4gap
+  ORIENT -.-> G4gap
+
+  DET["Deterministic judge (C5):<br/>rule over delegate trace,<br/>NOT an LLM rank (Constraint 2/3)"]:::det
+  ORIENT -.->|emits agent_at_fault| DET
 
   class H human
   class SENSE,ORIENT,DECIDE,ACT,CHECK,CONVERGE,BANNER,STEER inner
   class ALGEDONIC,DESCEND,VERIFY,UPDATE outer
+  class DET det
 ```
 
 ### 9.2 The metacognitive record (this plan was produced with the metacognition skill)
@@ -373,27 +680,45 @@ that requires the registry templates; disclosed honestly per the skill's
 "the convergence decision is deterministic (compute steps) — no LLM
 convergence-check template"):
 
-- **meta-grasp-current:** measured the agent's actual state — 1/6 principles
-  grounded before the experiment; obstacles O1 (conflated human-in-the-loop
-  with approval, missed the variety argument), O2 (had not connected P3 outer
-  loop to algedonic), O3 (treated `d` as objective choice, not sensor filtering
-  truth).
+- **meta-grasp-current (revision 1):** measured the agent's state — 1/6
+  principles grounded before the experiment; obstacles O1 (conflated
+  human-in-the-loop with approval, missed the variety argument), O2 (had not
+  connected P3 outer loop to algedonic), O3 (treated `d` as objective choice,
+  not sensor filtering truth).
 - **meta-establish-target:** target = every principle + mechanism bound to a
   verified hKask surface with a named gap.
-- **meta-predict:** predicted ≥5/6 principles bound at confidence 0.7; risk =
-  over-binding single-agent principles onto a multi-agent swarm.
-- **meta-experiment:** applied the calibration "read S1+S2 as a single
-  cybernetic argument, bind both onto the verified hKask substrate." Result:
-  6/6 principles bound; 11/13 map cells grounded; 2 soft cells (D3
-  self-improvement wiring, Go-See cadence) flagged for separate verification.
-- **Check (qualitative Brier):** prediction direction correct (the
-  calibration closed the gap and reframed G1 as a cybernetic Go See finding —
-  the load-bearing result); prediction magnitude exceeded on principles but
-  missed 2 soft cells. **Brier self-assessment: calibrated-but-slightly-
-  overconfident.** Honest correction: confidence should have been 0.6 with an
-  explicit "2 cells will need separate verification" caveat. The honest
+- **meta-predict (revision 1):** predicted ≥5/6 principles bound at confidence
+  0.7.
+- **meta-experiment (revision 1):** applied "read S1+S2 as a single cybernetic
+  argument, bind both onto the verified hKask substrate." Result: 6/6
+  principles bound; 11/13 map cells grounded; 2 soft cells (D3 wiring, Go-See
+  cadence) flagged for separate verification. **But revision 1 asserted
+  `kask.fusion.panel_models` as a live judge asset — a convention prior drawn
+  from `.rules` that was NOT verified against the codebase.** This revision's
+  `grep` (`fusion|panel_models|MultiModelInferencePort|FusionProvider` in
+  `kask/**/*.rs` → 0 matches) exposed the assertion as stale: fusion was
+  removed from the code, and the `.rules` entries that cite it are themselves
+  stale (Appendix B). This is the `.rules` "Convention priors drawn from .rules
+  must be verified against the codebase" trap firing on the agent's own draft —
+  the Conant-Ashby discipline applied to the agent, not just the swarm.
+- **meta-predict (revision 2):** predicted at confidence 0.8 that re-grounding
+  every component on verified code (post-fusion-removal) and replacing the
+  LLM-judge with a deterministic rule would close the stale-assertion gap and
+  sharpen the per-source component extraction.
+- **meta-experiment (revision 2):** applied the four design constraints. The
+  fusion references are removed; the judge in C5 is a deterministic rule;
+  §6 is restructured into one scoped component per source; Appendix B flags
+  the 5 stale `.rules` fusion entries.
+- **Check (qualitative Brier):** revision 1's stale fusion assertion was an
+  unmodeled failure mode (the agent treated a `.rules` convention prior as
+  ground truth without grepping — exactly the trap the `.rules` warns about).
+  **Brier self-assessment: revision 1 was overconfident on an unverified
+  prior; revision 2 corrects it by verification-first grounding.** The honest
   disclosure: the deterministic gap + Brier compute did *not* run; the
-  qualitative assessment is the LLM's, not the executor's.
+  qualitative assessment is the LLM's, not the executor's. The correction that
+  generalizes: **any `.rules`-cited symbol used as a design asset must be
+  grepped in `kask/**/*.rs` before being depended on** — a process change, not
+  a one-off fix.
 
 ## 10. Reference bibliography
 
@@ -420,11 +745,12 @@ convergence-check template"):
   Efficient Reasoning.* arXiv:2603.19639.
   https://arxiv.org/abs/2603.19639
   - §3 v^LLM/v^Code; §4.2–4.5 multi-island MAP-Elites, reflect-then-generate;
-    §5.2 19×/16× cost/latency vs AFlow on MBPP.
+    §3 Eq.6 R(𝒢); §5.2 19×/16× cost/latency vs AFlow on MBPP.
 - **S5** — Ma et al. *JudgeFlow: Agentic Workflow Optimization via Block Judge.*
   arXiv:2601.07477 (ICML 2026). https://arxiv.org/abs/2601.07477
   - §3.1 block (B,C) B∈{seq,for,cond}; §3.2.1 Judge, `B_sel = argmin Σ r_k^{(t)}`
-    (L293); §3.2.2 Add/Remove/Modify; App.C Judge prompt; App.D optimizer prompt.
+    (L293); §3.2.2 Add/Remove/Modify; App.C Judge prompt (deprecated as
+    probabilistic — see C5); App.D optimizer prompt.
 - **S6** — Li et al. *OFA-MAS: One-for-All Multi-Agent System Topology Design
   based on Mixture-of-Experts Graph Generative Models.* arXiv:2601.12996
   (WWW 2026). https://arxiv.org/abs/2601.12996
@@ -440,21 +766,28 @@ convergence-check template"):
 
 - `kask/registry/manifests/swarm-intelligence.yaml` — the SENSE→ORIENT→DECIDE
   →ACT→CHECK→CONVERGE→LOOP skill; Cauchy on `d`; algedonic override; gas/rjoule
-  caps; `input_mapping` passing `task`/`mode`/`prior_iteration`.
+  caps; `input_mapping` passing `task`/`mode`/`prior_iteration`; the
+  no-delegation-chains invariant (L8–10).
 - `kask/mcp-servers/hkask-mcp-swarm/src/local_runtime.rs` —
   `LocalSwarmRuntime::delegate` (L366–638): the tool loop, the
-  `executed_skills`/`tool_calls` trace, the 1cr/1000tok debit, guard scanning.
+  `executed_skills`/`tool_calls` trace (the deterministic attribution source
+  for C5), the 1cr/1000tok debit, guard scanning (L550–557).
 - `kask/mcp-servers/hkask-mcp-swarm/src/local_registry.rs` — `LocalAgentCard`
-  (typed `accepts`/`produces` ports, `dependencies`, `capabilities`).
+  (typed `accepts`/`produces` ports, `dependencies`, `capabilities`); the
+  reload-on-staleness `load` (L131) that C6's `reconfigure_agent` relies on.
 - `kask/mcp-servers/hkask-mcp-swarm/src/hkask_mcp_swarm.rs` — the 28-tool
   surface (L2487–2535); `swarm_create_swarm` per-hire consent loop (L1282–1491);
-  `swarm_generate_prompt` one-shot (L1129–1168).
+  `swarm_generate_prompt` one-shot generation (L1129–1168) — generation, not
+  judging, so admissible under Constraint 2.
 - `kask/docs/plans/abw-swarm-intelligence.md` — the current-state substrate:
   §3.6 consent gate (3 layers + zed-side dispatch allowlist + gas seed);
-  §4.1 `with_wallet`; §13 the `swarm-intelligence` skill; §15.5 Steer mode.
+  §4.1 `with_wallet`; §13 the `swarm-intelligence` skill; §15.5 Steer mode
+  (operator-initiated, not persisted — the gap C2 addresses).
 - `.rules` (repo root) — "Advertised invariants need enforcement points";
-  "Convention priors drawn from .rules must be verified against the codebase";
-  the zed-kask integration traps.
+  "Convention priors drawn from .rules must be verified against the codebase"
+  (the trap that fired on revision 1's fusion assertion — see §9.2); the
+  zed-kask integration traps. **Note: 5 fusion entries in `.rules` are stale
+  (Appendix B).**
 
 ### 10.3 Cybernetic lineage (foundational, not directly cited above)
 
@@ -486,42 +819,101 @@ convergence-check template"):
 
 ## Appendix A — How this plan was validated
 
-- **hKask surfaces:** the consent gate + ceiling (`abw-swarm-intelligence.md`
-  §3.6), `with_wallet` (§4.1), Steer system prompt + non-persistence (§15.5),
-  the algedonic channel (manifest L35–37, L280), `task` passed to all steps
-  (manifest `input_mapping`s), `swarm_fire`/`swarm_delete_*` (manifest L165,
-  plan §13). The fusion panel's current wiring is *inferred absent* from the
-  manifest having no `agent_ranks` field — it remains an inference about
-  absence, not a verified gap; grep `agent_ranks` before implementing G3.
-- **External sources:** S2 read in full (attenuation/amplification/Conant-Ashby/
-  Go See sections quoted verbatim in §5); S1 read in full via the HTML (all 6
-  principles, 3 desiderata, §4 research agenda, §5 applications, Appendix A
-  FAQs incl. A.3 dependency hierarchy and A.5 MAS generalization). S3–S7 were
-  deep-read in the prior session (S5 JudgeFlow via LaTeX e-print — the arxiv
-  HTML conversion is broken — equations and the Judge prompt quoted verbatim).
+- **Fusion removal verified:** `grep` for
+  `fusion|panel_models|MultiModelInferencePort|FusionProvider` in
+  `kask/**/*.rs` returns **zero matches**. All revision-1 proposals that
+  treated `kask.fusion.panel_models` as a live judge asset are withdrawn in
+  this revision. The repo `.rules` still carries 5 stale fusion references
+  (Appendix B) — those are a finding, not a live spec.
+- **Determinism constraint applied:** every evaluation/judging path in this
+  plan (C0's `s`, C1's monitor, C5's attribution rule, C6's prompt scoring,
+  C7's influence score) is deterministic by construction. The only LLM use
+  retained is *generation* in C6 (`swarm_generate_prompt` writing a new
+  prompt), which is admissible under Constraint 2 because it is not judging.
+- **hKask surfaces verified:** the consent gate + ceiling
+  (`abw-swarm-intelligence.md` §3.6), `with_wallet` (§4.1), Steer system
+  prompt + non-persistence (§15.5), the algedonic channel (manifest L35–37,
+  L280), `task` passed to all steps (manifest `input_mapping`s),
+  `swarm_fire`/`swarm_delete_*` (manifest L165, plan §13), the `delegate`
+  trace fields (`local_runtime.rs` L628–668), `LocalAgentRegistry::load`
+  (`local_registry.rs` L131). Before implementing C5, grep `agent_at_fault`
+  to confirm ORIENT does not already emit it; before implementing C6, grep
+  `reconfigure` to confirm no half-wired path exists.
+- **External sources:** S2 read in full (the attenuation/amplification/
+  Conant-Ashby/Go See sections quoted verbatim in §5); S1 read in full via
+  the HTML (all 6 principles, 3 desiderata, §4 research agenda, §5
+  applications, Appendix A FAQs incl. A.3 dependency hierarchy and A.5 MAS
+  generalization). S3–S7 were deep-read in the prior session (S5 JudgeFlow
+  via LaTeX e-print — the arxiv HTML conversion is broken — equations and
+  the App.C judge prompt quoted; the App.C prompt is now deprecated as
+  probabilistic per Constraint 2).
 - **Metacognition skill:** the four Kata steps are the LLM's job; the
   deterministic gap + Brier compute did *not* run (inline, not the registry).
-  The qualitative Brier self-assessment in §9.2 is disclosed as
-  slightly-overconfident; no numeric gap or Brier is fabricated.
+  The qualitative Brier self-assessment in §9.2 is disclosed; revision 1's
+  stale fusion assertion is named as the unmodeled failure mode it was.
 - **No code was changed.** This is a reference + findings document. The
-  findings (§7) are proposals; implementation (§8) is sequenced but not begun.
+  components (§6) are proposals; implementation (§8) is sequenced but not
+  begun.
 
-## Appendix B — Suggested `.rules` additions (for reviewer decision)
+## Appendix B — Suggested `.rules` changes (for reviewer decision)
 
 Per the `.rules` "After any agentic session" workflow — these are proposed for
-reviewer decision, not edited inline:
+reviewer decision, not edited inline.
+
+### B.1 Suggested `.rules` removals (stale — fusion was removed from the code)
+
+The repo `.rules` carries **5 stale fusion references** (verified: `grep
+fusion|panel_models|MultiModelInferencePort|FusionProvider` in `kask/**/*.rs`
+→ 0 matches). Per the `.rules` "Convention priors drawn from .rules must be
+verified against the codebase" trap, these entries are themselves findings
+and should be removed or rewritten in a dedicated commit:
+
+1. The `## Manifests must not hardcode model names in the \`fusion\` block`
+   rule (the `fusion` block and `kask.fusion.panel_models` no longer exist;
+   the "omit the `fusion` block entirely" guidance is moot).
+2. The "Found in the fusion auto-discovery site" example in the
+   `background_spawn` trap (the site no longer exists; the `Tokio::spawn`
+   lesson is still valid but the example is stale).
+3. The `resolve_fusion_models` reference in the
+   `LanguageModelInferencePort` rule.
+4. The `MultiModelInferencePort` (fusion) reference in the same rule.
+5. The "fusion provider hit this as an unbounded warn storm" example in the
+   `LanguageModelProvider` registry subscriptions rule.
+
+Reviewers decide whether to delete outright (no backward compat per the
+design constraints) or rewrite to a non-fusion example.
+
+### B.2 Suggested `.rules` additions
 
 > ## `d` is a variety-attenuating sensor; Go See is the irreducible human check
 > The `swarm-intelligence` skill's convergence metric `d` (variety_coverage,
 > diversity, loop_closure) is a sensor that attenuates swarm state to three
 > numbers. By Ashby's law it cannot carry the full variety of task success — a
-> swarm with `d = 0` can still fail the task. The five-paper evaluators
-> (`φ_eval`, `R(𝒢)`, `J`, `E_D`) automate *part* of the Go See signal but
-> cannot eliminate it (the blocking unknown is always the ground-truth answer
-> `a` on open tasks). The complete design is: upgrade `d` with a task-success
-> term AND schedule a fixed Go See feedback loop (Steer descend every N
-> convergences with the "is `d` filtering truth?" checklist). Treating `d` as
-> the objective rather than a sensor is the failure mode this rule prevents.
+> swarm with `d = 0` can still fail the task. The deterministic evaluators
+> ported from the prior deep-reads (`φ_eval`, `R(𝒢)`'s `S_q`, `J`, `E_D`
+> where they are exact-match/pass@1) automate *part* of the Go See signal for
+> oracle tasks only; they cannot replace Go See (the channel-capacity bound,
+> S1 P6). LLM-as-judge is deprecated and is NOT an acceptable `s`. The
+> complete design is: add a deterministic task-success term to `d` for oracle
+> tasks AND schedule a fixed Go See feedback loop (Steer descend every N
+> convergences with the "is `d` filtering truth? are `.rules` priors
+> verified?" checklist) covering open tasks. Treating `d` as the objective
+> rather than a sensor, or substituting an LLM judge for the missing
+> task-success term, are the two failure modes this rule prevents.
+
+> ## Deterministic judge only; LLM-as-judge is deprecated
+> Any evaluation, scoring, or ranking step in a swarm-intelligence component
+> must be deterministic (test pass/fail, schema validation, exit code, regex
+> / reference match, a guard-scan flag, or a deterministic aggregation of
+> those). An LLM that scores or ranks outputs is not an acceptable judge.
+> LLM *generation* (e.g. `swarm_generate_prompt` writing a new system prompt)
+> is a different use and remains admissible. When porting a paper's "judge"
+> mechanism (e.g. JudgeFlow's LLM rank vector), replace the LLM judge with a
+> deterministic rule over the existing `delegate` trace
+> (`executed_skills[].ok`, `tool_calls[].ok`, guard redactions, cost
+> overruns); keep the paper's deterministic aggregation formula. A
+> "deterministic judge" is not what the paper means by "judge" — that
+> divergence is the point.
 
 > ## The consent gate is Ashby attenuation + Conant-Ashby amplification, not just a spend cap
 > The 3-layer consent gate (token → re-verify vs ABW → per-dispatch ceiling) is
@@ -532,7 +924,21 @@ reviewer decision, not edited inline:
 > verified against the codebase" trap is the Conant-Ashby discipline ("every
 > good regulator must be a model of the system") operationalized — a `.rules`
 > entry is the human's model; `grep` verifies it against reality; a stale rule
-> is model drift. Do not add a new gate, monitor, or sensor without naming
+> is model drift (the 5 fusion entries removed in this revision are the
+> worked example). Do not add a new gate, monitor, or sensor without naming
 > which cybernetic mechanism (attenuation / amplification / escalation /
 > second-order) it instantiates — otherwise the surface area grows without a
 > model, which is itself a Conant-Ashby violation.
+
+> ## Verify `.rules`-cited symbols before depending on them as design assets
+> A `.rules` entry that names a symbol (function, struct, config field, env
+> var) is a convention prior, not ground truth. Before treating it as a
+> design asset in a plan or implementation, grep the symbol in `kask/**/*.rs`.
+> Zero matches = the symbol was removed and the `.rules` entry is stale (file
+> a `.rules` removal in the same change). This revision's revision-1 draft
+> asserted `kask.fusion.panel_models` as a live judge asset from a `.rules`
+> convention prior; grep showed fusion was removed from the code. The trap
+> the `.rules` already warns about ("Convention priors drawn from .rules must
+> be verified against the codebase") applies to the agent's own plan drafts,
+> not just to runtime convention priors. The generalizable process change:
+> grep before you depend.
