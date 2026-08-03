@@ -1675,55 +1675,14 @@ impl SwarmPanel {
                             cx.notify();
                             return;
                         };
-                        // `can_publish` is the contract key (v0.10.15). A
-                        // missing key is a parse failure — guessing false would
-                        // silently route every publish through the force path.
-                        let Some(can_publish) = checks.get("can_publish").and_then(|v| v.as_bool())
-                        else {
-                            this.hire_error = Some(
-                                format!("Missing can_publish in publish-checks: {output}").into(),
-                            );
-                            cx.notify();
-                            return;
-                        };
-                        let failing_checks = checks
-                            .get("checks")
-                            .or_else(|| checks.get("failing_checks"))
-                            .and_then(|v| v.as_array())
-                            .map(|arr| {
-                                arr.iter()
-                                    .filter_map(|c| {
-                                        c.as_str()
-                                            .map(String::from)
-                                            .or_else(|| {
-                                                c.get("check")
-                                                    .and_then(|v| v.as_str())
-                                                    .map(String::from)
-                                            })
-                                            .or_else(|| {
-                                                c.get("name")
-                                                    .and_then(|v| v.as_str())
-                                                    .map(String::from)
-                                            })
-                                            .or_else(|| {
-                                                c.get("message")
-                                                    .and_then(|v| v.as_str())
-                                                    .map(String::from)
-                                            })
-                                            .or_else(|| {
-                                                c.get("description")
-                                                    .and_then(|v| v.as_str())
-                                                    .map(String::from)
-                                            })
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        this.pending_publish = Some(PendingPublish {
-                            agent_name: agent_name.clone(),
-                            can_publish,
-                            failing_checks,
-                        });
+                        match Self::parse_publish_checks(agent_name.clone(), &checks) {
+                            Ok(pending) => {
+                                this.pending_publish = Some(pending);
+                            }
+                            Err(msg) => {
+                                this.hire_error = Some(msg.into());
+                            }
+                        }
                     }
                     Err(err) => {
                         this.hire_error =
@@ -2527,6 +2486,49 @@ impl SwarmPanel {
             Color::Muted
         };
         Some((SharedString::from(label), color))
+    }
+
+    /// Parse the unwrapped `swarm_publish_checks` response (fermi v0.10.15)
+    /// into a `PendingPublish`. The contract key is `can_publish` (bool); a
+    /// missing key is an `Err` rather than a silent false (guessing false would
+    /// route every publish through the force path). Failing checks are read
+    /// tolerantly from `checks` or `failing_checks`, each entry a string or an
+    /// object with a `check`/`name`/`message`/`description` text field — the
+    /// exact per-check shape is not part of the verified API surface, so we
+    /// extract whatever text we can without fabricating.
+    fn parse_publish_checks(
+        agent_name: String,
+        checks: &serde_json::Value,
+    ) -> Result<PendingPublish, String> {
+        let Some(can_publish) = checks.get("can_publish").and_then(|v| v.as_bool()) else {
+            return Err(format!("missing can_publish in publish-checks: {checks}"));
+        };
+        let failing_checks = checks
+            .get("checks")
+            .or_else(|| checks.get("failing_checks"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| {
+                        c.as_str()
+                            .map(String::from)
+                            .or_else(|| c.get("check").and_then(|v| v.as_str()).map(String::from))
+                            .or_else(|| c.get("name").and_then(|v| v.as_str()).map(String::from))
+                            .or_else(|| c.get("message").and_then(|v| v.as_str()).map(String::from))
+                            .or_else(|| {
+                                c.get("description")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from)
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(PendingPublish {
+            agent_name,
+            can_publish,
+            failing_checks,
+        })
     }
 
     fn render_card(&mut self, entry: SwarmEntry, cx: &mut Context<Self>) -> MarketplaceCard {
@@ -4273,5 +4275,103 @@ mod tests {
             within_budget,
             "within-ceiling hire must be within_budget=true"
         );
+    }
+
+    // Publish-checks parse (fermi v0.10.15). Pins the `can_publish` contract
+    // key and the tolerant failing-checks extraction, so a server shape change
+    // surfaces here rather than silently routing every publish through the
+    // force path.
+    #[test]
+    fn parse_publish_checks_reads_can_publish_true() {
+        let checks = serde_json::json!({
+            "can_publish": true,
+            "checks": []
+        });
+        let pending =
+            SwarmPanel::parse_publish_checks("sensor_advisor".to_string(), &checks).expect("parse");
+        assert!(pending.can_publish);
+        assert!(pending.failing_checks.is_empty());
+        assert_eq!(pending.agent_name, "sensor_advisor");
+    }
+
+    #[test]
+    fn parse_publish_checks_collects_failing_checks_as_strings() {
+        let checks = serde_json::json!({
+            "can_publish": false,
+            "checks": ["missing description", "system_prompt empty"]
+        });
+        let pending =
+            SwarmPanel::parse_publish_checks("alpha".to_string(), &checks).expect("parse");
+        assert!(!pending.can_publish);
+        assert_eq!(
+            pending.failing_checks,
+            vec!["missing description", "system_prompt empty"]
+        );
+    }
+
+    #[test]
+    fn parse_publish_checks_extracts_object_check_text_fields() {
+        // The per-check object shape is not part of the verified API surface;
+        // tolerate `check`/`name`/`message`/`description` text fields.
+        let checks = serde_json::json!({
+            "can_publish": false,
+            "checks": [
+                {"check": "name"},
+                {"name": "desc"},
+                {"message": "tags"},
+                {"description": "prompt"},
+                {"unrelated": 7}
+            ]
+        });
+        let pending =
+            SwarmPanel::parse_publish_checks("alpha".to_string(), &checks).expect("parse");
+        assert_eq!(
+            pending.failing_checks,
+            vec!["name", "desc", "tags", "prompt"]
+        );
+    }
+
+    #[test]
+    fn parse_publish_checks_accepts_failing_checks_alias() {
+        // Some servers emit `failing_checks`; tolerate it as a fallback.
+        let checks = serde_json::json!({
+            "can_publish": false,
+            "failing_checks": ["no tags"]
+        });
+        let pending =
+            SwarmPanel::parse_publish_checks("alpha".to_string(), &checks).expect("parse");
+        assert_eq!(pending.failing_checks, vec!["no tags"]);
+    }
+
+    #[test]
+    fn parse_publish_checks_missing_can_publish_is_error() {
+        // A missing `can_publish` must be an error, not a silent false —
+        // guessing false would route every publish through the force path.
+        let checks = serde_json::json!({ "checks": [] });
+        let result = SwarmPanel::parse_publish_checks("alpha".to_string(), &checks);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn staleness_chip_none_without_timestamp() {
+        // Local cards carry no `updated_at` — never fabricate an age.
+        assert!(SwarmPanel::staleness_chip(&None).is_none());
+    }
+
+    #[test]
+    fn staleness_chip_none_on_unparseable_timestamp() {
+        assert!(SwarmPanel::staleness_chip(&Some("not-a-date".to_string())).is_none());
+    }
+
+    #[test]
+    fn staleness_chip_warns_past_30_days() {
+        // A timestamp 40 days in the past renders a Warning chip.
+        let old = chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::days(40))
+            .expect("40 days ago")
+            .to_rfc3339();
+        let (label, color) = SwarmPanel::staleness_chip(&Some(old)).expect("chip");
+        assert_eq!(color, Color::Warning);
+        assert!(label.contains("40d ago"));
     }
 }
