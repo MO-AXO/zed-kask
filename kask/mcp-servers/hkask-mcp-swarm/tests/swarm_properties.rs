@@ -41,21 +41,48 @@ fn arb_string_vec(max_fields: usize, max_len: usize) -> impl Strategy<Value = Ve
     prop::collection::vec(arb_short_string(max_len), 0..max_fields)
 }
 
+/// Arbitrary `LocalAgentDependencies` (both fields `#[serde(default)]`).
+fn arb_dependencies() -> BoxedStrategy<LocalAgentDependencies> {
+    (arb_string_vec(6, 24), arb_string_vec(6, 24))
+        .prop_map(|(required, optional)| LocalAgentDependencies { required, optional })
+        .boxed()
+}
+
+/// Arbitrary `LocalAgentCapabilities` (all fields `#[serde(default)]`).
+fn arb_capabilities() -> BoxedStrategy<LocalAgentCapabilities> {
+    (
+        arb_short_string(32),
+        arb_short_string(16),
+        prop::option::of(arb_short_string(128)),
+        arb_string_vec(8, 32),
+        arb_string_vec(8, 32),
+    )
+        .prop_map(
+            |(model, min_provider_class, system_prompt, mcp_tools, skills)| {
+                LocalAgentCapabilities {
+                    model,
+                    min_provider_class,
+                    system_prompt,
+                    mcp_tools,
+                    skills,
+                }
+            },
+        )
+        .boxed()
+}
+
 /// An arbitrary `LocalAgentCard`. `agent_id`/`agent_type` are required (no
 /// serde default); the rest mirror the card's `#[serde(default)]` fields.
+/// Sub-structs are generated via their own strategies so the outer tuple stays
+/// within proptest's 12-element `Strategy` arity.
 fn arb_local_agent_card() -> BoxedStrategy<LocalAgentCard> {
     let agent_id = arb_short_string(24);
     let agent_type = arb_short_string(24);
     let description = arb_short_string(64);
     let accepts = arb_string_vec(6, 24);
     let produces = arb_string_vec(6, 24);
-    let required = arb_string_vec(6, 24);
-    let optional = arb_string_vec(6, 24);
-    let model = arb_short_string(32);
-    let min_provider_class = arb_short_string(16);
-    let system_prompt = prop::option::of(arb_short_string(128));
-    let mcp_tools = arb_string_vec(8, 32);
-    let skills = arb_string_vec(8, 32);
+    let deps = arb_dependencies();
+    let caps = arb_capabilities();
     let cloud_id = prop::option::of(arb_short_string(24));
 
     (
@@ -64,13 +91,8 @@ fn arb_local_agent_card() -> BoxedStrategy<LocalAgentCard> {
         description,
         accepts,
         produces,
-        required,
-        optional,
-        model,
-        min_provider_class,
-        system_prompt,
-        mcp_tools,
-        skills,
+        deps,
+        caps,
         cloud_id,
     )
         .prop_map(
@@ -80,13 +102,8 @@ fn arb_local_agent_card() -> BoxedStrategy<LocalAgentCard> {
                 description,
                 accepts,
                 produces,
-                required,
-                optional,
-                model,
-                min_provider_class,
-                system_prompt,
-                mcp_tools,
-                skills,
+                dependencies,
+                capabilities,
                 cloud_id,
             )| {
                 LocalAgentCard {
@@ -95,14 +112,8 @@ fn arb_local_agent_card() -> BoxedStrategy<LocalAgentCard> {
                     description,
                     accepts,
                     produces,
-                    dependencies: LocalAgentDependencies { required, optional },
-                    capabilities: LocalAgentCapabilities {
-                        model,
-                        min_provider_class,
-                        system_prompt,
-                        mcp_tools,
-                        skills,
-                    },
+                    dependencies,
+                    capabilities,
                     cloud_id,
                 }
             },
@@ -328,9 +339,14 @@ proptest! {
         ];
 
         let input = serde_json::json!({});
+        let displays: Vec<String> = variants.iter().map(|e| e.to_string()).collect();
+        let kinds: Vec<String> = variants
+            .into_iter()
+            .map(|e| e.into_tool_error().to_string())
+            .collect();
         let output = serde_json::json!({
-            "displays": variants.iter().map(|e| e.to_string()).collect::<Vec<_>>(),
-            "kinds": variants.iter().map(|e| e.into_tool_error().to_string()).collect::<Vec<_>>(),
+            "displays": displays,
+            "kinds": kinds,
         });
 
         let oracle = oracle_invariant(|_input: &JsonValue, output: &JsonValue| {
