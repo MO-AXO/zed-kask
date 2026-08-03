@@ -5970,4 +5970,151 @@ mod tests {
             );
         });
     }
+
+    // zed-kask: D18 — pinning tests for the media_block_renderer seam.
+    // These tests assert that ```media blocks are intercepted by the
+    // registered renderer and that non-media code blocks fall through to
+    // the default code block renderer.
+
+    #[gpui::test]
+    fn test_media_block_renderer_intercepts_media_blocks(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        let markdown = cx.new(|cx| {
+            Markdown::new(
+                "```media\n{\"kind\":\"image\",\"src\":\"/tmp/test.png\"}\n```".into(),
+                None,
+                None,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        let (rendered, _) = cx.draw(
+            Default::default(),
+            size(px(600.0), px(600.0)),
+            |_window, _cx| {
+                MarkdownElement::new(markdown, MarkdownStyle::default())
+                    .code_block_renderer(CodeBlockRenderer::Default {
+                        copy_button_visibility: CopyButtonVisibility::Hidden,
+                        wrap_button_visibility: WrapButtonVisibility::Hidden,
+                        border: false,
+                    })
+                    .media_block_renderer(Box::new(|body, _window, _cx| {
+                        if body.trim_start().starts_with('{') && body.contains("\"kind\"") {
+                            Some(div().child("MEDIA_WAS_HERE").into_any_element())
+                        } else {
+                            None
+                        }
+                    }))
+            },
+        );
+
+        let all_text: String = rendered
+            .text
+            .lines
+            .iter()
+            .map(|line| line.layout.wrapped_text().to_string())
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(
+            all_text.contains("MEDIA_WAS_HERE"),
+            "media block should be intercepted by the renderer; got: {all_text:?}"
+        );
+        assert!(
+            !all_text.contains("/tmp/test.png"),
+            "media block JSON body should not appear as code text; got: {all_text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn test_media_block_renderer_falls_through_for_non_media_blocks(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        let markdown =
+            cx.new(|cx| Markdown::new("```rust\nlet value = 1;\n```".into(), None, None, cx));
+        cx.run_until_parked();
+
+        let (rendered, _) = cx.draw(
+            Default::default(),
+            size(px(600.0), px(600.0)),
+            |_window, _cx| {
+                MarkdownElement::new(markdown, MarkdownStyle::default())
+                    .code_block_renderer(CodeBlockRenderer::Default {
+                        copy_button_visibility: CopyButtonVisibility::Hidden,
+                        wrap_button_visibility: WrapButtonVisibility::Hidden,
+                        border: false,
+                    })
+                    .media_block_renderer(Box::new(|body, _window, _cx| {
+                        if body.trim_start().starts_with('{') && body.contains("\"kind\"") {
+                            Some(div().child("MEDIA_WAS_HERE").into_any_element())
+                        } else {
+                            None
+                        }
+                    }))
+            },
+        );
+
+        let all_text: String = rendered
+            .text
+            .lines
+            .iter()
+            .map(|line| line.layout.wrapped_text().to_string())
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(
+            all_text.contains("let value = 1;"),
+            "non-media code block should render normally; got: {all_text:?}"
+        );
+        assert!(
+            !all_text.contains("MEDIA_WAS_HERE"),
+            "non-media code block should not trigger the media renderer; got: {all_text:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn test_media_block_renderer_none_when_not_registered(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        let markdown = cx.new(|cx| {
+            Markdown::new(
+                "```media\n{\"kind\":\"image\",\"src\":\"/tmp/test.png\"}\n```".into(),
+                None,
+                None,
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        // No media_block_renderer registered — should fall through to default
+        // code block rendering.
+        let (rendered, _) = cx.draw(
+            Default::default(),
+            size(px(600.0), px(600.0)),
+            |_window, _cx| {
+                MarkdownElement::new(markdown, MarkdownStyle::default()).code_block_renderer(
+                    CodeBlockRenderer::Default {
+                        copy_button_visibility: CopyButtonVisibility::Hidden,
+                        wrap_button_visibility: WrapButtonVisibility::Hidden,
+                        border: false,
+                    },
+                )
+            },
+        );
+
+        let all_text: String = rendered
+            .text
+            .lines
+            .iter()
+            .map(|line| line.layout.wrapped_text().to_string())
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(
+            all_text.contains("kind"),
+            "without a renderer, media block should render as a normal code block; got: {all_text:?}"
+        );
+    }
 }
