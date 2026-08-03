@@ -185,6 +185,15 @@ flowchart TD
 
 ## 4. The human-on-the-loop mechanisms × hKask (S2)
 
+**Naming (grounded in the code):** "the curator" is the actor — the
+`CuratorAgentServer`-backed `ConversationView` built in `ensure_steer_conversation`
+(`swarm_panel.rs` L1647) with the `steer_system_prompt` as static context.
+"Steer" is a `PanelMode` (L246 — Browse/Author/Compose/Steer), the capability
+the curator exercises (compose/steer a swarm; its `SkillTool` invokes the
+`swarm-intelligence` cascade). **"Steer curator" is not a thing** — there is one
+curator, and steering is one of its capabilities. Xaman Ek (`swarm_xaman`) is a
+*separate, remote, third-party ABW consultant*, not the curator.
+
 | S2 mechanism | Cybernetic law it instantiates | hKask surface | Status |
 |---|---|---|---|
 | **Attenuation** (aggregate/filter so the human isn't overwhelmed) | Ashby: human variety < system variety → filter | `with_wallet` (balance rides every tool response, `abw-swarm-intelligence.md` §4.1) — a single scalar, not 200 logs. `render_consent_banner` + `within_budget: false` disables Confirm (§3.6) — the spend signal is reduced to one boolean. The algedonic channel *only* escalates on 402/un-ack, not on every dispatch. | **Has** — hKask already attenuates. The banner is textbook variety attenuation: the human sees one boolean, not the cost breakdown. |
@@ -357,9 +366,9 @@ S3/S4/S5/S7 and is presented first because it gates three of the components.
   re-propose the same hire/fire cycle indefinitely. This is the cheapest
   anti-loop mechanism in the plan and it is purely deterministic.
 - **Dropped from S3:** the population search `N=5` + pbest/gbest (expensive
-  under the consent gate — each candidate hire needs a token; better suited to
-  the Steer curator reasoning over candidates without spending, not the
-  automated cascade); the `LLM_flaw` system-wide diagnosis (probabilistic,
+  under the consent gate — each candidate hire needs a token; better suited
+  to the curator in Steer mode (it reasons over candidates without spending),
+  not the automated cascade); the `LLM_flaw` system-wide diagnosis (probabilistic,
   deprecated); the executable-code search space (hKask's `delegate` pipeline is
   fixed by design — a safety feature, not a limitation to remove).
 - **Needs C0:** yes (to know an edit "failed" = `d_delta ≤ 0` *and* `s` did
@@ -538,8 +547,8 @@ out of scope per §3).
 - **S3 population search (N=5) + pbest/gbest:** each candidate hire needs its
   own consent token; the 3-layer gate makes multi-candidate search expensive at
   the skill layer. If population reasoning is wanted, route it through the
-  Steer curator (reasons over candidates without spending), not the automated
-  cascade. The LLM `LLM_flaw` is deprecated (Constraint 2).
+  curator in Steer mode (it reasons over candidates without spending), not the
+  automated cascade. The LLM `LLM_flaw` is deprecated (Constraint 2).
 - **S4 multi-island + MAP-Elites evolution:** zero evolutionary substrate in
   hKask (`grep island|elite_archive|MAP-Elites|population` → 0 hits). Net-new
   infrastructure; the ring-migration + behavior-grid do not compose with the
