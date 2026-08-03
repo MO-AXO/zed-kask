@@ -32,3 +32,8 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 
 [features]
 test-utils = []
+
+[[test]]
+name = "guard_gap_properties"
+path = "tests/guard_gap_properties.rs"
+required-features = ["test-utils"]
