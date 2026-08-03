@@ -395,16 +395,16 @@ fn extract_wallet_balance(output: &str) -> Option<i64> {
         .and_then(|w| w.get("balance").and_then(|b| b.as_i64()))
 }
 
-/// Parse a tool invoker response, unwrapping the `content` envelope the MCP
-/// runtime wraps around tool returns. Returns the inner `content` object when
-/// the envelope is present, or the whole value when it isn't (defensive
-/// against a future invoker that returns the payload directly). `None` means
-/// the response was not valid JSON — callers should surface a parse error,
-/// never fabricate a default.
-///
-/// The seam lives in `hkask_types::tool_response::parse_tool_response` — the
-/// same unwrapper the MCP server test helpers use, so a change to the envelope
-/// shape is one edit in one crate.
+// Parse a tool invoker response, unwrapping the `content` envelope the MCP
+// runtime wraps around tool returns. Returns the inner `content` object when
+// the envelope is present, or the whole value when it isn't (defensive
+// against a future invoker that returns the payload directly). `None` means
+// the response was not valid JSON — callers should surface a parse error,
+// never fabricate a default.
+//
+// The seam lives in `hkask_types::tool_response::parse_tool_response` — the
+// same unwrapper the MCP server test helpers use, so a change to the envelope
+// shape is one edit in one crate.
 
 /// Extract a swarm's hired agents from a `swarm_get_swarm` response.
 /// ABW's exact roster shape is not part of the verified surface, so this
@@ -1350,7 +1350,7 @@ impl SwarmPanel {
                             if let Some(detail) = this.swarm_detail.clone() {
                                 this.open_swarm_detail(
                                     detail.workspace_id.clone(),
-                                    detail.name.clone(),
+                                    detail.name,
                                     cx,
                                 );
                             }
