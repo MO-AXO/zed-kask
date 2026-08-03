@@ -89,10 +89,10 @@ steps:
 
   - ordinal: 6
     action: execute
-    command: "echo '[harness] Converged — Cauchy criterion met on (coverage, mutation-score, cost)'"
+    command: "echo '[harness] Converged — Cauchy criterion met on (coverage, mutation-score)'"
     description: >
       The test harness has stabilized — the weighted norm of
-      (coverage, mutation-score, cost) has been below epsilon for W=3
+      (coverage, mutation-score) has been below epsilon for W=3
       consecutive iterations. Emit reg.harness.converged span.
     terminal: true
 
