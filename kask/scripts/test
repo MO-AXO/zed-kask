@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Run all kask tests via nextest, separated from upstream Zed tests.
+# Usage: ./scripts/test              # run all kask tests
+#        ./scripts/test --cargo-test # use cargo test instead of nextest
+#        ./scripts test -p hkask-mcp # pass through to nextest
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+if command -v cargo-nextest &>/dev/null && [[ "${1:-}" != "--cargo-test" ]]; then
+    shift $(( $# > 0 && "${1}" == "--cargo-test" ? 1 : 0 ))
+    exec cargo nextest run --profile kask "$@"
+else
+    shift $(( $# > 0 && "${1}" == "--cargo-test" ? 1 : 0 ))
+    # Fallback: cargo test with kask package filter
+    exec cargo test --workspace -p 'hkask-*' -p kask_bridge "$@"
+fi

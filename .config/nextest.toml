@@ -1,6 +1,21 @@
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 1 }
 
+# Kask-specific profile — filters to kask crates only, separating them
+# from upstream Zed tests. Usage: cargo nextest run --profile kask
+[profile.kask]
+filters = [
+    "package(hkask-*)",
+    "package(kask_bridge)",
+    "package(swarm_panel)",
+]
+slow-timeout = { period = "60s", terminate-after = 1 }
+
+# Kask SQLite-heavy crates that share a database — serialize to avoid contention.
+[[profile.kask.overrides]]
+filter = "package(hkask-storage) or package(hkask-ledger) or package(hkask-mcp-swarm)"
+test-group = "sequential-db-tests"
+
 [test-groups]
 sequential-db-tests = { max-threads = 1 }
 
