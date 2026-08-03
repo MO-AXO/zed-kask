@@ -128,6 +128,37 @@ fn env_f64(key: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
+/// Estimate the rJoule (USD) cost of a media generation call.
+///
+/// Unit costs are configurable via env vars so operators can set real
+/// provider prices. Defaults are conservative placeholders, not real
+/// pricing — set `HKASK_MEDIA_RJOULE_PER_*` to your provider's actual
+/// rates. The estimate over-counts conservatively so the hard gate trips
+/// before the billable API call rather than after.
+fn estimate_rjoule(tool: &str, params: &hkask_types::MediaGenerateParams) -> f64 {
+    let per_image = env_f64("HKASK_MEDIA_RJOULE_PER_IMAGE", 0.05);
+    let per_transform = env_f64("HKASK_MEDIA_RJOULE_PER_TRANSFORM", 0.04);
+    let per_upscale = env_f64("HKASK_MEDIA_RJOULE_PER_UPSCALE", 0.02);
+    let per_video_second = env_f64("HKASK_MEDIA_RJOULE_PER_VIDEO_SECOND", 1.0);
+    match tool {
+        "generate_image" => per_image * params.count.unwrap_or(1).max(1) as f64,
+        "image_to_image" => {
+            // transform cost scales with strength (0.0..=1.0).
+            per_transform * (1.0 + params.strength.unwrap_or(1.0) as f64)
+        }
+        "upscale" => {
+            // cost ~ pixel-area growth, so scale^2.
+            let scale = params.scale.unwrap_or(2).max(1) as f64;
+            per_upscale * scale * scale
+        }
+        "generate_video" => per_video_second * params.duration.unwrap_or(5.0).max(1.0) as f64,
+        // Workflow DAGs are opaque without parsing; charge the image
+        // unit as a floor so the gate is not silently bypassed.
+        "execute_workflow" => per_image,
+        _ => per_image,
+    }
+}
+
 /// Compute normalized Levenshtein similarity between two strings.
 /// Returns 1.0 for identical strings, 0.0 for completely different.
 fn levenshtein_similarity(a: &str, b: &str) -> f64 {
@@ -203,6 +234,128 @@ mod levenshtein_tests {
     }
 }
 
+#[cfg(test)]
+mod estimate_rjoule_tests {
+    use super::estimate_rjoule;
+    use hkask_types::MediaGenerateParams;
+
+    // Tests run with default unit costs (no env vars set) unless overridden.
+    // Defaults: image=0.05, transform=0.04, upscale=0.02, video_sec=1.0.
+
+    #[test]
+    fn generate_image_scales_with_count() {
+        let one = estimate_rjoule(
+            "generate_image",
+            &MediaGenerateParams {
+                count: Some(1),
+                ..Default::default()
+            },
+        );
+        let four = estimate_rjoule(
+            "generate_image",
+            &MediaGenerateParams {
+                count: Some(4),
+                ..Default::default()
+            },
+        );
+        assert!((one - 0.05).abs() < 1e-9);
+        assert!((four - 0.20).abs() < 1e-9);
+    }
+
+    #[test]
+    fn generate_image_count_defaults_to_one_when_unset() {
+        let est = estimate_rjoule("generate_image", &MediaGenerateParams::default());
+        assert!(
+            (est - 0.05).abs() < 1e-9,
+            "unset count should charge one image"
+        );
+    }
+
+    #[test]
+    fn transform_scales_with_strength() {
+        let none = estimate_rjoule("image_to_image", &MediaGenerateParams::default());
+        let full = estimate_rjoule(
+            "image_to_image",
+            &MediaGenerateParams {
+                strength: Some(1.0),
+                ..Default::default()
+            },
+        );
+        // no strength => 1.0 default => 0.04 * 2.0 = 0.08
+        assert!((none - 0.08).abs() < 1e-9);
+        assert!((full - 0.08).abs() < 1e-9);
+        let half = estimate_rjoule(
+            "image_to_image",
+            &MediaGenerateParams {
+                strength: Some(0.5),
+                ..Default::default()
+            },
+        );
+        assert!((half - 0.06).abs() < 1e-9); // 0.04 * 1.5
+    }
+
+    #[test]
+    fn upscale_grows_quadratically_with_scale() {
+        let x2 = estimate_rjoule(
+            "upscale",
+            &MediaGenerateParams {
+                scale: Some(2),
+                ..Default::default()
+            },
+        );
+        let x4 = estimate_rjoule(
+            "upscale",
+            &MediaGenerateParams {
+                scale: Some(4),
+                ..Default::default()
+            },
+        );
+        assert!((x2 - 0.08).abs() < 1e-9); // 0.02 * 2^2
+        assert!((x4 - 0.32).abs() < 1e-9); // 0.02 * 4^2
+    }
+
+    #[test]
+    fn generate_video_scales_with_duration() {
+        let five = estimate_rjoule(
+            "generate_video",
+            &MediaGenerateParams {
+                duration: Some(5.0),
+                ..Default::default()
+            },
+        );
+        let ten = estimate_rjoule(
+            "generate_video",
+            &MediaGenerateParams {
+                duration: Some(10.0),
+                ..Default::default()
+            },
+        );
+        assert!((five - 5.0).abs() < 1e-9);
+        assert!((ten - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unknown_tool_charges_image_floor() {
+        let est = estimate_rjoule("mystery_op", &MediaGenerateParams::default());
+        assert!((est - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn video_duration_clamped_to_minimum_one_second() {
+        let est = estimate_rjoule(
+            "generate_video",
+            &MediaGenerateParams {
+                duration: Some(0.0),
+                ..Default::default()
+            },
+        );
+        assert!(
+            (est - 1.0).abs() < 1e-9,
+            "zero-duration should charge 1 second"
+        );
+    }
+}
+
 impl MediaServer {
     // ── rJoule budget ───────────────────────────────────────────────────────
     //
@@ -215,37 +368,6 @@ impl MediaServer {
     // because it returns `Gas` whenever `gas_used >= gas_cap` and would trip
     // spuriously when the gas cap is 0 — instead the rJoule gate is checked
     // directly via `remaining_rjoule()`.
-
-    /// Estimate the rJoule (USD) cost of a media generation call.
-    ///
-    /// Unit costs are configurable via env vars so operators can set real
-    /// provider prices. Defaults are conservative placeholders, not real
-    /// pricing — set `HKASK_MEDIA_RJOULE_PER_*` to your provider's actual
-    /// rates. The estimate over-counts conservatively so the hard gate trips
-    /// before the billable API call rather than after.
-    fn estimate_rjoule(&self, tool: &str, params: &hkask_types::MediaGenerateParams) -> f64 {
-        let per_image = env_f64("HKASK_MEDIA_RJOULE_PER_IMAGE", 0.05);
-        let per_transform = env_f64("HKASK_MEDIA_RJOULE_PER_TRANSFORM", 0.04);
-        let per_upscale = env_f64("HKASK_MEDIA_RJOULE_PER_UPSCALE", 0.02);
-        let per_video_second = env_f64("HKASK_MEDIA_RJOULE_PER_VIDEO_SECOND", 1.0);
-        match tool {
-            "generate_image" => per_image * params.count.unwrap_or(1).max(1) as f64,
-            "image_to_image" => {
-                // transform cost scales with strength (0.0..=1.0).
-                per_transform * (1.0 + params.strength.unwrap_or(1.0) as f64)
-            }
-            "upscale" => {
-                // cost ~ pixel-area growth, so scale^2.
-                let scale = params.scale.unwrap_or(2).max(1) as f64;
-                per_upscale * scale * scale
-            }
-            "generate_video" => per_video_second * params.duration.unwrap_or(5.0).max(1.0) as f64,
-            // Workflow DAGs are opaque without parsing; charge the image
-            // unit as a floor so the gate is not silently bypassed.
-            "execute_workflow" => per_image,
-            _ => per_image,
-        }
-    }
 
     /// Pre-charge the rJoule budget for an estimated call and enforce the hard
     /// limit. Returns `Ok(())` when no budget is configured (enforcement
@@ -263,7 +385,7 @@ impl MediaServer {
         let Some(budget) = self.budget.as_ref() else {
             return Ok(()); // no budget configured — enforcement disabled
         };
-        let estimate = self.estimate_rjoule(tool, params);
+        let estimate = estimate_rjoule(tool, params);
         let mut tracker = budget.lock().await;
         let remaining = tracker.remaining_rjoule();
         if remaining < estimate {
