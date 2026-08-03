@@ -153,18 +153,16 @@ pub fn select_scored(
         });
     }
 
-    let best_idx = scored
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| {
-            a.weighted
-                .partial_cmp(&b.weighted)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-        .map(|(i, _)| i)
-        .ok_or_else(|| hkask_types::InferenceError::Connection("no provider scored".into()))?;
+    let mut best_idx = 0;
+    let mut best_weighted = f64::NEG_INFINITY;
+    for (i, s) in scored.iter().enumerate() {
+        if s.weighted > best_weighted {
+            best_weighted = s.weighted;
+            best_idx = i;
+        }
+    }
 
-    let chosen = Arc::clone(&candidates[best_idx]);
+    let chosen = Arc::clone(candidates[best_idx]);
 
     tracing::info!(
         target: "reg.media.select",
