@@ -2366,6 +2366,16 @@ impl SwarmPanel {
                                             ))
                                             .color(Color::Accent)
                                             .size(LabelSize::XSmall),
+                                        )
+                                        .when_some(
+                                            Self::staleness_chip(&agent.updated_at),
+                                            |this, (label, color)| {
+                                                this.child(
+                                                    Label::new(label)
+                                                        .color(color)
+                                                        .size(LabelSize::XSmall),
+                                                )
+                                            },
                                         ),
                                 )
                                 .child(Label::new(agent.description).color(Color::Muted)),
