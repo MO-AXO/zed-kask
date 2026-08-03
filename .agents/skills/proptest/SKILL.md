@@ -9,25 +9,13 @@ Property-based testing skill. Identifies testable properties from a target funct
 - When TDD's `tdd-gap-check` flags a `prob:` field gap (a probabilistic contract with no property test)
 - When bug-hunt finds a class of bugs that a property test would catch (e.g., integer overflow in budget calculation)
 
-## How It Works
+## Instructions
 
-Five-phase convergent PDCA, with the shape emerging from PBT's domain (QuickCheck/proptest):
-
-1. **Identify** — Read the target's contract (`/// expect:`, `/// post:`, `/// inv:`), classify testable properties by oracle type (panic-freedom, invariant, round-trip, reference, idempotency)
-2. **Strategize** — For each property, design the input strategy. Check `hkask-test-harness` first (`arb_json_value`, `test_token_for_tool`, `NoopToolPort`), then custom strategies (`select`, `prop_recursive!`, `any::<T>()`, `prop_filter`, tuple composition)
-3. **Write** — Generate the complete `proptest!` block with principle grounding comments, descriptive failure messages, and oracle-appropriate assertions
-4. **Analyze** — Execute `cargo test`, parse results. If the test fails, analyze the shrunk counterexample: is it a real bug (flag for `diagnose`) or a test bug (fix the property)?
-5. **Report** — Structured report: properties verified, failures found, coverage gained, harness usage
-
-## Oracle Taxonomy
-
-| Oracle type | What it asserts | Test structure |
-|-------------|----------------|----------------|
-| Panic-freedom | Never panics on any input | `catch_unwind` + `prop_assert!(result.is_ok())`, no `prop_assume!` |
-| Invariant | A property holds for all inputs | `prop_assert!` / `prop_assert_eq!` with the property |
-| Round-trip | `deserialize(serialize(x)) == x` | Generate valid values, serialize, deserialize, compare field-by-field |
-| Reference | Output matches independent implementation | Run both, assert equality |
-| Idempotency | `f(f(x)) == f(x)` | Apply twice, assert equality |
+1. **Identify** — Read the target's contract (`/// expect:`, `/// post:`, `/// inv:`) and source code. Classify each testable property by oracle type: `panic_freedom` (P4 — never panics on any input), `invariant` (P1 — a property holding for all inputs), `round_trip` (P1 — `deserialize(serialize(x)) == x`), `reference` (P1 — output matches an independent implementation), `idempotency` (P1 — `f(f(x)) == f(x`).
+2. **Strategize** — For each property, check `hkask-test-harness` first: `arb_json_value()` for JSON/YAML surfaces, `test_token_for_tool()` for governance tests, `NoopToolPort` for ToolPort stubs. If the harness doesn't have it, design a custom strategy: `select` for enums, `prop_recursive!` for recursive types, `any::<T>()` for primitives, `prop_filter` for constraints, tuple composition for structs. Use `prop_assume!` only for relational properties (never for panic-freedom).
+3. **Write** — Generate the complete `proptest!` block with principle grounding comments, descriptive failure messages including the failing values, and oracle-appropriate assertions. For `round_trip`: compare field-by-field with per-field messages. For float comparisons: use the re-parse trick (serialize to string, re-parse, compare the re-parsed values).
+4. **Analyze** — Execute `cargo test`. If it passes: all properties hold. If it fails: proptest automatically shrinks the failing input to a minimal counterexample. Classify: real bug (flag for `diagnose` skill — the shrunk counterexample is a pre-minimized reproducer) or test bug (fix the property and re-run). Handle compilation issues: `select` needs `&[...]`, `prop_assert_eq!` moves values (use `&t1.id` for repeated comparisons), missing `proptest` or `hkask-test-harness` in dev-dependencies.
+5. **Report** — Structured report: properties verified (with oracle type and principle), failures found (with shrunk counterexample), coverage gained (what the property tests that hardcoded tests don't), harness usage, next steps.
 
 ## Relationship to Other Skills
 
@@ -35,11 +23,20 @@ Five-phase convergent PDCA, with the shape emerging from PBT's domain (QuickChec
 - **bug-hunt**: explores for unknown bugs via charter-driven probing. Proptest systematically verifies known properties. Bug-hunt's `pattern_signatures` feed into proptest's Identify phase.
 - **diagnose**: when proptest finds a real bug, the shrunk counterexample is a pre-minimized reproducer — exactly what diagnose's Phase 2 needs.
 
-## Harness Integration
+## Registry Templates
 
-The skill checks `hkask-test-harness` first for shared generators:
-- `arb_json_value()` for JSON/YAML deserialization surfaces
-- `test_token_for_tool(name)` + `test_agent_webid()` for governance gate tests
-- `NoopToolPort` for ToolPort stub fixtures
+| Template | Type | Purpose |
+|----------|------|---------|
+| `proptest/proptest-identify.j2` | KnowAct | Identify properties from target's contract, classify by oracle type |
+| `proptest/proptest-strategize.j2` | KnowAct | Design input strategies — harness-first, then custom |
+| `proptest/proptest-write.j2` | KnowAct | Generate complete proptest code with principle grounding |
+| `proptest/proptest-analyze.j2` | KnowAct | Execute test, analyze shrunk counterexamples |
+| `proptest/proptest-report.j2` | KnowAct | Report verified properties, failures, coverage |
 
-When the harness doesn't provide what's needed, the skill designs custom strategies using `select`, `prop_recursive!`, `any::<T>()`, `prop_filter`, and tuple composition.
+## Constraints
+
+- All templates are KnowAct (inference + JSON parse). rJoule cap: 3.
+- Gas cap: 80,000. Convergence: Cauchy, epsilon 0.03, window 3, max 10 iterations, min 2.
+- `ledger.span_namespace: reg.skill.proptest` (CI-enforced, no `spans:` list).
+- The skill does not implement code — it tests existing code's properties. For new code, use TDD first.
+- For `panic_freedom` oracle: no `prop_assume!` filtering (accept all inputs). For other oracles: `prop_assume!` is allowed for relational constraints.
