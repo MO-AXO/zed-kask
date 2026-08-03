@@ -6,30 +6,97 @@
 //! to take when a specific metric deviates in a specific direction.
 
 use crate::types::loops::{
-    ActionDecision, ActionType, Deviation, DeviationDirection, LoopId, RegulationData, SignalMetric,
+    ActionDecision, ActionType, Deviation, DeviationDirection, LoopId, SignalMetric,
 };
+
+/// Identifies why a regulation action was proposed.
+///
+/// Replaces string matching in `build_regulation_action` — the compiler
+/// now verifies that every policy-table entry has a corresponding dispatch
+/// arm (or falls through to the generic `_` arm).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegulationReason {
+    EnergyBudgetLow,
+    BudgetGuardEscalation,
+    EnergyDepletionAutoAdjust,
+    VarietyDeficitExceeded,
+    ErrorRateExceeded,
+    ConnectorLatencyExceeded,
+    CommunicationBackpressure,
+    WalletBalanceLow,
+    WalletKeyUnhealthy,
+    SeamCoverageDegraded,
+    SeamCoverageImproved,
+    ToolReliabilityDegraded,
+    StorageUsageObserved,
+    TripleCountObserved,
+    LowConfidenceCountObserved,
+    ConsolidationCandidatesObserved,
+    PendingEscalationsObserved,
+    AlgedonicEventsExceeded,
+    GoalsStale,
+    GoalsExpired,
+    MetacognitionVarietyDeficit,
+    MetacognitionCriticalAlerts,
+    ActionIneffective,
+    RegulatoryPlateauDetected,
+    ActionDecisionBlocked,
+    MemoryLifeLow,
+    CircuitBreakerOpen,
+    InferenceUnavailable,
+    InferenceGasLow,
+    ModelUnavailable,
+}
+
+impl RegulationReason {
+    /// The wire-format string used in `RegulatoryActionParams` and logs.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::EnergyBudgetLow => "energy_budget_low",
+            Self::BudgetGuardEscalation => "budget_guard_escalation",
+            Self::EnergyDepletionAutoAdjust => "energy_depletion_auto_adjust",
+            Self::VarietyDeficitExceeded => "variety_deficit_exceeded",
+            Self::ErrorRateExceeded => "error_rate_exceeded",
+            Self::ConnectorLatencyExceeded => "connector_latency_exceeded",
+            Self::CommunicationBackpressure => "communication_backpressure",
+            Self::WalletBalanceLow => "wallet_balance_low",
+            Self::WalletKeyUnhealthy => "wallet_key_unhealthy",
+            Self::SeamCoverageDegraded => "seam_coverage_degraded",
+            Self::SeamCoverageImproved => "seam_coverage_improved",
+            Self::ToolReliabilityDegraded => "tool_reliability_degraded",
+            Self::StorageUsageObserved => "storage_usage_observed",
+            Self::TripleCountObserved => "triple_count_observed",
+            Self::LowConfidenceCountObserved => "low_confidence_count_observed",
+            Self::ConsolidationCandidatesObserved => "consolidation_candidates_observed",
+            Self::PendingEscalationsObserved => "pending_escalations_observed",
+            Self::AlgedonicEventsExceeded => "algedonic_events_exceeded",
+            Self::GoalsStale => "goals_stale",
+            Self::GoalsExpired => "goals_expired",
+            Self::MetacognitionVarietyDeficit => "metacognition_variety_deficit",
+            Self::MetacognitionCriticalAlerts => "metacognition_critical_alerts",
+            Self::ActionIneffective => "action_ineffective",
+            Self::RegulatoryPlateauDetected => "regulatory_plateau_detected",
+            Self::ActionDecisionBlocked => "action_decision_blocked",
+            Self::MemoryLifeLow => "memory_life_low",
+            Self::CircuitBreakerOpen => "circuit_breaker_open",
+            Self::InferenceUnavailable => "inference_unavailable",
+            Self::InferenceGasLow => "inference_gas_low",
+            Self::ModelUnavailable => "model_unavailable",
+        }
+    }
+}
 
 /// A proposed action before substitution and mode-specific filtering.
 ///
-/// The `compute()` method applies `try_substitute` and mode checks
-/// to finalize these into `RegulatoryAction` instances.
-///
-/// Fields are read by `build_regulation_action` via string matching
-/// on `reason`; `target`, `action_type`, `data`, and `metric_name`
-/// serve as documentation of each rule's intent. `data` is `None` in
-/// the policy table because concrete values come from the `Deviation`
-/// at runtime.
-// Fields serve as documentation of each rule's intent; `build_regulation_action`
-// reads via string matching on `reason`. `data` is `None` in the policy table
-// because concrete values come from the `Deviation` at runtime.
+/// `target` and `action_type` document the policy's intent; the actual
+/// dispatch in `build_regulation_action` may substitute the action type
+/// via `try_substitute` or skip the action based on mode settings.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ProposedAction {
     pub target: LoopId,
     pub action_type: ActionType,
-    pub reason: &'static str,
-    pub data: Option<RegulationData>,
-    pub metric_name: Option<&'static str>,
+    pub reason: RegulationReason,
 }
 
 /// A single regulation rule: when `metric` deviates in `direction`,
