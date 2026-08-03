@@ -443,6 +443,82 @@ implement the trait + register, no dispatch edits." Do NOT promote the
 "trait-with-one-impl is speculative generality" rule); it has ≥3 impls after
 this (Fal, DeepInfra, AtlasCloud).
 
+### WS-9 — Fooocus deep-module pattern audit (quality gate)
+
+**Status: NOT STARTED — a final quality / tool check.** Deeply examine (the
+deep-module lens, Ousterhout) the patterns Fooocus uses for media generation
+and management, then compare what `hkask-mcp-media` supports vs Fooocus's
+patterns/capabilities. Reference: https://github.com/lllyasviel/Fooocus (fetched
+for this entry — stay within the README's documented patterns; do not
+fabricate internals).
+
+**Fooocus's core deep module** (the thing to understand): a minimal interface
+(`prompt → beautiful image`, `<3` clicks, no parameter tuning, 4GB VRAM) that
+hides an enormous quality pipeline. Deletion test (Ousterhout): remove the
+hidden pipeline and the complexity reappears in *every* user (manual prompt
+engineering + sampler tuning) → the pipeline deserves to exist, deeply, behind
+the simple interface. This is the opposite of a shallow module, and the
+pattern to extract is *where the depth lives* (behind the interface, not in it).
+
+**Patterns to examine (deep-module lens) and compare to our server:**
+
+1. **Hidden quality-enhancement pipeline** (the core deep module):
+   - GPT-2-based prompt expansion (the "Fooocus V2" dynamic style) rewrites
+     short prompts into rich ones before generation.
+   - Native refiner swap inside one k-sampler (reuses the base model's
+     momentum; vs A1111/ComfyUI's two independent samplers).
+   - Negative ADM guidance + SAG (Self-Attention Guidance, anisotropic
+     kernel) to remove the "plastic / overly-smooth" SDXL artifact.
+   - Tuned sampler params, hard-coded best resolutions, CFG/TSNR correction,
+     A1111 prompt-emphasis normalization, multi-style balancing.
+   - **Our server:** none — generation is a raw pass-through to
+     fal.ai/DeepInfra. **Gap: no hidden quality layer.** Note: much of this is
+     SDXL-specific and lives in the provider; the portable analog for us is a
+     prompt-expansion step + a tuned default-params preset (WS-7).
+
+2. **Presets** (`default`/`anime`/`realistic`; `config.txt` with
+   `default_model`, `default_refiner`, `default_cfg_scale`,
+   `default_sampler`, `default_scheduler`, `default_negative_prompt`,
+   `default_styles`, `default_loras`):
+   - **Our server:** WS-7 (style presets as YAML playbooks) is the planned
+     analog. **Compare WS-7's design to Fooocus's `config.txt` shape** — is our
+     preset surface deep enough (model + params + styles + negative) or too
+     shallow (prompt-suffix only)?
+
+3. **Image management operations** — Upscale/Variation (`Vary Subtle`/
+   `Vary Strong`, `Upscale 1.5x`/`2x`), Inpaint/Outpaint (pan
+   up/down/left/right), Image Prompt (IP-Adapter + InsightFace FaceSwap),
+   Describe (interrogate):
+   - **Our server:** has `upscale_image`, `transform_image`,
+     `image_remove_background`, `image_apply_style`, `describe_image`,
+     `extract_object`, `face_register`/face validation. **Gaps vs Fooocus:** no
+     inpaint/outpaint, no pan, no FaceSwap, no "Vary Subtle/Strong" variation
+     semantics — the variation/upscale ops exist but lack Fooocus's
+     inpaint/variation model semantics.
+
+4. **Inline prompt features** — Wildcards (`__color__` → random from
+   `wildcards/color.txt`), Array Processing (`[[red,green,blue]]` → one image
+   per element), Inline LoRAs (`<lora:name:1.2>`):
+   - **Our server:** none. **Gap: no prompt-expansion DSL** (wildcards /
+   arrays / LoRA refs). Examine whether it's worth porting as a prompt-layer
+   capability (WS-7 presets or a prompt-expansion template).
+
+5. **Asset management** — offline `outputs/` dir, `config.txt` model paths,
+   metadata:
+   - **Our server:** filesystem gallery + WS-3 lineage. **Gap:** no metadata
+   embedding in PNG/WebP (ComfyUI does this — a WS-2/WS-3 follow-on).
+
+**Deliverable:** a gap table (Fooocus pattern → our server: `supported` /
+`partial` / `gap` → recommended action → owning work stream), plus a verdict
+on whether our preset (WS-7) and prompt layers are deep enough vs Fooocus's
+hidden pipeline. This is the "final quality and tool check" before declaring
+the media system feature-complete.
+
+**Acceptance:** the audit lists every Fooocus generation + management pattern
+with a supported/gap verdict and a concrete recommendation mapped to a work
+stream (WS-7 presets, WS-3 lineage, a future inpaint/variation op set, a
+future prompt-expansion DSL).
+
 ---
 
 ## Phase 4 — Asset ownership and anti-lock-in design
