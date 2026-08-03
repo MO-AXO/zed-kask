@@ -11,6 +11,7 @@
 pub mod budget;
 pub mod bundle;
 pub mod compute;
+pub mod condition;
 pub mod convergence;
 pub mod crate_loader;
 pub mod executor;
