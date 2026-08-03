@@ -26,6 +26,12 @@ use clustering::{cluster_within_source, read_tagged_chunks};
 use qa_parsing::{ParsedQa, parse_qa_record};
 use qa_types::{QaType, parse_type_distribution, qa_type_instruction, qa_type_str};
 
+// Re-export helpers used by the service layer (services/consolidation.rs,
+// services/prompt_builder.rs) so the services don't depend on the private
+// submodule paths.
+pub(crate) use clustering::{cluster_within_source, read_tagged_chunks};
+pub(crate) use qa_types::{QaType, parse_type_distribution, qa_type_instruction, qa_type_str};
+
 #[tool_router(router = corpus_router, vis = "pub")]
 impl CorpusServer {
     #[tool(

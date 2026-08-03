@@ -14,6 +14,7 @@ mod qa;
 mod triples;
 
 use crate::batch::{BatchOutcome, MAX_RETRIES, retry_with_backoff};
+use crate::services::triples::{TriplesRequest, TriplesService};
 use crate::*;
 use ontology_io::{read_ontology_namespaces, read_ontology_tags_annotated};
 use qa::{BatchQaPrompt, parse_qa_response, write_qa_result};
@@ -51,6 +52,7 @@ pub(crate) static INPUT_GUARD_ENABLED: std::sync::LazyLock<bool> = std::sync::La
 
 // Re-export helpers used by other tool modules (corpus.rs imports these) and
 // make them available within this module via the module path.
+pub(crate) use ontology_io::read_ontology_namespaces;
 pub(crate) use ontology_io::read_ontology_tags;
 pub(crate) use qa::configured_qa_model;
 pub(crate) use triples::{predicate_to_dimension, triple_confidence};
@@ -434,46 +436,25 @@ impl CorpusServer {
         }): Parameters<ExtractTriplesRequest>,
     ) -> String {
         execute_tool(self, "corpus_extract_triples", async {
-            self.extract_triples_batch(
-                &chunks_jsonl,
-                tagged_jsonl.as_deref(),
-                max_triples,
-                &db_path,
-                &passphrase,
-                &owner,
-                concurrency,
-            )
-            .await
+            TriplesService::new(Arc::clone(&self.inference_router))
+                .extract(TriplesRequest {
+                    chunks_jsonl,
+                    tagged_jsonl,
+                    max_triples,
+                    db_path,
+                    passphrase,
+                    owner,
+                    concurrency,
+                })
+                .await
         })
         .await
     }
 
-    /// Batch extract h_mems from chunks JSONL with concurrent LLM calls.
-    ///
-    /// Opens the DB once and shares it across all concurrent tasks via `Arc<SemanticMemory>`.
-    /// Each chunk gets a 3-attempt retry with backoff. Triples are stored as h_mems
-    /// with `entity = chunk.entity_ref`.
-    ///
-    /// When `tagged_jsonl` is provided, ontology tags from the tagging step are
-    /// read and injected into the extraction prompt per-chunk, so the LLM uses
-    /// the appropriate predicates (GOLEM for narrative, schema.org for expository).
-    #[allow(clippy::too_many_arguments)]
-    async fn extract_triples_batch(
-        &self,
-        chunks_path: &str,
-        tagged_jsonl: Option<&str>,
-        max_triples: usize,
-        db_path: &str,
-        passphrase: &str,
-        owner: &str,
-        concurrency: usize,
-    ) -> Result<serde_json::Value, McpToolError> {
-        let content = std::fs::read_to_string(chunks_path).map_err(|e| {
-            McpToolError::invalid_argument(format!(
-                "Cannot read chunks_jsonl '{}': {e}",
-                chunks_path
-            ))
-        })?;
+    #[tool(
+        description = "Generate ontology-anchored embedding vectors for corpus chunks. Uses the configured embedding model via the inference router. Reads chunks from chunks_jsonl (entity_ref, source, text, word_count per line). When tagged_jsonl is provided, ontology tags are prepended to chunk text before embedding (per INSTRUCTOR, Su et al. 2023), producing vectors that encode both content and ontological classification. Batch-embeds in groups of batch_size and stores each vector in the memory DB. Returns a summary (total, embedded, failed, model) — no inline vectors."
+    )]
+    pub async fn corpus_embed(
 
         // Parse chunks: each line has entity_ref and text
         let mut chunks: Vec<(String, String)> = Vec::new();
