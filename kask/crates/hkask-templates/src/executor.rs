@@ -2379,7 +2379,16 @@ convergence:
             &'a self,
             _tool_name: &'a str,
         ) -> hkask_capability::ToolFuture<'a, Option<hkask_capability::ToolInfo>> {
-            Box::pin(async { None })
+            Box::pin(async {
+                Some(hkask_capability::ToolInfo {
+                    name: "denied".to_string(),
+                    description: "Tool that always returns CapabilityDenied".to_string(),
+                    input_schema: serde_json::json!({}),
+                    server_id: "stub".to_string(),
+                    required_capability: None,
+                    taint: ToolTaint::Pure,
+                })
+            })
         }
 
         fn discover_tools<'a>(&'a self) -> hkask_capability::ToolFuture<'a, Vec<String>> {
@@ -2473,25 +2482,28 @@ convergence:
         );
     }
 
-    /// Default (empty) `on_capability_denied` — the executor must propagate
-    /// the raw `CapabilityDenied` error (previous behavior preserved).
+    /// Non-escalate, non-abort `on_capability_denied` policy (e.g. `propagate`)
+    /// — the executor must propagate the raw `CapabilityDenied` error.
+    /// The `Default` impl sets `on_capability_denied: "escalate"`, so this test
+    /// explicitly sets a custom value to reach the `_` arm.
     #[tokio::test]
-    async fn on_capability_denied_default_propagates_raw_error() {
+    async fn on_capability_denied_nonstandard_propagates_raw_error() {
         let executor = ManifestExecutor::new(
             Arc::new(StubInferencePort),
             Arc::new(CapabilityDeniedToolPort),
             LLMParameters::default(),
         );
-        // Empty policy — default behavior is to propagate.
         let yaml = r#"
 manifest:
-  id: cap-denied-default-test
+  id: cap-denied-propagate-test
   category: skill
 steps:
   - ordinal: 1
     action: execute
     description: invoke a tool that will be denied
     mcp: "stub/denied"
+error_handling:
+  on_capability_denied: propagate
 gas:
   cap: 10000
   cost_per_iteration: 100
@@ -2510,10 +2522,10 @@ convergence:
 "#;
         let manifest = load_manifest_from_yaml(yaml).expect("manifest must parse");
         let result = executor.execute_manifest(&manifest, HashMap::new()).await;
-        let err = result.expect_err("default policy must propagate the error");
+        let err = result.expect_err("nonstandard policy must propagate the error");
         assert!(
             err.to_string().contains("Capability denied"),
-            "default policy must propagate the raw CapabilityDenied error: {err}"
+            "nonstandard policy must propagate the raw CapabilityDenied error: {err}"
         );
     }
 

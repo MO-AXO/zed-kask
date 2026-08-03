@@ -866,13 +866,13 @@ mod tests {
         }
         // The credential (secret) read is gated by the credentials allowlist,
         // not config_env. Assert it via the credential-filter path.
-        let credentials = std::collections::HashMap::from([(
-            "HKASK_ABW_API_KEY".to_string(),
-            "secret".to_string(),
-        )]);
+        let credentials: Vec<(String, String)> = [("HKASK_ABW_API_KEY", "secret")]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         let filtered_creds = filter_credentials_for_server("swarm", &credentials);
         assert!(
-            filtered_creds.contains_key("HKASK_ABW_API_KEY"),
+            filtered_creds.iter().any(|(k, _)| k == "HKASK_ABW_API_KEY"),
             "swarm server reads HKASK_ABW_API_KEY but it is not in the credentials allowlist"
         );
     }

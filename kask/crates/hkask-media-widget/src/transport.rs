@@ -88,8 +88,7 @@ impl TransportBar {
                     SliderValue::Single(v) => *v,
                     SliderValue::Range(start, _) => *start,
                 };
-                let position_secs = self.state.duration.as_secs_f32() * fraction;
-                cx.emit(TransportEvent::Seek(position_secs));
+                cx.emit(TransportEvent::Seek(fraction));
             }
         }
     }

@@ -15,7 +15,7 @@
 //! setting evidence overrides that node's marginal and re-propagates the whole
 //! tree via `propagate::recompute_marginals`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::collections::hash_map::DefaultHasher;
