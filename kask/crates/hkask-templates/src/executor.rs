@@ -2564,6 +2564,76 @@ convergence:
         }
     }
 
+    /// Tool port stub that advertises `terminal` as available — simulates an
+    /// agent profile that enables the terminal tool. Used by the profile
+    /// enforcement tests to verify the executor refuses proposer steps.
+    struct TerminalToolPort;
+
+    impl hkask_capability::ToolPort for TerminalToolPort {
+        fn invoke<'a>(
+            &'a self,
+            _server: &'a str,
+            _tool: &'a str,
+            _args: serde_json::Value,
+            _token: &'a hkask_capability::DelegationToken,
+        ) -> hkask_capability::ToolFuture<
+            'a,
+            Result<serde_json::Value, hkask_capability::ToolPortError>,
+        > {
+            Box::pin(async {
+                Err(hkask_capability::ToolPortError::NotFound(
+                    hkask_types::NotFound {
+                        entity_type: "tool".to_string(),
+                        id: "terminal".to_string(),
+                    },
+                ))
+            })
+        }
+
+        fn discover_tools<'a>(&'a self) -> hkask_capability::ToolFuture<'a, Vec<String>> {
+            Box::pin(async { vec!["terminal".to_string()] })
+        }
+
+        fn get_tool_info<'a>(
+            &'a self,
+            _tool_name: &'a str,
+        ) -> hkask_capability::ToolFuture<'a, Option<hkask_capability::ToolInfo>> {
+            Box::pin(async { None })
+        }
+    }
+
+    /// Helper: build a manifest YAML with a single execute step that declares a profile.
+    fn profile_enforcement_manifest(profile: &str) -> String {
+        format!(
+            r#"
+manifest:
+  id: profile-enforcement-test
+  category: qa-script
+steps:
+  - ordinal: 1
+    action: execute
+    description: proposer step that must not have terminal
+    mcp: "stub/noop"
+    profile: {profile}
+gas:
+  cap: 10000
+  cost_per_iteration: 100
+  alert_threshold: 0.8
+  hard_limit: true
+rjoule:
+  cap: 1
+  alert_threshold: 0.8
+  hard_limit: true
+convergence:
+  max_iterations: 1
+  min_iterations: 0
+  on_not_reached: abort
+  threshold: 0.0
+  convergence_field: composite
+"#
+        )
+    }
+
     /// Helper: build a manifest YAML with an execute step and a given
     /// `on_capability_denied` policy.
     fn capability_denied_manifest(policy: &str) -> String {
@@ -2694,6 +2764,62 @@ convergence:
         assert!(
             err.to_string().contains("Capability denied"),
             "nonstandard policy must propagate the raw CapabilityDenied error: {err}"
+        );
+    }
+
+    // ── Profile enforcement (proposer/evaluator separation) ──────────────
+
+    /// A step declaring `profile: ask` MUST be refused when the `terminal` tool
+    /// is available — this is the mechanical gate for proposer/evaluator
+    /// separation. The error must be self-healing (name the profile + remediation).
+    #[tokio::test]
+    async fn profile_enforcement_refuses_when_terminal_available() {
+        let executor = ManifestExecutor::new(
+            Arc::new(StubInferencePort),
+            Arc::new(TerminalToolPort),
+            LLMParameters::default(),
+        );
+        let manifest = load_manifest_from_yaml(&profile_enforcement_manifest("ask"))
+            .expect("manifest must parse");
+        let result = executor.execute_manifest(&manifest, HashMap::new()).await;
+        let err = result.expect_err("profile enforcement must refuse when terminal is available");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("terminal"),
+            "refusal error must name the terminal tool: {msg}"
+        );
+        assert!(
+            msg.contains("ask"),
+            "refusal error must name the profile: {msg}"
+        );
+        assert!(
+            msg.contains("Remediation"),
+            "refusal error must include a self-healing remediation: {msg}"
+        );
+    }
+
+    /// A step declaring `profile: ask` proceeds normally when `terminal` is NOT
+    /// available — the gate only blocks the self-confirming-loop case.
+    #[tokio::test]
+    async fn profile_enforcement_passes_when_terminal_absent() {
+        let executor = ManifestExecutor::new(
+            Arc::new(StubInferencePort),
+            Arc::new(StubToolPort), // discovers vec![] — no terminal
+            LLMParameters::default(),
+        );
+        let manifest = load_manifest_from_yaml(&profile_enforcement_manifest("ask"))
+            .expect("manifest must parse");
+        // The execute step invokes "stub/noop" which StubToolPort returns NotFound for.
+        // The profile check passes (no terminal), and the step itself fails with NotFound —
+        // but the failure is NOT a profile-enforcement refusal.
+        let result = executor.execute_manifest(&manifest, HashMap::new()).await;
+        // The step fails (NotFound from StubToolPort), but the error must NOT be the
+        // profile-enforcement error — it should be a tool-not-found error, proving the
+        // profile check passed and the step was allowed to execute.
+        let err = result.expect_err("StubToolPort returns NotFound for stub/noop");
+        assert!(
+            !err.to_string().contains("proposer/evaluator separation"),
+            "profile check must pass when terminal is absent — the error should be from the step, not the gate: {err}"
         );
     }
 
