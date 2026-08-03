@@ -35,7 +35,6 @@ pub use media_ref::{GalleryMediaStorage, MediaKind, MediaRef, MediaStorage, Reso
 pub use media_widget::MediaWidget;
 
 use gpui::{AnyElement, App, AppContext, Entity, SharedString, Window};
-use theme::ActiveTheme as _;
 
 /// The callback type registered at the D18 seam.
 ///
@@ -59,10 +58,7 @@ pub fn media_block_renderer() -> MediaBlockRenderer {
             return None;
         }
         match parse_media_block_body(body) {
-            Ok(media_ref) => {
-                ensure_theme_initialized(window, cx);
-                Some(render_media_ref(media_ref, window, cx))
-            }
+            Ok(media_ref) => Some(render_media_ref(media_ref, window, cx)),
             Err(error) => {
                 log::warn!(
                     "hkask-media-widget: failed to parse media block: {error}. Body: {body}"
@@ -122,21 +118,18 @@ fn parse_media_block_body(body: &str) -> anyhow::Result<MediaRef> {
 /// default code-block renderer.
 pub fn create_media_widget(
     body: &str,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut App,
 ) -> Option<Entity<MediaWidget>> {
     if !body.trim_start().starts_with('{') {
         return None;
     }
     match parse_media_block_body(body) {
-        Ok(media_ref) => {
-            ensure_theme_initialized(window, cx);
-            Some(cx.new(|cx| {
-                let mut widget = MediaWidget::new(media_ref, cx);
-                widget.load(cx);
-                widget
-            }))
-        }
+        Ok(media_ref) => Some(cx.new(|cx| {
+            let mut widget = MediaWidget::new(media_ref, cx);
+            widget.load(cx);
+            widget
+        })),
         Err(error) => {
             log::warn!("hkask-media-widget: failed to parse media block: {error}. Body: {body}");
             None

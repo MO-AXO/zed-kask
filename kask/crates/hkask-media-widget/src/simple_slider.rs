@@ -1,21 +1,42 @@
 //! Lightweight GPUI-native slider — replaces the 618-dependency
 //! `gpui-component` crate for transport controls.
 //!
+//! Uses GPUI's drag system (`on_drag` / `on_drag_move` / `on_drop`) which
+//! provides precise element bounds during drag — no manual bounds tracking.
 //! Supports linear and logarithmic scales. Emits `Change` while dragging
-//! and `Release` on mouse up (seek-on-release semantics for media players).
+//! and `Release` on drop (seek-on-release semantics for media players).
 
 use gpui::{
-    AppContext, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, MouseButton, MouseMoveEvent, ParentElement, Pixels, Point, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    App, AppContext, Context, EventEmitter, FocusHandle, Focusable, InteractiveElement,
+    IntoElement, ParentElement, Render, StatefulInteractiveElement, Styled, Window, div, px,
 };
 use theme::ActiveTheme;
+
+// ── Drag types ─────────────────────────────────────────────────────────────
+
+/// Drag value — carried by the GPUI drag system to link on_drag → on_drag_move → on_drop.
+#[derive(Clone)]
+struct SliderDrag;
+
+/// Invisible drag ghost — GPUI requires a Render entity for the drag visual.
+/// Renders nothing (empty div).
+struct SliderDragGhost;
+
+impl Render for SliderDragGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+// ── Events ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub enum SimpleSliderEvent {
     Change(f32),
     Release(f32),
 }
+
+// ── Slider ─────────────────────────────────────────────────────────────────
 
 pub struct SimpleSlider {
     focus_handle: FocusHandle,
@@ -24,7 +45,6 @@ pub struct SimpleSlider {
     max: f32,
     step: f32,
     logarithmic: bool,
-    is_dragging: bool,
 }
 
 impl SimpleSlider {
@@ -36,7 +56,6 @@ impl SimpleSlider {
             max,
             step,
             logarithmic: false,
-            is_dragging: false,
         }
     }
 
@@ -75,35 +94,25 @@ impl SimpleSlider {
         let stepped = (raw / self.step).round() * self.step;
         stepped.clamp(self.min, self.max)
     }
-
-    fn fraction_from_x(&self, click_x: Pixels, track_start: Pixels, track_width: Pixels) -> f32 {
-        if track_width <= px(0.0) {
-            return 0.0;
-        }
-        ((click_x - track_start) / track_width)
-            .clamp(0.0, 1.0)
-            .into()
-    }
 }
 
 impl EventEmitter<SimpleSliderEvent> for SimpleSlider {}
 
 impl Focusable for SimpleSlider {
-    fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
 }
 
-impl gpui::Render for SimpleSlider {
+impl Render for SimpleSlider {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let fraction = self.fraction_from_value();
         let theme = cx.theme().clone();
         let track_color = theme.colors().scrollbar_track_background;
         let fill_color = theme.colors().text_accent;
         let thumb_color = theme.colors().scrollbar_thumb_background;
-        let thumb_hover_color = theme.colors().scrollbar_thumb_hover_background;
-        let is_dragging = self.is_dragging;
         let entity = cx.entity().downgrade();
+        let entity_drop = entity.clone();
 
         div()
             .id("simple-slider-track")
@@ -113,53 +122,34 @@ impl gpui::Render for SimpleSlider {
             .bg(track_color)
             .cursor_pointer()
             .relative()
-            .on_mouse_down(MouseButton::Left, move |event, window, cx| {
-                let Some(entity) = entity.upgrade() else {
-                    return;
-                };
-                let bounds = cx.bounds();
-                let track_start = bounds.left();
-                let track_width = bounds.width();
-                entity.update(cx, |slider, cx| {
-                    let fraction =
-                        slider.fraction_from_x(event.position.x, track_start, track_width);
-                    let value = slider.value_from_fraction(fraction);
-                    slider.value = value;
-                    slider.is_dragging = true;
-                    cx.emit(SimpleSliderEvent::Change(value));
-                    cx.notify();
-                });
-            })
-            .on_drag_move(move |event, cx| {
+            .on_drag(SliderDrag, |_, _, _, cx| cx.new(|_| SliderDragGhost))
+            .on_drag_move::<SliderDrag>(move |event, _window, cx| {
                 let Some(entity) = entity.upgrade() else {
                     return;
                 };
                 entity.update(cx, |slider, cx| {
-                    if !slider.is_dragging {
+                    let track_left: f32 = event.bounds.left().into();
+                    let track_width: f32 = event.bounds.size.width.into();
+                    if track_width < 1.0 {
                         return;
                     }
-                    let bounds = cx.bounds();
-                    let track_start = bounds.left();
-                    let track_width = bounds.width();
-                    let fraction =
-                        slider.fraction_from_x(event.drag.position.x, track_start, track_width);
+                    let click_x: f32 = event.event.position.x.into();
+                    let fraction = ((click_x - track_left) / track_width).clamp(0.0, 1.0);
                     let value = slider.value_from_fraction(fraction);
                     slider.value = value;
                     cx.emit(SimpleSliderEvent::Change(value));
                     cx.notify();
                 });
             })
-            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                let Some(entity) = entity.upgrade() else {
+            .on_drop::<SliderDrag>(move |drag, _window, cx| {
+                let Some(entity) = entity_drop.upgrade() else {
                     return;
                 };
                 entity.update(cx, |slider, cx| {
-                    if slider.is_dragging {
-                        slider.is_dragging = false;
-                        cx.emit(SimpleSliderEvent::Release(slider.value));
-                        cx.notify();
-                    }
+                    cx.emit(SimpleSliderEvent::Release(slider.value));
+                    cx.notify();
                 });
+                let _ = drag;
             })
             .child(
                 div()
@@ -180,11 +170,7 @@ impl gpui::Render for SimpleSlider {
                     .ml(px(-6.0))
                     .size(px(12.0))
                     .rounded(px(6.0))
-                    .bg(if is_dragging {
-                        thumb_hover_color
-                    } else {
-                        thumb_color
-                    })
+                    .bg(thumb_color)
                     .border_1()
                     .border_color(fill_color),
             )

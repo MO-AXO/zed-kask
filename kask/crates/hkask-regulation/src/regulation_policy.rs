@@ -6,7 +6,7 @@
 //! to take when a specific metric deviates in a specific direction.
 
 use crate::types::loops::{
-    ActionDecision, ActionType, Deviation, DeviationDirection, LoopId, SignalMetric,
+    ActionDecision, ActionType, Deviation, DeviationDirection, LoopId, RegulationData, SignalMetric,
 };
 
 /// Identifies why a regulation action was proposed.
@@ -131,7 +131,14 @@ impl RegulationPolicy {
         use ActionType::*;
         use DeviationDirection::*;
         use LoopId::*;
-        use SignalMetric::*;
+        // Explicit SignalMetric imports for the 4 names that also exist as
+        // RegulationReason variants — explicit imports shadow the glob and
+        // resolve the ambiguity.
+        use RegulationReason::*;
+        use SignalMetric::{
+            ActionDecisionBlocked, ActionIneffective, MetacognitionCriticalAlerts,
+            MetacognitionVarietyDeficit, *,
+        };
 
         Self {
             rules: vec![
@@ -142,9 +149,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Inference,
                         action_type: Throttle,
-                        reason: "energy_budget_low",
-                        data: None,
-                        metric_name: Some("energy_remaining"),
+                        reason: EnergyBudgetLow,
                     }],
                 },
                 RegulationRule {
@@ -153,9 +158,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "budget_guard_escalation",
-                        data: None,
-                        metric_name: Some("energy_remaining"),
+                        reason: BudgetGuardEscalation,
                     }],
                 },
                 RegulationRule {
@@ -164,9 +167,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Cybernetics,
                         action_type: AdjustEnergyBudget,
-                        reason: "energy_depletion_auto_adjust",
-                        data: None,
-                        metric_name: None,
+                        reason: EnergyDepletionAutoAdjust,
                     }],
                 },
                 // ── Variety (Cybernetics Loop 6) ──
@@ -176,9 +177,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "variety_deficit_exceeded",
-                        data: None,
-                        metric_name: None,
+                        reason: VarietyDeficitExceeded,
                     }],
                 },
                 // ── Error Rate (Cybernetics Loop 6) ──
@@ -188,9 +187,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Inference,
                         action_type: CircuitBreak,
-                        reason: "error_rate_exceeded",
-                        data: None,
-                        metric_name: None,
+                        reason: ErrorRateExceeded,
                     }],
                 },
                 // ── Connector Latency (Cybernetics Loop 6) ──
@@ -200,9 +197,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Cybernetics,
                         action_type: Throttle,
-                        reason: "connector_latency_exceeded",
-                        data: None,
-                        metric_name: None,
+                        reason: ConnectorLatencyExceeded,
                     }],
                 },
                 // ── Communication Queue Depth (Cybernetics Loop 6) ──
@@ -212,9 +207,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Cybernetics,
                         action_type: Throttle,
-                        reason: "communication_backpressure",
-                        data: None,
-                        metric_name: None,
+                        reason: CommunicationBackpressure,
                     }],
                 },
                 // ── Wallet (Cybernetics Loop 6) ──
@@ -224,9 +217,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "wallet_balance_low",
-                        data: None,
-                        metric_name: None,
+                        reason: WalletBalanceLow,
                     }],
                 },
                 RegulationRule {
@@ -235,9 +226,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "wallet_key_unhealthy",
-                        data: None,
-                        metric_name: None,
+                        reason: WalletKeyUnhealthy,
                     }],
                 },
                 // ── Seam Coverage (Seam Watcher R7.3) ──
@@ -247,9 +236,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "seam_coverage_degraded",
-                        data: None,
-                        metric_name: None,
+                        reason: SeamCoverageDegraded,
                     }],
                 },
                 RegulationRule {
@@ -258,9 +245,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Notify,
-                        reason: "seam_coverage_improved",
-                        data: None,
-                        metric_name: None,
+                        reason: SeamCoverageImproved,
                     }],
                 },
                 // ── Tool Reliability (Cybernetics Loop 6) ──
@@ -270,9 +255,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "tool_reliability_degraded",
-                        data: None,
-                        metric_name: None,
+                        reason: ToolReliabilityDegraded,
                     }],
                 },
                 // ── Category A: Observational metrics → Notify (no regulation needed) ──
@@ -282,9 +265,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Notify,
-                        reason: "storage_usage_observed",
-                        data: None,
-                        metric_name: None,
+                        reason: StorageUsageObserved,
                     }],
                 },
                 RegulationRule {
@@ -293,9 +274,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Notify,
-                        reason: "triple_count_observed",
-                        data: None,
-                        metric_name: None,
+                        reason: TripleCountObserved,
                     }],
                 },
                 RegulationRule {
@@ -304,9 +283,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Notify,
-                        reason: "low_confidence_count_observed",
-                        data: None,
-                        metric_name: None,
+                        reason: LowConfidenceCountObserved,
                     }],
                 },
                 RegulationRule {
@@ -315,9 +292,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Notify,
-                        reason: "consolidation_candidates_observed",
-                        data: None,
-                        metric_name: None,
+                        reason: ConsolidationCandidatesObserved,
                     }],
                 },
                 RegulationRule {
@@ -326,9 +301,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Notify,
-                        reason: "pending_escalations_observed",
-                        data: None,
-                        metric_name: None,
+                        reason: PendingEscalationsObserved,
                     }],
                 },
                 // ── Category B: Meta-regulatory metrics → Escalate to Curation ──
@@ -338,9 +311,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "algedonic_events_exceeded",
-                        data: None,
-                        metric_name: None,
+                        reason: AlgedonicEventsExceeded,
                     }],
                 },
                 RegulationRule {
@@ -349,9 +320,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "goals_stale",
-                        data: None,
-                        metric_name: None,
+                        reason: GoalsStale,
                     }],
                 },
                 RegulationRule {
@@ -360,9 +329,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "goals_expired",
-                        data: None,
-                        metric_name: None,
+                        reason: GoalsExpired,
                     }],
                 },
                 RegulationRule {
@@ -371,9 +338,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "metacognition_variety_deficit",
-                        data: None,
-                        metric_name: None,
+                        reason: RegulationReason::MetacognitionVarietyDeficit,
                     }],
                 },
                 RegulationRule {
@@ -382,9 +347,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "metacognition_critical_alerts",
-                        data: None,
-                        metric_name: None,
+                        reason: RegulationReason::MetacognitionCriticalAlerts,
                     }],
                 },
                 RegulationRule {
@@ -393,9 +356,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "action_ineffective",
-                        data: None,
-                        metric_name: None,
+                        reason: RegulationReason::ActionIneffective,
                     }],
                 },
                 RegulationRule {
@@ -404,9 +365,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "regulatory_plateau_detected",
-                        data: None,
-                        metric_name: None,
+                        reason: RegulatoryPlateauDetected,
                     }],
                 },
                 RegulationRule {
@@ -415,9 +374,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Curation,
                         action_type: Escalate,
-                        reason: "action_decision_blocked",
-                        data: None,
-                        metric_name: None,
+                        reason: RegulationReason::ActionDecisionBlocked,
                     }],
                 },
                 // ── Category C: Domain-specific regulation ──
@@ -428,9 +385,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Episodic,
                         action_type: Calibrate,
-                        reason: "memory_life_low",
-                        data: None,
-                        metric_name: None,
+                        reason: MemoryLifeLow,
                     }],
                 },
                 // CircuitBreakerState (Inference Loop 1) → Throttle
@@ -440,9 +395,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Inference,
                         action_type: Throttle,
-                        reason: "circuit_breaker_open",
-                        data: None,
-                        metric_name: None,
+                        reason: CircuitBreakerOpen,
                     }],
                 },
                 // InferenceAvailable (Inference Loop 1) → Throttle
@@ -452,9 +405,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Inference,
                         action_type: Throttle,
-                        reason: "inference_unavailable",
-                        data: None,
-                        metric_name: None,
+                        reason: InferenceUnavailable,
                     }],
                 },
                 // InferenceGasRemaining (Inference Loop 1) → AdjustEnergyBudget
@@ -464,9 +415,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Inference,
                         action_type: AdjustEnergyBudget,
-                        reason: "inference_gas_low",
-                        data: None,
-                        metric_name: None,
+                        reason: InferenceGasLow,
                     }],
                 },
                 // InferenceModelAvailable (Inference Loop 1) → Calibrate
@@ -476,9 +425,7 @@ impl RegulationPolicy {
                     proposed: &[ProposedAction {
                         target: Inference,
                         action_type: Calibrate,
-                        reason: "model_unavailable",
-                        data: None,
-                        metric_name: None,
+                        reason: ModelUnavailable,
                     }],
                 },
             ],
