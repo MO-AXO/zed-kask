@@ -105,6 +105,7 @@ hkask_mcp_server::mcp_server!(
         pub gallery_store: Arc<GalleryStore>,
         pub template_env: minijinja::Environment<'static>,
         pub ffmpeg: FfmpegRunner,
+        pub budget: Option<Arc<tokio::sync::Mutex<hkask_templates::budget::BudgetTracker>>>,
         /// rJoule budget tracker (1 rJoule = $1 USD = 250,000 gas).
         /// None = no budget enforcement.
         pub budget: Option<Arc<tokio::sync::Mutex<hkask_templates::budget::BudgetTracker>>>,
@@ -1456,6 +1457,7 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
                 gallery_store.clone(),
                 templates::create_env(),
                 FfmpegRunner::detect(),
+                None,
             ))
         },
         vec![
