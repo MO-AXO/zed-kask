@@ -11,6 +11,10 @@
 //!   multi-chunk cluster into a single comprehensive passage, re-embeds
 //!   the consolidated text, and stores the new embedding in the DB.
 
+use crate::services::consolidation::{ConsolidationRequest, ConsolidationService};
+use crate::services::prompt_builder::{
+    BuildPromptsRequest as ServiceBuildPromptsRequest, PromptBuilderService,
+};
 use crate::tools::semantic::{GUARD, INPUT_GUARD_ENABLED, configured_qa_model};
 use crate::*;
 use schemars::JsonSchema;
