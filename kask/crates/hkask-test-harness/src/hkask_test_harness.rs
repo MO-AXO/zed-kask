@@ -434,13 +434,13 @@ pub fn arb_delegation_token() -> BoxedStrategy<DelegationToken> {
 /// Generates arbitrary `TraceEntry` values for trace-filesystem property tests.
 pub fn arb_trace_entry() -> BoxedStrategy<TraceEntry> {
     (
-        prop::sample::select(["proptest", "bug-hunt", "test-run"]),
+        prop::sample::select(&["proptest", "bug-hunt", "test-run"]),
         prop::string::string_regex("[a-z_][a-z0-9_/]{0,30}").expect("valid regex"),
-        prop::sample::select(["pass", "fail", "flaky"]),
+        prop::sample::select(&["pass", "fail", "flaky"]),
         any::<u64>(),
         prop::option::of(prop::string::string_regex("[a-z0-9_=]{0,40}").expect("valid regex"))
             .prop_map(Option::unwrap_or_default),
-        prop::sample::select(["hardcoded", "reference", "invariant", ""]),
+        prop::sample::select(&["hardcoded", "reference", "invariant", ""]),
         arb_json_value(),
     )
         .prop_map(
