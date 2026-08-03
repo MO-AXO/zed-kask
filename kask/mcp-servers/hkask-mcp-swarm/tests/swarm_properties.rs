@@ -329,13 +329,13 @@ proptest! {
         let variants = vec![
             SwarmError::Auth(m.clone()),
             SwarmError::PaymentRequired(m.clone()),
-            SwarmError::AgentNotFunded { agent: agent.clone(), message: m.clone() },
-            SwarmError::UpstreamModelError { provider: provider.clone(), message: m.clone() },
+            SwarmError::AgentNotFunded { agent, message: m.clone() },
+            SwarmError::UpstreamModelError { provider, message: m.clone() },
             SwarmError::RateLimited(m.clone()),
             SwarmError::CuratorUnavailable(m.clone()),
             SwarmError::ApiVersionMismatch(m.clone()),
             SwarmError::ConsentDenied(m.clone()),
-            SwarmError::Unavailable(m.clone()),
+            SwarmError::Unavailable(m),
         ];
 
         let input = serde_json::json!({});
