@@ -31,25 +31,21 @@ fn arb_json_value() -> BoxedStrategy<JsonValue> {
     ];
     leaf.prop_recursive(
         4,  // max depth
-        64, // max size per level
-        &[
-            |element| {
-                prop::collection::vec(element, 0..8)
-                    .prop_map(JsonValue::Array)
-                    .boxed()
-            },
-            |element| {
-                prop::collection::vec((any::<String>(), element), 0..8)
-                    .prop_map(|pairs| {
-                        let mut map = serde_json::Map::new();
-                        for (k, v) in pairs {
-                            map.insert(k, v);
-                        }
-                        JsonValue::Object(map)
-                    })
-                    .boxed()
-            },
-        ],
+        64, // desired size
+        8,  // expected branch size
+        |element| {
+            prop_oneof![
+                prop::collection::vec(element.clone(), 0..8).prop_map(JsonValue::Array),
+                prop::collection::vec((any::<String>(), element), 0..8).prop_map(|pairs| {
+                    let mut map = serde_json::Map::new();
+                    for (k, v) in pairs {
+                        map.insert(k, v);
+                    }
+                    JsonValue::Object(map)
+                }),
+            ]
+            .boxed()
+        },
     )
     .boxed()
 }

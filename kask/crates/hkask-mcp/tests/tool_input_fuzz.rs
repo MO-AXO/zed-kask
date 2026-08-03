@@ -28,25 +28,21 @@ fn arb_json_value() -> BoxedStrategy<JsonValue> {
     ];
     leaf.prop_recursive(
         4,  // max depth
-        64, // max size per level
-        &[
-            |element| {
-                prop::collection::vec(element, 0..8)
-                    .prop_map(JsonValue::Array)
-                    .boxed()
-            },
-            |element| {
-                prop::collection::vec((any::<String>(), element), 0..8)
-                    .prop_map(|pairs| {
-                        let mut map = serde_json::Map::new();
-                        for (k, v) in pairs {
-                            map.insert(k, v);
-                        }
-                        JsonValue::Object(map)
-                    })
-                    .boxed()
-            },
-        ],
+        64, // desired size
+        8,  // expected branch size
+        |element| {
+            prop_oneof![
+                prop::collection::vec(element.clone(), 0..8).prop_map(JsonValue::Array),
+                prop::collection::vec((any::<String>(), element), 0..8).prop_map(|pairs| {
+                    let mut map = serde_json::Map::new();
+                    for (k, v) in pairs {
+                        map.insert(k, v);
+                    }
+                    JsonValue::Object(map)
+                }),
+            ]
+            .boxed()
+        },
     )
     .boxed()
 }
@@ -90,6 +86,11 @@ proptest! {
     ) {
         let json_string = serde_json::to_string(&value)
             .expect("JSON serialization is infallible for Value");
+        // Re-parse the serialized string so both sides of the comparison go
+        // through the same serialization → parsing path, avoiding float
+        // precision mismatches between the original Value and the parsed one.
+        let reparsed: JsonValue = serde_json::from_str(&json_string)
+            .expect("re-parsing a serialized Value must succeed");
         let result = std::panic::catch_unwind(|| {
             parse_tool_response(&json_string)
         });
@@ -97,7 +98,7 @@ proptest! {
             "parse_tool_response panicked on: {}", json_string);
 
         let parsed = result.unwrap();
-        let expected = unwrap_tool_envelope(value);
+        let expected = unwrap_tool_envelope(reparsed);
         prop_assert_eq!(
             parsed, Some(expected),
             "parse_tool_response must return Some(unwrap_tool_envelope(value)) for valid JSON"
