@@ -69,7 +69,7 @@ use crate::abw_util::{
     effective_hire_cost, make_swarm_slug, url_encode_segment, validate_agent_name,
 };
 use crate::config::SwarmConfig;
-use crate::consent::{ConsentGrant, ConsentStore};
+use crate::consent::ConsentStore;
 use crate::error::SwarmError;
 use crate::local_registry::{
     LocalAgentCapabilities, LocalAgentCard, LocalAgentDependencies, LocalAgentRegistry,
@@ -78,9 +78,7 @@ use crate::local_runtime::{LazyLocalSwarmRuntime, MAX_FANOUT};
 use crate::sanitize::{
     filter_declared_skills, filter_mcp_tools, sanitize_abw_response, sanitize_abw_response_plain,
     sanitize_abw_text, sanitize_agent_id, sanitize_run_status_message, sanitize_workspace_payload,
-    strip_leading_mentions,
 };
-use crate::spend_gate;
 
 // ── Request types ──────────────────────────────────────────────────────────
 

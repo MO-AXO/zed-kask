@@ -23,10 +23,10 @@
 
 use hkask_mcp_server::server::McpToolError;
 
+use crate::abw_client::SwarmClient;
 use crate::abw_util::{effective_hire_cost, url_encode_segment};
 use crate::consent::{ConsentGrant, ConsentStore};
 use crate::error::SwarmError;
-use crate::hkask_mcp_swarm::SwarmClient;
 
 /// A carried, refundable authorization to hire an agent. Created by
 /// `authorize_hire`; consumed by `complete_hire` (which refunds on failure)
@@ -202,6 +202,11 @@ pub(crate) async fn complete_hire(
     agent_name: &str,
     include_optional: bool,
 ) -> Result<serde_json::Value, McpToolError> {
+    // Wrap in Option so the failure closure can refund via `.take()`
+    // (capturing `&mut`) without moving `auth` out of the function scope.
+    // On success `auth` is still `Some(_)`; dropping it leaves the token
+    // consumed (single-use per *successful* spend).
+    let mut auth = Some(auth);
     let data = match client
         .post(
             &format!("/workspaces/{}/hire", url_encode_segment(workspace_id)),
@@ -229,13 +234,14 @@ pub(crate) async fn complete_hire(
         Err(e) => Err(e),
     }
     .map_err(|e| {
-        // Refund before propagating: the spend never happened. The auth owns
-        // the refund grant; consume it on the failure path.
-        auth.refund(consent);
+        // Refund before propagating: the spend never happened. The auth
+        // owns the refund grant; take it and refund.
+        if let Some(a) = auth.take() {
+            a.refund(consent);
+        }
         SwarmError::into_tool_error(e)
     })?;
-    // Success: the auth is dropped (token stays consumed — single-use per
-    // *successful* spend). Drop is explicit so the intent is clear.
+    // Success: drop the auth (token stays consumed).
     drop(auth);
     Ok(data)
 }
@@ -295,6 +301,7 @@ pub(crate) async fn complete_delegate(
     agent_name: &str,
     task: &str,
 ) -> Result<serde_json::Value, McpToolError> {
+    let mut auth = Some(auth);
     // Strip leading @mentions (KA-06): a task starting with `@other_agent`
     // would mention a different agent in the workspace chat, a semantic
     // injection at the ABW chat layer.
@@ -306,7 +313,9 @@ pub(crate) async fn complete_delegate(
         )
         .await
         .map_err(|e| {
-            auth.refund(consent);
+            if let Some(a) = auth.take() {
+                a.refund(consent);
+            }
             SwarmError::into_tool_error(e)
         })?;
     drop(auth);

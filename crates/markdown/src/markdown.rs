@@ -2218,6 +2218,10 @@ impl Element for MarkdownElement {
         let mut current_img_block_range: Option<Range<usize>> = None;
         let mut handled_html_block = false;
         let mut rendered_mermaid_block = false;
+        // zed-kask: D18 — tracks whether the media_block_renderer intercepted
+        // the current code block, so we skip its End event (which expects a
+        // div on the stack that push_sourced_element doesn't push).
+        let mut rendered_media_block = false;
         let mut rendered_metadata_block = false;
         for (index, (range, event)) in parsed_markdown.events.iter().enumerate() {
             // Skip alt text for images that rendered
@@ -2238,6 +2242,14 @@ impl Element for MarkdownElement {
             if rendered_mermaid_block {
                 if matches!(event, MarkdownEvent::End(MarkdownTagEnd::CodeBlock)) {
                     rendered_mermaid_block = false;
+                }
+                continue;
+            }
+
+            // zed-kask: D18 — skip the End event for media-rendered blocks.
+            if rendered_media_block {
+                if matches!(event, MarkdownEvent::End(MarkdownTagEnd::CodeBlock)) {
+                    rendered_media_block = false;
                 }
                 continue;
             }
@@ -2368,10 +2380,23 @@ impl Element for MarkdownElement {
                             // instead of the default code block. Returns None
                             // for non-media blocks (falls through to default).
                             if let Some(renderer) = &self.media_block_renderer {
-                                let block_body = &parsed_markdown.source[range.clone()];
-                                if let Some(media_element) = renderer(block_body, window, cx) {
-                                    builder.push_sourced_element(range.clone(), media_element);
-                                    continue;
+                                // Only intercept fenced blocks (not indented).
+                                if !matches!(kind, CodeBlockKind::Indented) {
+                                    let block_source = &parsed_markdown.source[range.clone()];
+                                    // Strip the fence language line (first line) and
+                                    // the closing fence to pass just the body content.
+                                    let body_start =
+                                        block_source.find('\n').map(|index| index + 1).unwrap_or(0);
+                                    let body_end = block_source[body_start..]
+                                        .rfind("```")
+                                        .map(|index| body_start + index)
+                                        .unwrap_or(block_source.len());
+                                    let block_body = block_source[body_start..body_end].trim();
+                                    if let Some(media_element) = renderer(block_body, window, cx) {
+                                        builder.push_sourced_element(range.clone(), media_element);
+                                        rendered_media_block = true;
+                                        continue;
+                                    }
                                 }
                             }
 
