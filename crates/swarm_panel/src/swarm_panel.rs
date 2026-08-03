@@ -170,7 +170,7 @@ fn steer_system_prompt(
          point — it must actually block, not just warn. In local mode there is no \
          consent token; the `credits_authorized` + ledger balance check is the \
          gate.\n\
-\
+    \
          The per-dispatch credit ceiling (`HKASK_ABW_MAX_CREDITS`, default 50) is \
          a hard server-side gate. `swarm_hire` and `swarm_create_swarm` refuse \
          any hire whose actual cost exceeds the ceiling; `swarm_delegate` refuses \
@@ -179,7 +179,19 @@ fn steer_system_prompt(
          `HKASK_ABW_MAX_CREDITS` rather than attempting the hire. For delegation, \
          set `credits_authorized` to the ceiling or lower; do not mint a delegate \
          consent for more than the ceiling. The same ceiling applies to \
-         `swarm_delegate_local` in local mode.\n"
+         `swarm_delegate_local` in local mode.\n\
+         \n\
+         The skill accepts an optional `task_success` context field — a\n\
+         deterministic evaluator's verdict on whether the swarm's last output\n\
+         solved the task (test pass/fail, schema validation, exit code,\n\
+         regex/reference match). When the operator's task has a deterministic\n\
+         oracle, pass `task_success` in the skill's `context` as\n\
+         an object whose `pass` field is true or false (and a\n\
+         `detail` string if useful). When the task is open-ended with no\n\
+         oracle, OMIT `task_success` — the skill falls back to the three\n\
+         swarm-health axes and the human Go See loop covers the gap. Do NOT\n\
+         use an LLM to score the output as `task_success`; the judge must be\n\
+         deterministic (the cybernetic plan's determinism constraint).\n"
     )
     .into()
 }
@@ -3733,6 +3745,29 @@ mod tests {
         assert!(
             local_prompt.contains("\"mode\": \"local\""),
             "local prompt must carry mode local in the context example"
+        );
+    }
+
+    // Cybernetic Swarm Plan C0: the steer prompt must describe the optional
+    // deterministic `task_success` skill input and the no-LLM-judge constraint.
+    #[test]
+    fn steer_prompt_describes_task_success() {
+        let prompt = steer_system_prompt(Some("ws_test"), kask_bridge::SwarmModeConfig::Abw);
+        assert!(
+            prompt.contains("task_success"),
+            "steer prompt must describe the task_success skill input"
+        );
+        assert!(
+            prompt.contains("deterministic"),
+            "steer prompt must state the judge must be deterministic"
+        );
+        assert!(
+            prompt.contains("Do NOT"),
+            "steer prompt must forbid using an LLM to score the output as task_success"
+        );
+        assert!(
+            prompt.contains("OMIT"),
+            "steer prompt must tell the curator to OMIT task_success for open tasks"
         );
     }
 
