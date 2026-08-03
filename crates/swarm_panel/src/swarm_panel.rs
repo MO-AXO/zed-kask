@@ -588,6 +588,14 @@ pub struct SwarmPanel {
     /// In-flight consent prompt for a hire action: the agent being considered
     /// plus its pre-flight cost estimate. `Some` renders the consent banner.
     pending_hire: Option<PendingHire>,
+    /// In-flight publish prompt (fermi v0.10.15). `Some` renders the publish
+    /// banner — a Confirm path when `can_publish`, or a force-publish path with
+    /// a reason input when checks fail.
+    pending_publish: Option<PendingPublish>,
+    /// Single-line editor for the force-publish reason (audited to
+    /// `admin_bypass_events`). Only read when the operator confirms a force
+    /// publish.
+    publish_reason: Entity<Editor>,
     /// The workspace (swarm) id new hires target. Defaults to the first
     /// workspace once swarms load; selectable when there are several.
     selected_workspace: Option<String>,
@@ -659,6 +667,17 @@ struct PendingHire {
     max_credits: u32,
 }
 
+/// In-flight publish prompt (fermi v0.10.15). `swarm_publish_checks` returns
+/// `can_publish` plus the failing checks; when `can_publish` is false the banner
+/// shows the checks and a reason input for the admin force-publish path
+/// (`?force=true&reason=…`, audited to `admin_bypass_events`).
+#[derive(Clone, Debug)]
+struct PendingPublish {
+    agent_name: String,
+    can_publish: bool,
+    failing_checks: Vec<String>,
+}
+
 /// One agent row in a swarm's roster (drill-down view, item 4).
 #[derive(Clone, Debug)]
 struct SwarmRosterAgent {
@@ -706,6 +725,15 @@ impl SwarmPanel {
             let query_editor = cx.new(|cx| {
                 let mut input = Editor::single_line(window, cx);
                 input.set_placeholder_text("Search agents and swarms...", window, cx);
+                input
+            });
+            let publish_reason = cx.new(|cx| {
+                let mut input = Editor::single_line(window, cx);
+                input.set_placeholder_text(
+                    "Reason for force-publish (audited to admin_bypass_events)",
+                    window,
+                    cx,
+                );
                 input
             });
             let subscriptions = [cx.subscribe(&query_editor, Self::on_query_change)];
@@ -789,6 +817,8 @@ impl SwarmPanel {
                 wallet_balance: None,
                 local_balance: None,
                 pending_hire: None,
+                pending_publish: None,
+                publish_reason,
                 selected_workspace: None,
                 spend_in_flight: None,
                 swarm_detail: None,
