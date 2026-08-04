@@ -11,13 +11,14 @@ mds_categories: [domain, composition]
 # hkask-inference — Reference
 
 `hkask-inference` provides the MCP-server-local inference routing layer for
-hKask. It defines the `ProviderId` enum, the `InferenceConfig` struct, and the
-`InferenceRouter` that dispatches chat, vision, and embedding requests to
-provider-specific backends. The crate is used by MCP-server-internal inference
-paths; user-facing inference goes through zed's `LanguageModelRegistry` via
-`kask_bridge`. Long-term, the architecture plan replaces this with
-`InferencePort` over zed's `LanguageModel`, but keeping it unblocks the MCP
-servers immediately.
+hKask. It defines the `ProviderId` enum, the `InferenceConfig` struct, and
+two `InferencePort` implementations: `InferenceIpcClient` (chat/vision/embed
+via zed's `LanguageModelRegistry` over a Unix socket) and `MediaRouter` (media
+generation via a `ProviderRegistry` of `MediaProvider` backends). The crate is
+used by MCP-server-internal inference paths; user-facing inference goes
+through zed's `LanguageModelRegistry` via `kask_bridge`. Long-term, the
+architecture plan replaces this with `InferencePort` over zed's
+`LanguageModel`, but keeping it unblocks the MCP servers immediately.
 
 ## Source citations
 
@@ -27,10 +28,10 @@ servers immediately.
 | `InferenceConfig` struct | `kask/crates/hkask-inference/src/config.rs:161` |
 | `MediaRouter` struct | `kask/crates/hkask-inference/src/media_router.rs` |
 | `InferenceIpcClient` struct | `kask/crates/hkask-inference/src/inference_ipc_client.rs` |
-| `DeepInfraBackend` | `kask/crates/hkask-inference/src/deepinfra_backend.rs:21` |
-| `FalBackend` | `kask/crates/hkask-inference/src/fal_backend.rs:26` |
+| `DeepInfraBackend` | `kask/crates/hkask-inference/src/deepinfra_backend.rs:25` |
+| `FalBackend` | `kask/crates/hkask-inference/src/fal_backend.rs:30` |
 | `OpenRouterBackend` | `kask/crates/hkask-inference/src/openrouter_backend.rs:22` |
-| `RouterModelEntry` | `kask/crates/hkask-inference/src/hkask_inference.rs:79` |
+| `RouterModelEntry` | `kask/crates/hkask-inference/src/hkask_inference.rs:65` |
 
 ## Provider model
 
