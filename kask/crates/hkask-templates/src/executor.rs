@@ -1330,7 +1330,7 @@ impl ManifestExecutor {
             (result.text, result.tool_calls, cost_usd)
         };
 
-        :    // rJoule (USD) tracking — charge the inference call's USD cost. The
+        // rJoule (USD) tracking — charge the inference call's USD cost. The
         // InferencePort populates `cost_usd` from the provider's observed response
         // (`usage.cost` / `market_cost` / `estimated_cost`), not an operator-configured
         // price table (1 rJoule = $1 USD). `None` when the provider reports no cost
