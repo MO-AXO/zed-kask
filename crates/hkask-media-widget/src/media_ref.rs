@@ -66,17 +66,19 @@ pub struct ResolvedMedia {
     pub url: Option<SharedString>,
 }
 
-/// Trait for resolving `MediaRef` values to `ResolvedMedia`.
-///
-/// The gallery-backed implementation looks up `absolute_path` from the
-/// SQLite store; the path/data-URI/URL implementations resolve directly.
+/// Resolves a `MediaRef` to loadable `ResolvedMedia`. The media widget always
+/// resolves server-emitted filesystem paths/URLs directly here - the gallery
+/// MCP server resolves `gallery://`-style refs to absolute paths before
+/// emitting a ```media display_hint, so the widget never needs the gallery
+/// SQLite store (the earlier `GalleryMediaStorage` widget-side resolver was
+/// removed as the abandoned alternative architecture).
 pub trait MediaStorage: Send + Sync {
     fn resolve(&self, reference: &MediaRef) -> anyhow::Result<ResolvedMedia>;
 }
 
-/// Simple `MediaStorage` that resolves filesystem paths, data URIs, and URLs
-/// directly — no gallery lookup. This is the default storage for the media
-/// widget when no gallery context is available.
+/// The widget's `MediaStorage`: resolves filesystem paths, data URIs, and
+/// URLs directly. Gallery images reach the widget as filesystem paths
+/// (`absolute_path`) in server-emitted `display_hint` media blocks.
 pub struct PathMediaStorage;
 
 impl MediaStorage for PathMediaStorage {
