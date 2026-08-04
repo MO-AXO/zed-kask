@@ -68,6 +68,21 @@ Every market record the server returns carries the annotation the research repor
   "resolved_outcome": null | "yes" | "no" | 1 | 0,
   "resolution_source": "uma_oracle" | "kalshi_exchange" | ...,
   "price_history": [ {"t":"...","p":0.60}, ... ],   // for Bayesian revision (2601.18815)
+  "ontology": {                // dual-axis mapping, passed through to every consumer
+    "process": {             // PKO axis — the market as an executed procedure
+      "type": "pko:ProcedureExecution",
+      "stage": "creation|trading|oracle_request|proposal|dispute|settlement",  // 2604.20421 lifecycle
+      "probability_role": "pko:StepExecution.output"   // each price tick is an execution artifact
+    },
+    "state": {               // Dublin Core axis — the record as an information resource
+      "identifier": "polymarket:0x1234...",       // dcterms:identifier = {source}:{market_id}
+      "title": "...",                             // dcterms:title ← question
+      "description": "...",                       // dcterms:description
+      "temporal": "2026-11-04T...",               // dcterms:temporal ← deadline (horizon)
+      "provenance": "uma_oracle|kalshi_exchange"  // dcterms:provenance ← resolution_source
+    },
+    "mapping_version": "1"   // lets consumers detect mapping evolution
+  },
   "calibration": {
     "brier": 0.093,            // computed over resolved markets in this series/category (2604.20421 oracle layer)
     "domain_bias": "underconfident",  // 2602.19520 — politics compresses toward 0.5
@@ -84,6 +99,7 @@ Every market record the server returns carries the annotation the research repor
 2. **Guardrail — politics bias is surfaced.** `calibration.domain_bias` carries the 2602.19520 finding so the consumer can apply domain-aware correction rather than face-value ingestion.
 3. **Guideline — prefer Kalshi percentile-history.** `probability_method` records provenance; `kalshi_percentile_history` is a stronger signal than `reconstructed_bucket` (which itself is a known approximation per 2604.20421 §6.2).
 4. **Cybernetic guardrail — `calibration.stale` ≠ `calibration.brier = 0`.** A read failure propagates `stale: true`, never a synthetic 0 (the `.rules` "unwrap_or(0) on regulation sense inputs" trap generalized to the market-calibration signal).
+5. **Guideline — every record carries its dual-axis ontology mapping.** The `ontology.process` (PKO) block types the market as a `pko:ProcedureExecution` in one of 2604.20421's six lifecycle stages; the `ontology.state` (Dublin Core) block types the record as an information resource with `dcterms:identifier/title/description/temporal/provenance`. Consumers (scenarios, superforecasting FlowDef, future skills) receive the mapping *with* the data, so downstream provenance and stage-aware reasoning (e.g. distrust prices in `dispute` stage per 2604.20421's oracle-risk finding) need no re-derivation. The `dcterms:provenance` value makes the UMA-vs-Kalshi trust distinction machine-checkable for the T10 calibration loop.
 
 ---
 
@@ -165,6 +181,10 @@ graph TD
 | R8 | `reqwest` futures must run on a tokio reactor (`.rules` "background_spawn panics") | Medium (compile/runtime) | Launch via `McpRuntime`/`ContextServerStore` (the existing kask MCP launch paths), which already handle the tokio reactor; do not `cx.background_spawn` a reqwest future. |
 | R9 | Credential/config allowlist alignment (`.rules` "allowlists must align") | Low–Med | Start `credentials: Some(&[])` (Polymarket reads are public; Kalshi public market data needs no key). Add `config_env` only for cache TTL. `all_servers_have_credential_allowlist` test must pass. |
 | R10 | Geographic restrictions (Polymarket trading is geo-blocked; reads may differ) | Low (read-only) | Out of scope for read; revisit if Polymarket read endpoints geo-block. |
+| R11 | 2604.20421's public resource (`polymonitor.club`) is a data *terminal*, not a documented bulk-download or calibration-as-a-service API; dataset/code availability unconfirmed | Low–Med | We do not depend on it — our Phase-1 providers hit first-party APIs directly. Treat polymonitor as a validation reference only; resolve availability question opportunistically. |
+| R12 | Kalshi cents→dollar fixed-point migration (`price_dollars` vs legacy cents) — parser must tolerate both representations during the transition | Med | T0 spike records which fields are live; provider parser handles both with a units test; legacy `/portfolio/orders` deprecation no earlier than May 2026 per docs. |
+| R13 | Kalshi orderbook returns bids-only (yes + no); a naive spread computation reads zero ask depth | Med | Compute ask as 1−best-no-bid (binary equivalence, verified in docs); pinned by a parser unit test with a bids-only fixture. |
+| R14 | Ontology-mapping precedent unverified: how (whether) existing kask MCP servers annotate tool outputs with PKO/DC mappings is unknown; whether a `hkask:` forecasting namespace already exists is unknown | Med | Resolved in T4 by grepping existing servers + registry before pinning the `ontology` block shape; if a precedent exists, follow it instead of the proposed shape. Open questions Q-O1/Q-O2 (§4 design rule 5). |
 
 ---
 

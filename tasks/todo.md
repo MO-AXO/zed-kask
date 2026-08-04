@@ -28,8 +28,15 @@ Companion to `tasks/plan.md`. Grouped by phase. ☐ = pending.
 - ☐ **T4 — Unified annotated contract + `market_lookup` tool** (`markets/annotated-contract`)
   - [ ] `market_lookup` returns full annotated `MarketRecord` (probability + spread + volume + last_update + calibration + reliability_tier)
   - [ ] Politics-category record carries `domain_bias: "underconfident"` (pinned by test)
+  - [ ] Every record carries populated `ontology.process` (PKO) + `ontology.state` (Dublin Core) blocks (pinned by test)
+  - [ ] Q-O1/Q-O2 resolved: existing PKO/DC annotation precedent + `hkask:` namespace greped; resolution recorded
   - [ ] `schema_for!(MarketLookupRequest)` has no bare-boolean positions (AnyJsonValue)
   - Verify: `cargo test -p hkask-mcp-markets market_lookup` + boolean-schema test
+- ☐ **T4b — Ontology-mapping tool (`market_ontology_map`)** (`markets/ontology-map-tool`)
+  - [ ] Tool returns full dual-axis mapping document with `mapping_version` matching per-record blocks
+  - [ ] Test asserts tool output and `MarketRecord.ontology` share the same constants (no drift)
+  - [ ] `schema_for!(MarketOntologyMapRequest)` has no bare-boolean positions
+  - Verify: `cargo test -p hkask-mcp-markets ontology_map`
 - ☐ **T5 — Calibration math via `hkask-forecast` + store** (`markets/calibration`)
   - [ ] `market_calibration` returns `{brier, domain_bias, sample_size, stale}`
   - [ ] Thin sample ⇒ `stale: true`, not `brier: 0` (pinned by test)
@@ -41,7 +48,7 @@ Companion to `tasks/plan.md`. Grouped by phase. ☐ = pending.
   - [ ] `grep -R "unwrap_or(0)" src/` — no matches on signal fields; no `background_spawn` of reqwest futures
   - Verify: `cargo test -p hkask-mcp-markets cache`; clippy clean
 
-> **CHECKPOINT 1** — server builds, six tools respond with annotated records, schema + stale-signal + bias + allowlist tests green. Human reviews live-query output.
+> **CHECKPOINT 1** — server builds, seven tools respond with annotated records (incl. ontology blocks), schema + stale-signal + bias + ontology + allowlist tests green. Human reviews live-query output.
 
 ## Phase 2 — Consumer wiring
 - ☐ **T7 — Scenarios caller-mediated consumption** (`consumer/scenarios-caller-mediated`) — no scenarios edit

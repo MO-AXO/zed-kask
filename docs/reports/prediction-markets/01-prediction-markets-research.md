@@ -33,7 +33,7 @@ The dataset constructed by Jia et al. spans Oct 2020 – Mar 2026: **770,880 mar
 
 | Dimension | Polymarket | Kalshi |
 |---|---|---|
-| Infrastructure | Decentralized (Polygon, UMA oracle, on-chain fills) | Regulated CFTD exchange (US) |
+| Infrastructure | Decentralized (Polygon, UMA oracle, on-chain fills) | Regulated CFTC exchange (US) |
 | Discovery API | **Gamma** (`gamma-api.polymarket.com`) — events/markets metadata | **Predictions REST** — events, markets, series, candlesticks, orderbook |
 | Live state API | **CLOB** (`clob.polymarket.com`) — orderbook/prices | REST + **WebSocket** ticker/orderbook/trades |
 | Activity API | **Data** (`data-api.polymarket.com`) — account/market activity | portfolio/fills/orders endpoints |
@@ -114,11 +114,17 @@ Note: the Polymarket docs site is a Mintlify SPA (direct endpoint pages 404 via 
 
 ### 3.2 Polymarket CLOB API (`clob.polymarket.com`) — live state
 
-Orderbook, prices, last-trade. Read-only market state does not require trading auth. This is where the *spread* and *depth* (volatility-informing covariates from 2607.08199) come from.
+Verified read endpoints (docs.polymarket.com/api-reference, fetched 2026-08-04): `Get order book` / batch books, `Get market price` (best bid/ask per token+side), `Get midpoint price` / batch, `Get last trade price` / batch (max 500 token IDs; defaults to `"0.5"` with no trades), `Get spread` / batch, `Get prices history` / batch (historical price series — the calibration-backtest feed), `Get open interest`, `Get live volume for an event`. Read-only market state needs no auth. This is where *spread* and *depth* (the volatility-informing covariates from 2607.08199) come from.
+
+**Rate limits (verified, Cloudflare IP-based, throttled not rejected):** CLOB general 9,000 req/10s; `/book`, `/price`, `/midpoint` 1,500/10s; `/prices-history` 1,000/10s; Gamma general 4,000/10s with `/events` 500/10s and `/markets` 300/10s; Data API general 1,000/10s with `/trades` 200/10s.
+
+**Identifier quirk (verified):** markets are keyed by on-chain `condition_id`, but all price/book endpoints take **outcome token IDs** (one ERC1155 per outcome). Gamma market objects carry both; `Get market by token` resolves token → parent market. Prices are decimal probabilities in [0,1] (dollar-denominated), not cents.
+
+**Resolution (verified via docs.polymarket.com/concepts/resolution):** UMA Optimistic Oracle — proposal with bond (typically $750), ~2h challenge period undisputed; disputed outcomes escalate to a DVM token-holder vote (~4–6 days total). "Unknown/50-50" resolves each side at $0.50.
 
 ### 3.3 Polymarket Data API (`data-api.polymarket.com`) — activity & history
 
-Account and market activity after the fact — useful for backfilling realized outcomes to compute Brier scores (the oracle layer in 2604.20421).
+Public endpoints (verified): trades for a user or markets, current/closed positions per user, positions per market, top holders per market (concentration risk), user activity, trader leaderboard. Useful for backfilling realized outcomes to compute Brier scores (the oracle layer in 2604.20421) and for holder-concentration as a manipulation covariate (2601.18815's adversarial-flow type).
 
 ### 3.4 Kalshi Predictions REST — the richer metadata surface
 
@@ -136,7 +142,11 @@ From Kalshi's `llms.txt`, the read endpoints most relevant to a forecasting data
 - `GET /historical/*` — archived markets/trades/candlesticks/orders/positions past the live cutoff.
 - WebSocket: `ticker`, `orderbook`, `public trades`, `market & event lifecycle` — for streaming updates.
 
-**Kalshi auth:** public market data works without auth for reads; trading/portfolio requires RSA-key API keys. Rate limits are tiered token-buckets (Basic → Prestige). For a read-only data service we stay on public endpoints.
+**Kalshi auth & limits (verified via docs.kalshi.com getting-started pages, fetched 2026-08-04):** REST prod base `https://external-api.kalshi.com/trade-api/v2` (demo at `external-api.demo.kalshi.co`). Public market data works without auth over REST; **the WebSocket handshake requires RSA-signed auth even for public channels**. Signed requests use an RSA keypair over the request path. Rate limits are tiered token-buckets with separate read/write buckets: Basic 200 read/100 write tokens/s (default cost 10 tokens/request) up to Prestige 6,000/8,000; 429s return no Retry-After header. Tiers above Advanced are earned by 30-day volume share — for a read-only data service the Basic tier plus a TTL cache is sufficient.
+
+**Data-format quirks (verified):** (a) the orderbook endpoint returns **yes bids and no bids only — no asks** (binary equivalence: yes-bid at X ≡ no-ask at 1−X), so spread computation requires the 1−no-bid transform; (b) Kalshi is mid-migration from integer **cents** to fixed-point **dollar** price fields (`price_dollars`) — both representations appear in responses and our parser must handle each; (c) tickers are hierarchical, e.g. `FED-23DEC-T3.00` = `{SERIES}-{DATE}-{TYPE}{STRIKE}` (T = target/above, B = between-range) — the series prefix is the reference-class key; (d) market status enum is `unopened|open|closed|settled`.
+
+**WebSocket channels (verified, single connection):** `orderbook_delta`, `ticker`, `trade`, `fill`, `market_positions`, `market_lifecycle_v2`, plus `communications` (RFQ). Subscribe by `market_ticker(s)` or `market_id(s)`; server pings every 10s; `seq` numbers order snapshot/delta consistency.
 
 ### 3.5 What we can compute from these (the "data service" output contract)
 
@@ -233,5 +243,12 @@ These six findings are the empirical ground for the integration report (`02-zed-
 - Madrigal-Cianci, Monsalve Maya, Breakey (2026). *Prediction Markets as Bayesian Inverse Problems.* arXiv:2601.18815 [q-fin.MF]. — abstract.
 - Le (2026). *Decomposing Crowd Wisdom: Domain-Specific Calibration Dynamics in Prediction Markets.* arXiv:2602.19520 [stat.AP]. — abstract.
 - Xi, Moallemi, Pai, Wang (2026). *Volatility in Prediction Markets: A Structural Approach.* arXiv:2607.08199 [q-fin.TR]. — abstract.
+
+### Sources fetched live (2026-08-04, this session's verification pass)
+
+- `https://docs.polymarket.com/api-reference/predictions/overview`, `/concepts/resolution`, `/api-reference/rate-limits`, `/llms.txt`; `https://github.com/Polymarket` (102 repos; notable: `polymarket-cli` Rust 2.8k★, `real-time-data-client`, `py-clob-client-v2`, `rs-clob-client-v2`, `uma-ctf-adapter`).
+- `https://docs.kalshi.com/welcome`, `/llms.txt`, `/getting_started/api_environments.md`, `/getting_started/rate_limits.md`, `/getting_started/market_settlement.md`, `/websockets/websocket-connection.md`.
+
+**Remaining unverified (open questions, deferred to the Phase-0 spike):** exact Gamma market status enum values and machine-readable resolution fields (`umaResolutionStatus`/`resolvedBy` hypothesized, not confirmed); Polymarket WebSocket message-type schemas; Kalshi official SDK repo names; whether 2604.20421's dataset is bulk-downloadable or terminal-only at `polymonitor.club`.
 - Polymarket Documentation, `docs.polymarket.com` — Gamma/CLOB/Data/Relayer/WebSocket/Bridge overview.
 - Kalshi API Documentation, `docs.kalshi.com` — `llms.txt` full endpoint index (events, markets, series, candlesticks, orderbook, forecast-percentile-history, historical).

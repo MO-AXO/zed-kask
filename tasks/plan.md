@@ -31,7 +31,9 @@ T0 (spike) ── no deps (fail-fast gate)
    │      ├─> T2 (Polymarket Gamma provider) ── depends T1
    │      ├─> T3 (Kalshi REST provider)      ── depends T1   (parallel with T2)
    │      │      │
-   │      ├─> T4 (unified annotated contract + reliability_tier) ── depends T2,T3
+   │      ├─> T4 (unified annotated contract + reliability_tier + dual-axis ontology block) ── depends T2,T3
+   │      │      │
+   │      │      ├─> T4b (market_ontology_map tool: mapping as first-class output) ── depends T4
    │      │      │
    │      ├─> T5 (calibration math via hkask-forecast + ForecastStore) ── depends T4
    │      │      │
@@ -56,7 +58,7 @@ T0 (spike) ── no deps (fail-fast gate)
 
 ## Risks (carried from integration report §8)
 
-R1 Polymarket Gamma field shapes unverified — **Phase 0 resolves**. R2 Kalshi percentile-history shape unverified — **Phase 0 resolves**. R3 rate limits — cache TTL. R4 politics underconfidence bias — `domain_bias` in contract + test. R5 stale-signal trap — typed error + test. R6 thin-market misread — `reliability_tier` + test. R7 bucket reconstruction — Phase 2. R8 reqwest/tokio reactor — use existing MCP launch paths, test. R9 credential allowlist — `Some(&[])` + alignment test. R10 geo-block — out of scope for reads.
+R1 Polymarket Gamma field shapes unverified — **Phase 0 resolves**. R2 Kalshi percentile-history shape unverified — **Phase 0 resolves**. R3 rate limits — cache TTL. R4 politics underconfidence bias — `domain_bias` in contract + test. R5 stale-signal trap — typed error + test. R6 thin-market misread — `reliability_tier` + test. R7 bucket reconstruction — Phase 2. R8 reqwest/tokio reactor — use existing MCP launch paths, test. R9 credential allowlist — `Some(&[])` + alignment test. R10 geo-block — out of scope for reads. R11 polymonitor.club terminal-only — no dependency. R12 Kalshi cents→dollar migration — parser tolerates both + units test (T3). R13 Kalshi bids-only orderbook — ask = 1−best-no-bid, fixture test (T3). R14 ontology-mapping precedent unverified (Q-O1/Q-O2) — resolved in T4 before the contract shape is pinned.
 
 ## Open questions
 
@@ -64,6 +66,8 @@ R1 Polymarket Gamma field shapes unverified — **Phase 0 resolves**. R2 Kalshi 
 - Q2 (Phase 0): Kalshi `forecast-percentile-history` response shape and whether public reads need any header.
 - Q3 (Phase 1): should `reliability_tier` thresholds be per-domain (politics vs sports volume differ by orders of magnitude)? Defer to after T0 spike data.
 - Q4 (Phase 2): does `scenario_from_markets` call the markets MCP server over the in-process tool boundary (like `scenario_from_companies`), or share a lib? Confirm against the companies-bridge implementation during T7.
+- Q-O1 (T4): how/whether existing kask MCP servers annotate tool outputs with PKO/Dublin Core mappings — grep before pinning the `ontology` block shape; follow precedent if found.
+- Q-O2 (T4): does a `hkask:` forecasting ontology namespace already exist? Grep before defining new terms (calibration vocabulary is domain-supplement tier regardless).
 
 ## Refinement history (PDCA visibility)
 
@@ -136,15 +140,29 @@ R1 Polymarket Gamma field shapes unverified — **Phase 0 resolves**. R2 Kalshi 
 
 #### T4 — Unified annotated contract + `market_lookup` tool
 - **slice_id:** `markets/annotated-contract`
-- **Description:** Define the annotated `MarketRecord` (the contract from integration report §4) and the first end-to-end tool `market_lookup { query, deadline?, category? } → MarketRecord[]` that calls T2/T3 and returns the full annotated record including `reliability_tier` (derived from volume/spread/last-update thresholds). Surface `calibration.domain_bias` from a static per-domain table seeded from 2602.19520 (politics → underconfident) until T5 computes it from data. Use `AnyJsonValue` for any arbitrary-JSON field. Run `find_boolean_schema_positions` on `schema_for!(MarketLookupRequest)`.
+- **Description:** Define the annotated `MarketRecord` (the contract from integration report §4, **including the dual-axis `ontology` block**) and the first end-to-end tool `market_lookup { query, deadline?, category? } → MarketRecord[]` that calls T2/T3 and returns the full annotated record including `reliability_tier` (derived from volume/spread/last-update thresholds). Surface `calibration.domain_bias` from a static per-domain table seeded from 2602.19520 (politics → underconfident) until T5 computes it from data. **Ontology mapping work:** (a) resolve open questions Q-O1/Q-O2 by grepping existing kask MCP servers + registry for a PKO/Dublin Core output-annotation precedent and any existing `hkask:` forecasting vocabulary — follow the precedent if one exists; (b) implement the dual-axis mapping: `ontology.process` = PKO (`pko:ProcedureExecution` + 2604.20421 lifecycle stage + probability-as-StepExecution-output), `ontology.state` = Dublin Core (`dcterms:identifier` = `{source}:{market_id}`, `title` ← question, `description`, `temporal` ← deadline, `provenance` ← resolution_source), plus `mapping_version`. Use `AnyJsonValue` for any arbitrary-JSON field. Run `find_boolean_schema_positions` on `schema_for!(MarketLookupRequest)`.
 - **Acceptance criteria:**
   - `market_lookup` returns records with non-null `probability`, `spread`, `volume`, `last_update`, `calibration`, `reliability_tier` for any live query.
   - A politics-category record carries `domain_bias: "underconfident"` (the 2602.19520 guardrail) — pinned by a test.
+  - Every returned record carries a populated `ontology` block with both `process` (PKO) and `state` (Dublin Core) sub-blocks — pinned by a test.
+  - Q-O1/Q-O2 resolution is recorded in the spike note or a short comment: precedent followed, or new shape justified.
   - Tool-input schema has no bare-boolean positions (AnyJsonValue enforced).
-- **Verification:** `cargo test -p hkask-mcp-markets market_lookup`; boolean-schema test green.
+- **Verification:** `cargo test -p hkask-mcp-markets market_lookup`; boolean-schema test green; ontology-block test green.
 - **Dependencies:** T2, T3.
-- **Files likely touched:** `kask/mcp-servers/hkask-mcp-markets/src/{types.rs,tools.rs,hkask_mcp_scenarios.rs}` (no — the markets crate), tests.
+- **Files likely touched:** `kask/mcp-servers/hkask-mcp-markets/src/{types.rs,tools.rs}`, tests.
 - **Estimated scope:** M.
+
+#### T4b — Ontology-mapping tool (`market_ontology_map`)
+- **slice_id:** `markets/ontology-map-tool`
+- **Description:** Expose the dual-axis mapping itself as a first-class tool, `market_ontology_map { } → { mapping_version, process_axis: {...}, state_axis: {...}, lifecycle_stages: [...] }`, so consumers of the feed can fetch the mapping independent of any specific market record (e.g. a FlowDef context step that needs the vocabulary before interpreting injected records). The returned document is the single source of truth the per-record `ontology` blocks are instances of; both are generated from the same Rust constants so they cannot drift.
+- **Acceptance criteria:**
+  - `market_ontology_map` returns the full PKO + Dublin Core mapping document with a `mapping_version` matching the per-record blocks.
+  - A test asserts the tool output and the `MarketRecord.ontology` block are generated from shared constants (change one, both change).
+  - `schema_for!(MarketOntologyMapRequest)` has no bare-boolean positions.
+- **Verification:** `cargo test -p hkask-mcp-markets ontology_map`.
+- **Dependencies:** T4.
+- **Files likely touched:** `kask/mcp-servers/hkask-mcp-markets/src/{tools.rs,ontology.rs}`, tests.
+- **Estimated scope:** S.
 
 #### T5 — Calibration math via `hkask-forecast` + resolved-outcome store
 - **slice_id:** `markets/calibration`
