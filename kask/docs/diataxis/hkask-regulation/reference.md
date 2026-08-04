@@ -11,10 +11,10 @@ mds_categories: [domain, lifecycle]
 # hkask-regulation — Reference
 
 `hkask-regulation` implements the Regulation nervous system for hKask. It
-provides the cybernetic loop that monitors agent behavior, enforces gas
-budgets, detects variety deficits, and escalates algedonic alerts. The crate
-defines the `RegulationLedger`, `CyberneticsLoop`, `MetacognitionLoop`,
-`WalletManager`, `Well`, `GasBudget`, and the span enums that emit `reg.*`
+provides the cybernetic loop that monitors agent behavior, bounds governed
+tool calls via a per-agent call cap, detects variety deficits, and escalates
+algedonic alerts. The crate defines the `RegulationLedger`, `CyberneticsLoop`,
+`MetacognitionLoop`, `CallCapManager`, and the span enums that emit `reg.*`
 observable events.
 
 ## Source citations
@@ -40,9 +40,6 @@ observable events.
 | `CallCapManager` | `kask/crates/hkask-regulation/src/energy.rs` |
 | `CallCap` | `kask/crates/hkask-regulation/src/energy.rs` |
 | `AgentCallCapStatus` | `kask/crates/hkask-regulation/src/energy.rs` |
-| `GasBudget` struct | `kask/crates/hkask-regulation/src/energy.rs:99` |
-| `GasCost` newtype | `kask/crates/hkask-regulation/src/energy.rs:13` |
-| `AgentGasStatus` | `kask/crates/hkask-regulation/src/energy.rs:323` |
 | `RuntimeAlert` | `kask/crates/hkask-regulation/src/algedonic.rs:37` |
 | `AlertSeverity` enum | `kask/crates/hkask-regulation/src/algedonic.rs:26` |
 | `AlertEmailSink` trait | `kask/crates/hkask-regulation/src/algedonic.rs:54` |
