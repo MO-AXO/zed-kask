@@ -9623,7 +9623,6 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
- "theme",
  "ui",
 ]
 
