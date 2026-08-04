@@ -944,7 +944,7 @@ mod tests {
         assert_eq!(deserialized.thought_signature, None);
     }
 
-       /// D20: `TokenUsage.cost` round-trips through serde and defaults to `None`
+    /// D20: `TokenUsage.cost` round-trips through serde and defaults to `None`
     /// when the provider omits it (Anthropic, Ollama, local).
     #[test]
     fn test_token_usage_cost_round_trips() {
@@ -977,12 +977,30 @@ mod tests {
     /// accounting; `None` only when neither side reported a cost.
     #[test]
     fn test_token_usage_cost_adds_and_subs() {
-        let a = TokenUsage { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, cost: Some(0.001) };
-        let b = TokenUsage { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, cost: Some(0.002) };
+        let a = TokenUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cost: Some(0.001),
+        };
+        let b = TokenUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cost: Some(0.002),
+        };
         assert_eq!((a + b).cost, Some(0.003));
         assert_eq!((b - a).cost, Some(0.001));
 
-        let none = TokenUsage { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, cost: None };
+        let none = TokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            cost: None,
+        };
         assert_eq!((a + none).cost, Some(0.001));
         assert_eq!((none + none).cost, None);
     }
