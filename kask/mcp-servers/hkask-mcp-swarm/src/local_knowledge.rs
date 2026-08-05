@@ -395,7 +395,10 @@ mod tests {
         let has_latency = fragments
             .iter()
             .any(|f| f.attribute == "delegation:latency_ms" && f.value == "1500");
-        assert!(has_latency, "latency_ms must be written even without task_success");
+        assert!(
+            has_latency,
+            "latency_ms must be written even without task_success"
+        );
 
         // task_success should NOT be present (not fabricated).
         let has_task_success = fragments
