@@ -1,7 +1,7 @@
 # Todo — Bayesian APT Foundation
 
 ## Phase 1 — Foundation (Q1)
-- [ ] **T0** Keystone: belief-hierarchy ↔ `EventDependency` mapping (3-outcome gate; gates T4/T8)
+- [x] **T0** Keystone: belief-hierarchy ↔ `EventDependency` mapping — **HOLDS APPROXIMATELY** (t0-keystone-mapping.md); T4/T8 unblocked under the approximate license
 - [ ] **T1** Citation store in research server (R2/R3)
   - [ ] blake3-pinned store + stable citation IDs
   - [ ] `web_extract` carries citation IDs + claim spans

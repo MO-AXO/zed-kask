@@ -158,6 +158,11 @@ pub struct EpValuation {
     pub pct_from_book_value: f64,
     /// % of intrinsic value from PV of future economic profits.
     pub pct_from_economic_profits: f64,
+    /// Equity duration in years: PV-weighted average time of the economic-
+    /// profit stream (Macaulay-style over the EP periods). None when PV(EP)
+    /// is zero or negative — a duration over a non-positive stream is not
+    /// meaningful, and None is never a fabricated number.
+    pub equity_duration_years: Option<f64>,
     /// Interpretation signal.
     pub signal: EpSignal,
 }
@@ -299,6 +304,7 @@ pub fn value_economic_profit(
     };
 
     let signal = classify_signal(ivm_ratio, roic_wacc_spread, pct_from_economic_profits);
+    let equity_duration_years = equity_duration_years(&periods);
 
     EpValuation {
         book_value: latest_book_value,
@@ -321,8 +327,29 @@ pub fn value_economic_profit(
         margin_of_safety,
         pct_from_book_value,
         pct_from_economic_profits,
+        equity_duration_years,
         signal,
     }
+}
+
+/// Macaulay-style equity duration over the EP stream: the PV-weighted
+/// average period in which economic-profit value is received.
+///
+/// D = Σ_t t·PV(EP_t) / Σ_t PV(EP_t)
+///
+/// Only the EP stream is timed (book value is a stock, not a flow, so it
+/// has no time coordinate). Returns None when total PV(EP) ≤ 0 — for a
+/// value-destroying company the weighting is not a duration.
+pub fn equity_duration_years(periods: &[EpPeriod]) -> Option<f64> {
+    let total_pv: f64 = periods.iter().map(|p| p.present_value).sum();
+    if total_pv <= 0.0 {
+        return None;
+    }
+    let weighted: f64 = periods
+        .iter()
+        .map(|p| p.period as f64 * p.present_value)
+        .sum();
+    Some(weighted / total_pv)
 }
 
 /// Adjust fade horizon for empirical decay factors (AFG, Obrycki & Resendes 2000).
