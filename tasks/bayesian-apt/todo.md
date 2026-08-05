@@ -6,15 +6,11 @@
   - [ ] blake3-pinned store + stable citation IDs
   - [ ] `web_extract` carries citation IDs + claim spans
   - [ ] `scenario_research` accepts citation IDs
-- [ ] **T2** First-class contract maturity (P2)
-  - [ ] `time_to_maturity` on `MarketRecord`
-  - [ ] Contract-ladder endpoint with duration profile
-- [ ] **T3** Multi-group CPT fix (S1)
-  - [ ] All `depends_on` groups consumed; regression test
-- [ ] **T6** Equity duration tool (C3)
-  - [ ] D_e from RIM/EP stream (primary) + DCF stream (cross-check)
-  - [ ] Unit test: wide-moat (20y) duration > no-moat (5y)
-  - [ ] H2/T1 duration distribution dataset
+- [x] **T2** First-class contract maturity (P2) — found already landed (`time_to_maturity` + `market_ladder`); verified in source, no work needed
+- [x] **T3** Multi-group CPT fix (S1) — found already landed (noisy-OR multi-group combination, superforecast.rs L64–109); verified in source
+- [x] **T6** Equity duration tool (C3) — `equity_duration_years` on `EpValuation` (economic_profit.rs); Macaulay over the EP stream; 3 new tests pass (ordering, None-for-destroyer, hand-check)
+  - [ ] DCF-stream cross-check variant (deferred to Phase 2 — EP stream is primary per the review)
+  - [ ] H2/T1 duration distribution dataset (needs coverage-universe run)
 - [ ] **CP1** tests pass; duration face-validity review
 
 ## Phase 2 — Core (Q2–Q3)
