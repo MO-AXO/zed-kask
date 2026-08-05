@@ -329,14 +329,15 @@ impl PredictionMarketsServer {
                 let reading = {
                     let mut store =
                         self.calibration_store.lock().unwrap_or_else(|e| e.into_inner());
+                    let bucket = types::canonical_bucket(&req.bucket);
                     store.record(
-                        &req.bucket,
+                        &bucket,
                         calibration::ResolvedObservation {
                             probability: req.probability,
                             outcome: req.outcome,
                         },
                     );
-                    let reading = calibration::read_calibration(&store, &req.bucket);
+                    let reading = calibration::read_calibration(&store, &bucket);
                     if let Some(path) = &self.calibration_path
                         && let Err(e) = store.save(std::path::Path::new(path))
                     {
@@ -361,7 +362,7 @@ impl PredictionMarketsServer {
 
     /// Subscribe to Polymarket resolution events and feed the calibration store.
     #[tool(
-        description = "Subscribe to Polymarket's public market channel for resolution events on the given CLOB asset IDs. Each market_resolved event is recorded into the calibration store under the given bucket (the automatic sense arm of the calibration loop). Returns after max_resolutions ingestions or stream end."
+        description = "Subscribe to Polymarket's public market channel for resolution events on the given CLOB asset IDs. Resolution events are logged as notifications — they do NOT write calibration observations (the wire carries no pre-resolution probability, and fabricating one would corrupt the Brier loop). Pair a notification with market_record_resolution (which takes the pre-resolution probability) to feed the loop."
     )]
     pub async fn market_subscribe_resolutions(
         &self,
@@ -472,7 +473,7 @@ impl PredictionMarketsServer {
                             }
                             let event_tags: Vec<String> =
                                 event.tags.iter().map(|t| t.label.clone()).collect();
-                            let bucket = event_tags.first().cloned().unwrap_or_default();
+                            let bucket = types::canonical_bucket(event_tags.first().map(String::as_str).unwrap_or(""));
                             let reading = {
                                 let guard = self
                                     .calibration_store
@@ -674,7 +675,7 @@ impl PredictionMarketsServer {
         for event in &gamma_events {
             let event_tags: Vec<String> =
                 event.tags.iter().map(|t| t.label.clone()).collect();
-            let bucket = event_tags.first().cloned().unwrap_or_default();
+            let bucket = types::canonical_bucket(event_tags.first().map(String::as_str).unwrap_or(""));
             let reading = {
                 let guard = store.lock().unwrap_or_else(|e| e.into_inner());
                 calibration::read_calibration(&guard, &bucket)
@@ -703,7 +704,7 @@ impl PredictionMarketsServer {
             let event = kalshi_events
                 .iter()
                 .find(|e| e.event_ticker == market.event_ticker);
-            let bucket = event.map(|e| e.category.clone()).unwrap_or_default();
+            let bucket = types::canonical_bucket(event.map(|e| e.category.as_str()).unwrap_or(""));
             let reading = {
                 let guard = store.lock().unwrap_or_else(|e| e.into_inner());
                 calibration::read_calibration(&guard, &bucket)
