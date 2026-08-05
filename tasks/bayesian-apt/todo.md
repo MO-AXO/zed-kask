@@ -1,6 +1,7 @@
 # Todo — Bayesian APT Foundation
 
 ## Phase 1 — Foundation (Q1)
+- [ ] **T0** Keystone: belief-hierarchy ↔ `EventDependency` mapping (3-outcome gate; gates T4/T8)
 - [ ] **T1** Citation store in research server (R2/R3)
   - [ ] blake3-pinned store + stable citation IDs
   - [ ] `web_extract` carries citation IDs + claim spans
@@ -11,19 +12,23 @@
 - [ ] **T3** Multi-group CPT fix (S1)
   - [ ] All `depends_on` groups consumed; regression test
 - [ ] **T6** Equity duration tool (C3)
-  - [ ] D_e (mechanical + DSS variants) from DCF outputs
+  - [ ] D_e from RIM/EP stream (primary) + DCF stream (cross-check)
+  - [ ] Unit test: wide-moat (20y) duration > no-moat (5y)
   - [ ] H2/T1 duration distribution dataset
 - [ ] **CP1** tests pass; duration face-validity review
 
 ## Phase 2 — Core (Q2–Q3)
-- [ ] **T4a** Markets→tree composition algebra
-  - [ ] N markets → validated EventTree; tree-time refusal gates
-  - [ ] CPT-size caps + independence diagnostics
+- [ ] **T4a** Markets→tree composition algebra (`scenario_from_markets_set`)
+  - [ ] N markets → validated EventTree w/ per-branch joints; tree-time refusal gates
+  - [ ] Dependency inference via matcher.rs question overlap
+  - [ ] CPT-size caps + independence diagnostics; cycle rejection
 - [ ] **T4b** Tree-time challenge gates w/ provenance classes
 - [ ] **T5** Tree-level Bayesian propagation + journal
 - [ ] **T7** Tree-weighted valuation path in companies
 - [ ] **CP2** vertical slice: markets→tree→propagation→tree-weighted DCF
 - [ ] **T8a** Factor-mapping prototype (5 companies) — **kill gate on H3**
+  - [ ] Loadings via `branch_return` revaluation (not branch-indicator covariances)
+  - [ ] Hand-checks: binary tree σ≈0.176; single-branch loading = 1.0
 - [ ] **T8b** `scenario_factor_exposures` platform surface
 
 ## Phase 3 — Integration & validation (Q4)
