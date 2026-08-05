@@ -2119,6 +2119,94 @@ mod tests {
         assert!(warnings.iter().any(|w| w.kind == "bridge_gate"));
     }
 
+    // ── T5 propagation tests ─────────────────────────────────────────────
+
+    #[test]
+    fn propagation_recomputes_descendants_and_joint() {
+        // M1 (root, 0.6) → M2 conditioned [0.2, 0.9]. Update M1's prior to
+        // 0.9: M2's marginal must move from 0.62 to 0.9·0.9 + 0.1·0.2 = 0.83,
+        // and the joint from 0.54 to 0.81.
+        let root = make_event("E1", 0.6, vec![]);
+        let child = make_event(
+            "E2",
+            0.5,
+            vec![EventDependency {
+                parent_event_ids: vec!["E1".into()],
+                conditionals: vec![0.2, 0.9],
+            }],
+        );
+        let events = vec![root, child];
+
+        let result = propagate_prior_update(&events, "E1", 0.9).expect("propagates");
+
+        let child_after = result
+            .tree
+            .nodes
+            .iter()
+            .find(|n| n.event.id == "E2")
+            .expect("child present");
+        assert!((child_after.marginal_probability - 0.83).abs() < 1e-12);
+        assert!((result.joint_before - 0.54).abs() < 1e-12);
+        assert!((result.joint_after - 0.81).abs() < 1e-12);
+
+        // Journal: both nodes changed, in topo order.
+        assert_eq!(result.journal.len(), 2);
+        assert_eq!(result.journal[0].event_id, "E1");
+        assert!((result.journal[0].marginal_before - 0.6).abs() < 1e-12);
+        assert!((result.journal[0].marginal_after - 0.9).abs() < 1e-12);
+        assert_eq!(result.journal[1].event_id, "E2");
+        assert!((result.journal[1].delta - 0.21).abs() < 1e-12);
+    }
+
+    #[test]
+    fn propagation_leaves_unrelated_nodes_untouched() {
+        let root = make_event("E1", 0.6, vec![]);
+        let child = make_event(
+            "E2",
+            0.5,
+            vec![EventDependency {
+                parent_event_ids: vec!["E1".into()],
+                conditionals: vec![0.2, 0.9],
+            }],
+        );
+        let independent = make_event("E3", 0.7, vec![]);
+        let events = vec![root, child, independent];
+
+        let result = propagate_prior_update(&events, "E1", 0.9).expect("propagates");
+        assert!(
+            result.journal.iter().all(|e| e.event_id != "E3"),
+            "independent root must not appear in the journal"
+        );
+        let e3 = result
+            .tree
+            .nodes
+            .iter()
+            .find(|n| n.event.id == "E3")
+            .expect("present");
+        assert!((e3.marginal_probability - 0.7).abs() < 1e-12);
+    }
+
+    #[test]
+    fn propagation_rejects_invalid_prior_and_unknown_event() {
+        let events = vec![make_event("E1", 0.6, vec![])];
+        assert!(matches!(
+            propagate_prior_update(&events, "E1", 1.5),
+            Err(ScenarioError::InvalidProbability(..))
+        ));
+        assert!(matches!(
+            propagate_prior_update(&events, "GHOST", 0.5),
+            Err(ScenarioError::EventNotFound(..))
+        ));
+    }
+
+    #[test]
+    fn propagation_noop_update_yields_empty_journal() {
+        let events = vec![make_event("E1", 0.6, vec![])];
+        let result = propagate_prior_update(&events, "E1", 0.6).expect("propagates");
+        assert!(result.journal.is_empty());
+        assert!((result.joint_before - result.joint_after).abs() < 1e-12);
+    }
+
     #[test]
     fn compose_rejects_duplicate_market_ids() {
         let records = vec![

@@ -161,6 +161,19 @@ pub struct DependencySpecRequest {
     pub conditionals: Vec<f64>,
 }
 
+/// Request for `scenario_propagate`: update one event's prior and recompute
+/// the whole tree (T5).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PropagateRequest {
+    /// JSON array of ScenarioEvents (the current tree's events, e.g. from a
+    /// prior scenario_from_markets_set / scenario_quantify output).
+    pub events: String,
+    /// ID of the event whose prior is being revised.
+    pub event_id: String,
+    /// The new prior probability in [0, 1].
+    pub new_prior: f64,
+}
+
 /// Request for `scenario_from_markets_set`: compose N market records into a
 /// dependent event tree.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1428,6 +1441,60 @@ impl ScenariosServer {
                 "success",
                 output.clone(),
             );
+            Ok(output)
+        })
+        .await
+    }
+
+    /// Tree-level Bayesian propagation (T5): update one event's prior and
+    /// recompute every descendant marginal and the joint. The propagation
+    /// journal is the tâtonnement record (Bhattacharya Prop. 6).
+    #[tool(
+        description = "Update one event's prior probability and propagate through the event tree: all descendant marginals and the joint probability are recomputed. Returns the updated tree plus a propagation journal (per-node before/after deltas) — the tâtonnement record of the update round. CPTs are untouched; only the named event's prior changes."
+    )]
+    pub async fn scenario_propagate(
+        &self,
+        Parameters(req): Parameters<PropagateRequest>,
+    ) -> String {
+        execute_tool_semantic(self, "scenario_propagate", Some(Self::ontology_anchor("scenario_propagate")), async {
+            let events: Vec<ScenarioEvent> = serde_json::from_str(&req.events)
+                .map_err(|e| McpToolError::invalid_argument(format!("invalid events JSON array: {e}")))?;
+
+            let result = superforecast::propagate_prior_update(&events, &req.event_id, req.new_prior)
+                .map_err(map_scenario_error)?;
+
+            let nodes: Vec<serde_json::Value> = result
+                .tree
+                .nodes
+                .iter()
+                .map(|n| serde_json::json!({
+                    "id": n.event.id,
+                    "marginal_probability": n.marginal_probability,
+                    "update_count": n.event.update_count,
+                }))
+                .collect();
+
+            let output = serde_json::json!({
+                "tree": {
+                    "subject": result.tree.subject,
+                    "topo_order": result.tree.topo_order,
+                    "joint_probability": result.tree.joint_probability,
+                    "nodes": nodes,
+                },
+                "journal": result.journal,
+                "joint_before": result.joint_before,
+                "joint_after": result.joint_after,
+                "provenance": {
+                    "tool": "scenario_propagate",
+                    "server": "hkask-mcp-scenarios",
+                    "version": SERVER_VERSION,
+                    "updated_event": req.event_id,
+                    "changed_nodes": result.journal.len(),
+                },
+                "framework": "Tree-level Bayesian propagation: the named event's prior is revised; every descendant marginal is recomputed via CPT marginalization under parent independence; the journal records each changed node (one tâtonnement round, Bhattacharya Prop. 6, arXiv:2211.03244).",
+                "ontology_anchor": "dublin-core"
+            });
+
             Ok(output)
         })
         .await
