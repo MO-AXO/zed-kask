@@ -1078,9 +1078,13 @@ pub async fn fetch_skill_metadata(
 /// discreet-piggyback consumer. Resolves the ref to its marketplace id,
 /// fetches the signed metadata ([`fetch_skill_metadata`]), then reuses
 /// [`install_skill`] (signature + expiry + SHA256 verification, presigned-S3
-/// download, extract). The ref's `version` is informational in v1 (the
-/// catalog serves the latest version); a future revision can pin the
-/// version via a per-version route.
+/// download, extract).
+///
+/// Fails closed if the catalog's latest version differs from the ref's
+/// `version`: the URI promises a specific version, and silently installing a
+/// different one would violate that promise. A per-version fetch route would
+/// let us honor the exact version; until then, a stale ref errors loudly so
+/// the sharer can re-share an updated `kask-skill://` reference.
 pub async fn install_skill_from_ref(
     fs: &dyn Fs,
     http_client: &HttpClientWithUrl,
@@ -1089,6 +1093,16 @@ pub async fn install_skill_from_ref(
 ) -> Result<PathBuf> {
     let skill_id = reff.id();
     let metadata = fetch_skill_metadata(http_client, &skill_id).await?;
+    if metadata.manifest.version != reff.version {
+        bail!(
+            "kask skill '{}' reference is for version {}, but the catalog's latest is {}; \
+             the publisher may have released a newer version. Ask the sharer for an updated \
+             `kask-skill://` reference.",
+            skill_id,
+            reff.version,
+            metadata.manifest.version
+        );
+    }
     install_skill(
         fs,
         http_client,
