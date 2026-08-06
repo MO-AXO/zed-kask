@@ -646,7 +646,6 @@ pub fn open_curator_escalation_queue(
 /// `escalations` table → `curator_escalations` MCP tool reads it. The queue
 /// write is best-effort; a failing or missing queue never breaks the
 /// regulation loop.
-#[derive(Debug)]
 pub struct BridgeAlertEscalationSink {
     queue: Arc<hkask_storage::EscalationQueue>,
 }
@@ -659,7 +658,6 @@ impl BridgeAlertEscalationSink {
 
 impl hkask_regulation::AlertEscalationSink for BridgeAlertEscalationSink {
     fn persist_alert(&self, output: &str, confidence: f64, error_context: &str) {
-        use hkask_storage::EscalationQueue;
         // `EscalationQueue::add` requires `template_id` and `bot_id` args that
         // don't map from a `RuntimeAlert` — use auto-generated defaults (the
         // same defaults `EscalationEntry::pending` uses). The structured alert

@@ -952,94 +952,137 @@ impl CyberneticsLoop {
             tracing::warn!(target: "reg.cybernetics", action_count = actions.len(), max_iterations = self.max_iterations, "Cascade detected: action count exceeds max_iterations");
         }
         for action in actions {
-            tracing::info!(target: "reg.cybernetics", action_type = ?action.action_type, target_loop = %action.target, "Cybernetics Loop efferent signal");
             let target_id = action.target;
 
-            // Send CurationInput::Alert on direct alerts channel.
-            // Fallback: persist to RegulationArchive when channel is down (Curator inactive).
-            // Per design decision: the algedonic system must always be connected
-            // to the Curator agent — persistence is the bridge when the
-            // live channel has no receiver.
-            if action.action_type == ActionType::Escalate && target_id == LoopId::Curation {
-                let (deficit, threshold) = extract_deficit_threshold(&action.parameters.data);
-                let domain = String::new();
-                let alert = RuntimeAlert {
-                    domain,
-                    deficit,
-                    threshold,
-                    severity: AlertSeverity::Critical,
-                    escalated: true,
-                    timestamp: chrono::Utc::now(),
-                    message: format!(
-                        "Variety deficit {} exceeds threshold {}",
-                        deficit, threshold
-                    ),
-                };
+            // Design decision (2026-08-06): the cybernetics loop is a
+            // sensor+advisor, not an actuator. All computed actions are
+            // converted to Escalate alerts routed to the Curator/human via
+            // the existing three-tier alert path (live channel → archive →
+            // email). Actions that would have been direct efferent signals
+            // (Throttle, CircuitBreak, AdjustEnergyBudget, etc.) carry an
+            // `efferent_action` field in the alert data so the Curator sees
+            // what the loop would have done — but the actuator is not wired.
+            // This preserves user sovereignty: the human decides whether to
+            // apply the recommended action, the loop does not act autonomously.
+            //
+            // See `kask/docs/diataxis/hkask-regulation/reference.md` §
+            // "Efferent action dispatch" for the full rationale.
+            let is_native_escalate = action.action_type == ActionType::Escalate
+                && target_id == LoopId::Curation;
+            let efferent_action = if is_native_escalate {
+                None
+            } else {
+                Some(action.action_type.as_str())
+            };
 
-                // Persist to the reviewable escalation queue unconditionally —
-                // the queue is the primary durable path for alert review, not
-                // a fallback. The RegulationArchive below remains as a
-                // secondary fallback for restart durability when the live
-                // channel is down.
-                self.persist_alert_to_queue(&alert);
+            tracing::info!(
+                target: "reg.cybernetics",
+                action_type = ?action.action_type,
+                target_loop = %action.target,
+                efferent = ?efferent_action,
+                "Cybernetics Loop efferent signal (routed as Escalate{})",
+                if efferent_action.is_some() { " — efferent not wired" } else { "" }
+            );
 
-                // Primary path: live channel to Curator's inbox
-                let sent_live = if let Some(ref alerts_tx) = self.alerts_tx {
-                    match alerts_tx.send(CurationInput::Alert(alert.clone())) {
-                        Ok(()) => true,
+            // Build the alert. For native Escalate actions (variety deficit,
+            // wallet balance, etc.), extract the deficit/threshold from the
+            // typed data. For converted efferent actions, synthesize a
+            // deficit of 1 and threshold of 1 — the alert's purpose is
+            // advisory, not quantitative.
+            let (deficit, threshold) = if is_native_escalate {
+                extract_deficit_threshold(&action.parameters.data)
+            } else {
+                (1, 1)
+            };
+            let domain = if is_native_escalate {
+                String::new()
+            } else {
+                format!("efferent:{}", action.action_type.as_str())
+            };
+            let message = if is_native_escalate {
+                format!("Variety deficit {} exceeds threshold {}", deficit, threshold)
+            } else {
+                format!(
+                    "Efferent action {} (target: {}) recommended but not wired — reason: {}",
+                    action.action_type.as_str(),
+                    action.target,
+                    action.parameters.reason
+                )
+            };
+            let alert = RuntimeAlert {
+                domain,
+                deficit,
+                threshold,
+                severity: AlertSeverity::Critical,
+                escalated: true,
+                timestamp: chrono::Utc::now(),
+                message,
+            };
+
+            // Persist to the reviewable escalation queue unconditionally —
+            // the queue is the primary durable path for alert review, not
+            // a fallback. The RegulationArchive below remains as a
+            // secondary fallback for restart durability when the live
+            // channel is down.
+            self.persist_alert_to_queue(&alert);
+
+            // Primary path: live channel to Curator's inbox
+            let sent_live = if let Some(ref alerts_tx) = self.alerts_tx {
+                match alerts_tx.send(CurationInput::Alert(alert.clone())) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::warn!(target: "reg.cybernetics", error = %e, "Failed to send CurationInput::Alert via live channel — falling back to persistence");
+                        false
+                    }
+                }
+            } else {
+                tracing::warn!(target: "reg.cybernetics", "Alerts channel not connected — falling back to persistence. Wire with_alerts_channel() for live delivery.");
+                false
+            };
+
+            // Fallback: persist full alert to RegulationArchive for Curator retrieval on next activation
+            if !sent_live {
+                let mut persisted = false;
+                if let Some(ref sink) = self.event_sink {
+                    let event = RegulationRecord::new(
+                        WebID::from_persona(b"regulation"),
+                        Span::from_kind(SpanKind::VarietyAlgedonicAlert),
+                        CyclePhase::Act,
+                        serde_json::json!({
+                            "domain": alert.domain,
+                            "deficit": alert.deficit,
+                            "threshold": alert.threshold,
+                            "severity": "Critical",
+                            "escalated": true,
+                            "message": alert.message,
+                            "efferent_action": efferent_action,
+                            "timestamp": alert.timestamp.to_rfc3339(),
+                        }),
+                        0,
+                    );
+                    match sink.persist(&event) {
+                        Ok(()) => {
+                            persisted = true;
+                            tracing::info!(target: "reg.alert", deficit = deficit, threshold = threshold, "Algedonic alert persisted to RegulationArchive (Curator inbox unavailable)");
+                        }
                         Err(e) => {
-                            tracing::warn!(target: "reg.cybernetics", error = %e, "Failed to send CurationInput::Alert via live channel — falling back to persistence");
-                            false
+                            tracing::error!(target: "reg.alert", error = %e, "Failed to persist algedonic alert to archive");
                         }
                     }
-                } else {
-                    tracing::warn!(target: "reg.cybernetics", "Alerts channel not connected — falling back to persistence. Wire with_alerts_channel() for live delivery.");
-                    false
-                };
+                }
 
-                // Fallback: persist full alert to RegulationArchive for Curator retrieval on next activation
-                if !sent_live {
-                    let mut persisted = false;
-                    if let Some(ref sink) = self.event_sink {
-                        let event = RegulationRecord::new(
-                            WebID::from_persona(b"regulation"),
-                            Span::from_kind(SpanKind::VarietyAlgedonicAlert),
-                            CyclePhase::Act,
-                            serde_json::json!({
-                                "domain": alert.domain,
-                                "deficit": alert.deficit,
-                                "threshold": alert.threshold,
-                                "severity": "Critical",
-                                "escalated": true,
-                                "message": alert.message,
-                                "timestamp": alert.timestamp.to_rfc3339(),
-                            }),
-                            0,
-                        );
-                        match sink.persist(&event) {
-                            Ok(()) => {
-                                persisted = true;
-                                tracing::info!(target: "reg.alert", deficit = deficit, threshold = threshold, "Algedonic alert persisted to RegulationArchive (Curator inbox unavailable)");
-                            }
-                            Err(e) => {
-                                tracing::error!(target: "reg.alert", error = %e, "Failed to persist algedonic alert to archive");
-                            }
-                        }
+                // Email notification: fires when live channel is down, regardless of
+                // archive outcome. Serves as notification (archive succeeded) or last
+                // resort (archive failed/unavailable).
+                if let Some(ref email_sink) = self.alert_email_sink {
+                    email_sink.send_alert_email(&alert);
+                    if persisted {
+                        tracing::info!(target: "reg.alert", deficit = deficit, threshold = threshold, "Algedonic alert emailed as notification (live channel down, archive persisted)");
+                    } else {
+                        tracing::info!(target: "reg.alert", deficit = deficit, threshold = threshold, "Algedonic alert emailed as last resort (archive unavailable)");
                     }
-
-                    // Email notification: fires when live channel is down, regardless of
-                    // archive outcome. Serves as notification (archive succeeded) or last
-                    // resort (archive failed/unavailable).
-                    if let Some(ref email_sink) = self.alert_email_sink {
-                        email_sink.send_alert_email(&alert);
-                        if persisted {
-                            tracing::info!(target: "reg.alert", deficit = deficit, threshold = threshold, "Algedonic alert emailed as notification (live channel down, archive persisted)");
-                        } else {
-                            tracing::info!(target: "reg.alert", deficit = deficit, threshold = threshold, "Algedonic alert emailed as last resort (archive unavailable)");
-                        }
-                    } else if !persisted {
-                        tracing::error!(target: "reg.alert", deficit = deficit, threshold = threshold, "CRITICAL: Algedonic alert LOST - no live channel, event_sink, or email sink");
-                    }
+                } else if !persisted {
+                    tracing::error!(target: "reg.alert", deficit = deficit, threshold = threshold, "CRITICAL: Algedonic alert LOST - no live channel, event_sink, or email sink");
                 }
             }
         }
