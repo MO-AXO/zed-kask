@@ -30,6 +30,7 @@ pub mod residual;
 pub mod semantic_mapping;
 mod streaming;
 pub mod types;
+pub mod volatility;
 
 // ── Request/response types ─────────────────────────────────────────────────
 
@@ -157,6 +158,38 @@ pub struct MarketCmpContextSuggestRequest {
     /// Base-event series ticker (must be registered). The tool classifies the
     /// family from the series and returns the curated default context.
     pub series: String,
+}
+
+/// Request for market_volatility: compute the DR-AS structural volatility
+/// forecast for a single contract (arXiv:2607.08199). Returns the conditional
+/// variance, its DR and AS decomposition, and a 95% prediction interval.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MarketVolatilityRequest {
+    /// The prediction-market price (YES probability), in [0, 1].
+    pub price: f64,
+    /// Time to resolution in hours. Must be > 0.
+    pub hours_to_resolution: f64,
+    /// The bid-ask spread in dollars (price units [0, 1]). When omitted, the
+    /// adverse-selection channel contributes 0.
+    pub spread: Option<f64>,
+    /// Trading volume during the observation window. 0 when no trades.
+    #[serde(default)]
+    pub volume: f64,
+    /// Forecast horizon in hours (default 1.0 — one-hour-ahead, matching the
+    /// paper's hourly grid).
+    #[serde(default = "default_one_hour")]
+    pub horizon_hours: f64,
+    /// The fitted adverse-selection scale K. When omitted, uses the default
+    /// (0.12 — a conservative midpoint from the paper's pooled Kalshi panel).
+    /// Override with a locally fitted value when available.
+    pub k: Option<f64>,
+    /// The activity proxy ν(V). When omitted, uses √V (the paper's best).
+    #[serde(default)]
+    pub activity_proxy: Option<volatility::ActivityProxy>,
+}
+
+fn default_one_hour() -> f64 {
+    1.0
 }
 
 /// Request for market_cmp: constant-maturity prediction for a registered
@@ -1446,11 +1479,16 @@ impl PredictionMarketsServer {
                     ));
                 }
                 // Classify the family from the series ticker to pick the
-                // curated default. If classification fails, return a generic
-                // stable default with an explanation.
+                // curated default, then try to fetch a live reference level
+                // (FRED for macro, CoinGecko for crypto). Falls back to the
+                // curated static default on any failure — the zed-kask pattern:
+                // always have a default, the live fetch is an enhancement.
                 let base_event = base_event::classify_base_event_text(&series, "", &series, "");
                 let (context, family) = match base_event {
-                    Some(be) => (be.default_economic_context(), be.factor().to_string()),
+                    Some(be) => {
+                        let ctx = be.live_economic_context(&self.http, self.fred_api_key.as_deref()).await;
+                        (ctx, be.factor().to_string())
+                    }
                     None => (base_event::EconomicContext {
                         reference: 0.0,
                         volatility: None,
@@ -1693,6 +1731,7 @@ mod tests {
             Vec::new(),
             std::sync::Mutex::new(HashSet::new()),
             portfolio_store,
+            None, // fred_api_key — tests use curated defaults
         )
     }
 
