@@ -165,7 +165,7 @@ pub struct ValenceInput {
 /// the agent owner's scoped secret store (resolved fermi-side via
 /// `fermi_auth::get_secrets_for_agent`); `env` is a process-level fallback
 /// for platform-owned integrations. zed-kask never sees the secret value.
-#[derive(Debug, Default, Deserialize, JsonSchema, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, JsonSchema, Serialize)]
 pub struct McpServerAuthSpec {
     /// Authentication scheme. `"bearer"` (default) sends the credential as
     /// `Authorization: Bearer <secret>`. `"header"` sends it as a raw
@@ -193,7 +193,7 @@ fn default_auth_scheme() -> String {
 /// Cursor, `mcp.json`) so a card authored in that style transfers
 /// directly. Only `name` and `endpoint` are load-bearing for discovery;
 /// the rest narrow or authenticate the connection.
-#[derive(Debug, Default, Deserialize, JsonSchema, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, JsonSchema, Serialize)]
 pub struct McpServerSpec {
     /// Namespace prefix for this server's tools. Sanitised to
     /// `[a-zA-Z0-9_-]` fermi-side; becomes part of the qualified tool
