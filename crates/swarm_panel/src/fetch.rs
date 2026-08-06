@@ -10,9 +10,10 @@ use serde_json::json;
 
 use crate::SWARM_SERVER;
 use crate::SwarmPanel;
+use crate::SwarmEntry;
 use crate::parse::{
     AgentCard, AgentListResponse, AgentSource, LocalAgentListResponse, LocalSwarmListResponse,
-    SwarmCard, SwarmEntry, WorkspaceListResponse, extract_wallet_balance,
+    SwarmCard, WorkspaceListResponse, extract_wallet_balance,
 };
 
 impl SwarmPanel {
