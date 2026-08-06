@@ -24,7 +24,6 @@ use gpui::{
     prelude::*,
 };
 use gpui_util::ResultExt as _;
-use hkask_bridge_ontology::explain_tool_for;
 use hkask_tool_invoker::{BlockProvenance, shared_tool_invoker};
 use ui::prelude::*;
 
@@ -628,9 +627,18 @@ impl PortfolioWidget {
             .as_ref()
             .and_then(|returns| returns.to.clone());
         match (portfolio_name, from, to) {
-            (Some(name), Some(from), Some(to)) => format!(
-                "Re: the portfolio_returns result for portfolio '{name}' over {from} to {to}. I believe a displayed figure is wrong: "
-            ),
+            (Some(name), Some(from), Some(to)) => {
+                let ontology_clause = self
+                    .body
+                    .ontology
+                    .as_deref()
+                    .filter(|o| !o.is_empty())
+                    .map(|o| format!(" [{o}]"))
+                    .unwrap_or_default();
+                format!(
+                    "Re: the portfolio_returns result for portfolio '{name}' over {from} to {to}{ontology_clause}. I believe a displayed figure is wrong: "
+                )
+            }
             _ => "Re: the portfolio dashboard. I believe a displayed figure is wrong: ".to_string(),
         }
     }
@@ -1284,6 +1292,7 @@ mod tests {
             characteristics: std::collections::HashMap::new(),
             attribution: Vec::new(),
             provenance,
+            ontology: None,
         }
     }
 
@@ -1462,6 +1471,7 @@ mod tests {
                 gain_loss: 0.0,
             }],
             provenance: BlockProvenance::default(),
+            ontology: None,
         }
     }
 
@@ -1690,6 +1700,7 @@ mod tests {
             characteristics: std::collections::HashMap::new(),
             attribution: Vec::new(),
             provenance,
+            ontology: None,
         }
     }
 
@@ -1770,6 +1781,7 @@ mod tests {
             characteristics: std::collections::HashMap::new(),
             attribution: Vec::new(),
             provenance: BlockProvenance::default(),
+            ontology: None,
         };
         let widget = cx.update(|cx| cx.new(|cx| PortfolioWidget::new(empty, cx)));
         let body = widget.read_with(cx, |widget, _cx| widget.compose_disagree_body());
