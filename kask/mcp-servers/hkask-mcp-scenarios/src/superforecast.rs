@@ -2101,7 +2101,8 @@ mod tests {
     #[test]
     fn low_reliability_withholds_base_rate() {
         let record = test_market_record("Economics", 0.62, ReliabilityTier::Low);
-        let (event, warnings) = convert_market_record(&record, Some("high"), None).expect("converts");
+        let (event, warnings) =
+            convert_market_record(&record, Some("high"), None).expect("converts");
         assert_eq!(event.base_rate, None);
         assert!(warnings.iter().any(|w| w.contains("reliability")));
     }
@@ -2109,7 +2110,8 @@ mod tests {
     #[test]
     fn low_match_confidence_withholds_base_rate() {
         let record = test_market_record("Economics", 0.62, ReliabilityTier::High);
-        let (event, warnings) = convert_market_record(&record, Some("low"), None).expect("converts");
+        let (event, warnings) =
+            convert_market_record(&record, Some("low"), None).expect("converts");
         assert_eq!(event.base_rate, None);
         assert!(warnings.iter().any(|w| w.contains("match confidence")));
     }
@@ -2167,7 +2169,8 @@ mod tests {
             record_with("M1", "Will the Fed cut rates in January 2027?", 0.60),
             record_with("M2", "Will CPI exceed 3 percent in 2027?", 0.40),
         ];
-        let (tree, warnings) = compose_market_tree(&records, &[None, None], &[], None).expect("composes");
+        let (tree, warnings) =
+            compose_market_tree(&records, &[None, None], &[], None).expect("composes");
         assert_eq!(tree.nodes.len(), 2);
         assert_eq!(tree.root_ids.len(), 2);
         for node in &tree.nodes {
@@ -2198,7 +2201,8 @@ mod tests {
             parent_market_ids: vec!["M1".into()],
             conditionals: vec![0.2, 0.9],
         }];
-        let (tree, _) = compose_market_tree(&records, &[None, None], &specs, None).expect("composes");
+        let (tree, _) =
+            compose_market_tree(&records, &[None, None], &specs, None).expect("composes");
         let child = tree
             .nodes
             .iter()
@@ -2261,7 +2265,8 @@ mod tests {
             record_with("M1", "Will the Fed hold rates in December 2027?", 0.60),
             record_with("M2", "Will the Fed hold rates in December 2027?", 0.62),
         ];
-        let (_, warnings) = compose_market_tree(&records, &[None, None], &[], None).expect("composes");
+        let (_, warnings) =
+            compose_market_tree(&records, &[None, None], &[], None).expect("composes");
         assert!(
             warnings.iter().any(|w| w.kind == "possible_duplicate"),
             "identical questions must be flagged: {warnings:?}"
@@ -2278,7 +2283,8 @@ mod tests {
             record_with("M1", "Will the Fed cut rates in 2027?", 0.60),
             low,
         ];
-        let (tree, warnings) = compose_market_tree(&records, &[None, None], &[], None).expect("composes");
+        let (tree, warnings) =
+            compose_market_tree(&records, &[None, None], &[], None).expect("composes");
         let gated = tree
             .nodes
             .iter()
@@ -2668,6 +2674,7 @@ mod tests {
                     created_at: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                     outcome: Some(outcome),
                     resolved_at: Some(chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()),
+                    category: None,
                 },
             );
         }
@@ -2784,6 +2791,7 @@ mod tests {
                     created_at: chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
                     outcome: None,
                     resolved_at: None,
+                    category: None,
                 },
             );
             store.insert(
@@ -2798,6 +2806,7 @@ mod tests {
                     created_at: chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap(),
                     outcome: Some(true),
                     resolved_at: Some(chrono::NaiveDate::from_ymd_opt(2025, 6, 1).unwrap()),
+                    category: None,
                 },
             );
             store.force_compact(); // ensure snapshot is written
