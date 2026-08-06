@@ -1844,13 +1844,13 @@ mod tests {
         // Critical alert: confidence 1.0, message preserved
         assert_eq!(calls[0].0, "Critical test alert");
         assert!((calls[0].1 - 1.0).abs() < f64::EPSILON, "critical confidence must be 1.0");
-        assert!(calls[0].2.contains("\"severity\": \"Critical\""), "error_context must carry severity");
-        assert!(calls[0].2.contains("\"domain\": \"test_domain\""), "error_context must carry domain");
+        assert!(calls[0].2.contains("\"severity\":\"Critical\""), "error_context must carry severity");
+        assert!(calls[0].2.contains("\"domain\":\"test_domain\""), "error_context must carry domain");
 
         // Warning alert: confidence 0.5
         assert_eq!(calls[1].0, "Warning test alert");
         assert!((calls[1].1 - 0.5).abs() < f64::EPSILON, "warning confidence must be 0.5");
-        assert!(calls[1].2.contains("\"severity\": \"Warning\""), "error_context must carry severity");
+        assert!(calls[1].2.contains("\"severity\":\"Warning\""), "error_context must carry severity");
     }
 
     /// When no `AlertEscalationSink` is wired, `persist_alert_to_queue` must
