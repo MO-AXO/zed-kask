@@ -697,6 +697,12 @@ fn main() {
         let alert_email_sink: Option<std::sync::Arc<dyn hkask_regulation::AlertEmailSink>> =
             hkask_email::CuratorAlertEmailSink::try_from_env(kask_runtime_handle);
 
+        // Determine kask settings once for both the algedonic-threshold wiring
+        // below and the MCP-server auto-launch / curator-always-on gating further
+        // down. Defined here (before the algedonic block) so the threshold is in
+        // scope; the later reference at the MCP-launch block reuses this binding.
+        let kask_settings_for_mcp = kask_bridge::KaskSettings::get_global(cx).clone();
+
         // Wire `kask.curator.algedonic_threshold` (0.0–1.0, default 0.8) to
         // scale `SetPoints.variety_max_deficit` (default 100.0). Higher
         // threshold = more sensitive = lower deficit tolerance. Mapping:
@@ -766,7 +772,8 @@ fn main() {
         // because the McpRuntime governance gate (line ~727) needs it
         // regardless — governed tool calls are charged against the call cap
         // even when the tick cycle isn't running.
-        let cybernetics_loop_for_tick = cybernetics_loop.clone();
+        // (`cybernetics_loop_for_tick` was already cloned above, before the
+        // `with_governance` move, so it remains usable here.)
 
         // Curator metacognition loop — runs sense→compare→compute→act cycles.
         // Reads from RegulationLedger (populated by the CyberneticsLoop tick
@@ -846,7 +853,8 @@ fn main() {
         // The actual launch is deferred until the Zed user resolves (see the
         // deferred task below) so MCP servers can route inference through zed's
         // LanguageModelRegistry via the IPC socket.
-        let kask_settings_for_mcp = kask_bridge::KaskSettings::get_global(cx).clone();
+        // (`kask_settings_for_mcp` was defined above, before the algedonic-threshold
+        // wiring, so it's in scope here.)
 
         // Gate the regulation tick cycles on `kask.curator.always_on`.
         // The loops were constructed above (the McpRuntime governance gate
@@ -2165,8 +2173,10 @@ fn main() {
                 .enterprise_uri
                 .clone(),
         };
+        let credentials_provider = zed_credentials_provider::global(cx);
         copilot_chat::init(
             app_state.client.http_client(),
+            credentials_provider,
             copilot_chat_configuration,
             cx,
         );
