@@ -1118,6 +1118,27 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn soft_evidence_updates_marginal_without_clamping(cx: &mut gpui::TestAppContext) {
+        // make_body: a (root, P=0.5) → b (conditionals [0.1, 0.6]).
+        // Base P(b) = 0.1*0.5 + 0.6*0.5 = 0.35.
+        // Soft evidence on a with LR=3.0: P'(a) = 0.5*3 / (0.5*3 + 0.5) = 0.75.
+        // Then P(b) re-propagates: 0.1*0.25 + 0.6*0.75 = 0.025 + 0.45 = 0.475.
+        let widget = cx.new(|cx| GraphWidget::new(make_body(), cx));
+        widget.update(cx, |w, cx| w.set_soft_evidence(0, 3.0, cx));
+        let marginals = widget.read_with(cx, |w, _| {
+            w.layout
+                .nodes
+                .iter()
+                .map(|n| n.marginal_probability.unwrap_or(0.0))
+                .collect::<Vec<_>>()
+        });
+        // P(a) should be 0.75 (Bayesian update, not clamped).
+        assert!((marginals[0] - 0.75).abs() < 1e-6, "P(a) = {}, expected 0.75", marginals[0]);
+        // P(b) should re-propagate to 0.475.
+        assert!((marginals[1] - 0.475).abs() < 1e-6, "P(b) = {}, expected 0.475", marginals[1]);
+    }
+
+    #[gpui::test]
     async fn load_branch_restores_evidence(cx: &mut gpui::TestAppContext) {
         let widget = cx.new(|cx| GraphWidget::new(make_body(), cx));
         widget.update(cx, |w, cx| w.set_evidence(0, 0.9, cx));
