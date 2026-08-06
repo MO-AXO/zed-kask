@@ -423,7 +423,7 @@ fn conditional_for_parent(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block::{DependencyBody, GraphBlockBody, NodeBody};
+    use crate::block::{DependencyBody, EvidenceKind, GraphBlockBody, NodeBody};
 
     fn node(id: &str, prob: f64, parents: &[&str]) -> NodeBody {
         NodeBody {
@@ -686,6 +686,37 @@ mod tests {
             "backward inference should increase P(a) above 0.5, got {}",
             posteriors[0]
         );
+    }
+
+    #[test]
+    fn soft_evidence_applies_bayesian_update() {
+        // Soft evidence with LR=1.0 is a no-op; LR=3.0 on prior 0.5 yields 0.75.
+        // P' = P·LR / (P·LR + (1−P)) = 0.5·3 / (0.5·3 + 0.5) = 1.5 / 2.0 = 0.75.
+        let a = node("a", 0.5, &[]);
+        let (body, topo) = body(vec![a], vec![0]);
+        let mut evidence = HashMap::new();
+        evidence.insert(0, EvidenceKind::Soft(1.0));
+        let m = recompute_marginals(&body, &topo, &evidence);
+        assert!((m[0] - 0.5).abs() < 1e-9, "LR=1.0 no-op, got {}", m[0]);
+        let mut evidence = HashMap::new();
+        evidence.insert(0, EvidenceKind::Soft(3.0));
+        let m = recompute_marginals(&body, &topo, &evidence);
+        assert!(
+            (m[0] - 0.75).abs() < 1e-9,
+            "LR=3.0 on 0.5 → 0.75, got {}",
+            m[0]
+        );
+    }
+
+    #[test]
+    fn hard_evidence_clamps_no_regression() {
+        // Hard evidence clamps the marginal to the set value (original behavior).
+        let a = node("a", 0.5, &[]);
+        let (body, topo) = body(vec![a], vec![0]);
+        let mut evidence = HashMap::new();
+        evidence.insert(0, EvidenceKind::Hard(0.9));
+        let m = recompute_marginals(&body, &topo, &evidence);
+        assert!((m[0] - 0.9).abs() < 1e-9, "hard clamp, got {}", m[0]);
     }
 
     #[test]
