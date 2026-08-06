@@ -1776,4 +1776,101 @@ mod tests {
             "quality should be computed after tick"
         );
     }
+
+    /// A capturing `AlertEscalationSink` for testing the escalation-queue
+    /// wiring. Records every `persist_alert` call so the test can assert the
+    /// alert reached the reviewable backlog.
+    struct CapturingEscalationSink {
+        calls: std::sync::Mutex<Vec<(String, f64, String)>>,
+    }
+
+    impl CapturingEscalationSink {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, f64, String)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::algedonic::AlertEscalationSink for CapturingEscalationSink {
+        fn persist_alert(&self, output: &str, confidence: f64, error_context: &str) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((output.to_string(), confidence, error_context.to_string()));
+        }
+    }
+
+    /// `persist_alert_to_queue` must write to the `AlertEscalationSink` when
+    /// wired. This pins the Store seam: if the sink call is dropped or guarded
+    /// by the wrong condition, the alert never reaches the reviewable backlog
+    /// and `curator_escalations` returns `count: 0` — the loop is open.
+    #[tokio::test]
+    async fn persist_alert_to_queue_writes_to_escalation_sink() {
+        let ledger = Arc::new(RwLock::new(RegulationLedger::with_threshold(100)));
+        let sink = Arc::new(CapturingEscalationSink::new());
+        let loop_instance = CyberneticsLoop::new(ledger)
+            .with_alert_escalation_sink(sink.clone() as Arc<dyn crate::algedonic::AlertEscalationSink>);
+
+        let critical_alert = RuntimeAlert {
+            domain: "test_domain".to_string(),
+            deficit: 150,
+            threshold: 100,
+            severity: AlertSeverity::Critical,
+            escalated: true,
+            timestamp: chrono::Utc::now(),
+            message: "Critical test alert".to_string(),
+        };
+        loop_instance.persist_alert_to_queue(&critical_alert);
+
+        let warning_alert = RuntimeAlert {
+            domain: "test_domain".to_string(),
+            deficit: 60,
+            threshold: 100,
+            severity: AlertSeverity::Warning,
+            escalated: false,
+            timestamp: chrono::Utc::now(),
+            message: "Warning test alert".to_string(),
+        };
+        loop_instance.persist_alert_to_queue(&warning_alert);
+
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 2, "both alerts must reach the escalation sink");
+
+        // Critical alert: confidence 1.0, message preserved
+        assert_eq!(calls[0].0, "Critical test alert");
+        assert!((calls[0].1 - 1.0).abs() < f64::EPSILON, "critical confidence must be 1.0");
+        assert!(calls[0].2.contains("\"severity\": \"Critical\""), "error_context must carry severity");
+        assert!(calls[0].2.contains("\"domain\": \"test_domain\""), "error_context must carry domain");
+
+        // Warning alert: confidence 0.5
+        assert_eq!(calls[1].0, "Warning test alert");
+        assert!((calls[1].1 - 0.5).abs() < f64::EPSILON, "warning confidence must be 0.5");
+        assert!(calls[1].2.contains("\"severity\": \"Warning\""), "error_context must carry severity");
+    }
+
+    /// When no `AlertEscalationSink` is wired, `persist_alert_to_queue` must
+    /// be a no-op (not panic). This pins the best-effort contract: a missing
+    /// sink never breaks the regulation loop.
+    #[tokio::test]
+    async fn persist_alert_to_queue_no_op_when_sink_absent() {
+        let ledger = Arc::new(RwLock::new(RegulationLedger::with_threshold(100)));
+        let loop_instance = CyberneticsLoop::new(ledger);
+
+        let alert = RuntimeAlert {
+            domain: "test_domain".to_string(),
+            deficit: 150,
+            threshold: 100,
+            severity: AlertSeverity::Critical,
+            escalated: true,
+            timestamp: chrono::Utc::now(),
+            message: "Critical test alert".to_string(),
+        };
+        // Must not panic — the sink is None.
+        loop_instance.persist_alert_to_queue(&alert);
+    }
 }
