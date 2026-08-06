@@ -351,6 +351,7 @@ impl PredictionMarketsServer {
                 records.truncate(req.limit.unwrap_or(10).min(50) as usize);
                 serde_json::to_value(&records).map_err(|e| {
                     hkask_mcp_server::server::McpToolError::internal(format!(
+                        // rr0044-ok: serialize-own-struct
                         "record serialization failed: {e}"
                     ))
                 })
