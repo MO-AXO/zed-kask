@@ -18,6 +18,11 @@ name = "swarm_gap_properties"
 path = "tests/swarm_gap_properties.rs"
 required-features = ["test-utils"]
 
+[[test]]
+name = "swarm_live_probes"
+path = "tests/swarm_live_probes.rs"
+required-features = ["test-utils"]
+
 [dependencies]
 hkask-mcp-server.workspace = true
 hkask-types.workspace = true
