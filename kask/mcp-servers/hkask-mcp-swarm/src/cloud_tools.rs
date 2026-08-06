@@ -870,6 +870,19 @@ impl SwarmServer {
                 },
                 "visibility": req.visibility.unwrap_or_else(|| "private".to_string()),
             });
+            // fermi v0.11.6 (mig-177): `agents.mcp_servers` is the inbound
+            // direction — third-party MCP servers this agent may call as a
+            // client. Distinct from `mcp_tools` (outbound — what the agent
+            // exposes). Inject only when the caller supplied a value so
+            // `None` preserves the prior behavior (fermi inherits from the
+            // filesystem card via NULL column); `Some([])` is authoritative
+            // "no servers"; `Some([...])` is authoritative replacement.
+            // Secrets are referenced by `auth.secret_key` (agent owner's
+            // scoped secret store) — never inlined here.
+            if let Some(mcp_servers) = req.mcp_servers {
+                card["capabilities"]["mcp_servers"] = serde_json::to_value(&mcp_servers)
+                    .unwrap_or_else(|_| serde_json::json!([]));
+            }
             // Valence (personality encoding) goes under metadata.valence,
             // matching the ABW agent card shape (verified live 2026-08-04).
             if let Some(valence) = req.valence {

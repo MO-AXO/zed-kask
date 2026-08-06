@@ -2539,6 +2539,7 @@ impl SerializableItem for SwarmPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse::{AgentListResponse, WorkspaceListResponse};
 
     // Pins the tool name strings the panel calls. The single source of truth
     // is `parse::SWARM_TOOLS` — a rename in `hkask-mcp-swarm` must update that
