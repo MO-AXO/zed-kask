@@ -60,44 +60,6 @@ pub struct MappedEvent {
     pub base_object: Option<BaseEconomicObject>,
 }
 
-/// Compute the FIBO concept similarity between two mapped events.
-///
-/// - Same concept: 1.0
-/// - Same FIBO module (e.g. both `fibo-ind-ir-ir:*`): 0.5
-/// - Different module: 0.0
-fn fibo_similarity(a: fibo::FiboConcept, b: fibo::FiboConcept) -> f64 {
-    if a == b {
-        return 1.0;
-    }
-    // Extract the module prefix (e.g. "fibo-ind-ir-ir" from "fibo-ind-ir-ir:PolicyInterestRate").
-    let module_a = a.split(':').next().unwrap_or("");
-    let module_b = b.split(':').next().unwrap_or("");
-    if module_a == module_b && !module_a.is_empty() {
-        0.5
-    } else {
-        0.0
-    }
-}
-
-/// Compute the Dublin Core state similarity between two mapped events.
-///
-/// State similarity is the Jaccard overlap of DC subjects (the "what is this"
-/// axis) — events about the same economic subject cluster together.
-fn dc_state_similarity(a: &MappedEvent, b: &MappedEvent) -> f64 {
-    if a.dc_subjects.is_empty() || b.dc_subjects.is_empty() {
-        return 0.0;
-    }
-    let set_a: std::collections::HashSet<&str> = a.dc_subjects.iter().map(|s| s.as_str()).collect();
-    let set_b: std::collections::HashSet<&str> = b.dc_subjects.iter().map(|s| s.as_str()).collect();
-    let intersection = set_a.intersection(&set_b).count() as f64;
-    let union = set_a.union(&set_b).count() as f64;
-    if union == 0.0 {
-        0.0
-    } else {
-        intersection / union
-    }
-}
-
 /// A constellation of events clustered around a base economic object.
 ///
 /// The constellation is the set of events whose graph proximity to the base
@@ -584,31 +546,6 @@ mod tests {
             None,
         );
         assert!(event.is_none(), "non-economic events must not map");
-    }
-
-    #[test]
-    fn fibo_similarity_same_concept_is_one() {
-        assert_eq!(
-            fibo_similarity(fibo::POLICY_INTEREST_RATE, fibo::POLICY_INTEREST_RATE),
-            1.0
-        );
-    }
-
-    #[test]
-    fn fibo_similarity_same_module_is_half() {
-        // PolicyInterestRate and TreasuryYield are both fibo-ind-ir-ir.
-        assert_eq!(
-            fibo_similarity(fibo::POLICY_INTEREST_RATE, fibo::TREASURY_YIELD),
-            0.5
-        );
-    }
-
-    #[test]
-    fn fibo_similarity_different_module_is_zero() {
-        assert_eq!(
-            fibo_similarity(fibo::POLICY_INTEREST_RATE, fibo::MARKET_INDEX),
-            0.0
-        );
     }
 
     #[test]
