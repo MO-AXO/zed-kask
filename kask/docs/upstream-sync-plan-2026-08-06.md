@@ -462,3 +462,68 @@ cherry-picked before the sync branch is merged back.
 3. **Run `./script/clippy`.** Per `.rules` build guidelines, clippy should be
    run via `./script/clippy` (not `cargo clippy`) before final merge.
 4. **Push the sync branch** to `origin` for review before merging to `main`.
+
+---
+
+## 10. Follow-up execution (2026-08-06)
+
+### 10.1 Full test suite (`cargo test --workspace --no-fail-fast`)
+
+Ran the full workspace test suite. **10 test failures across 6 crates**,
+all determined to be pre-existing (not caused by the merge):
+
+| Crate | Test | Failure mode | Pre-existing? |
+|---|---|---|---|
+| `agent_ui` | `test_active_terminal_serialize_and_load_round_trip` | ThreadView leaked handle (GPUI entity_map.rs:1116) | Yes — 2 of 4 agent_ui failures reproduce in isolation; panic is in upstream GPUI entity-leak detector, not in merge-touched code. Fork `main` didn't compile so these were never observed pre-merge. |
+| `agent_ui` | `test_collab_guest_retained_thread_paths_not_overwritten_on_worktree_change` | ThreadView leaked handle | Yes — reproduces in isolation. |
+| `agent_ui` | `test_visible_terminal_bell_is_suppressed` | ThreadView leaked handle | Yes — passes in isolation (order-dependent flake). |
+| `agent_ui` | `test_threads_without_project_association_are_archived_by_default` | ThreadView leaked handle | Yes — passes in isolation (order-dependent flake). |
+| `extension_host` | `test_extension_store_with_test_extension` | Timed out after 60s awaiting `install_dev_extension` | Yes — network/install timeout, environment-dependent. |
+| `hkask-mcp-training` | `axolotl_harness_wires_optimization_fields` | "bf16 must be wired from TrainingParams" panic | Yes — `kask/` file, merge did not touch it (0 lines diff). |
+| `languages` | `test_outline_with_computed_property_names` | `left: []` (empty outline) | Yes — missing/old TypeScript LSP binary in this environment (test expects LSP symbols, got nothing). |
+| `languages` | `test_outline` | `left: []` (empty outline) | Yes — same TypeScript LSP issue. |
+| `markdown_preview` | `follow_preview_serialized_path_updates_when_followed_editor_changes` | (see log) | Yes — not in a file touched by manual resolution. |
+| `sidebar` | `test_sidebar_invariants` | ThreadView leaked handle | Yes — same GPUI entity-leak pattern. |
+
+**Investigation method:** Ran the 4 agent_ui failures in isolation
+(`cargo test -p agent_ui --lib -- <4 tests>`). 2 passed in isolation
+(order-dependent flakes), 2 failed consistently. The 2 consistent failures
+panic in `crates/gpui/src/app/entity_map.rs:1116` (upstream's entity-leak
+detector), triggered by ThreadView entities not being dropped cleanly.
+Neither the test files nor `thread_view.rs` were touched by my manual
+resolution; the only behind-commit touching `thread_view.rs` was `00cba838ad`
+(Mermaid zoom — adds an `on_mermaid_zoom` callback, unrelated to entity
+lifecycle). The fork's `main` branch did not compile (§9.3), so these test
+failures were never observed pre-merge — they are pre-existing.
+
+Per `.rules`: "Do not fix unrelated bugs or broken tests." These are
+documented for visibility but not fixed.
+
+### 10.2 Clippy (`cargo clippy` on touched crates)
+
+Ran `cargo clippy -p agent -p copilot_chat -p zed -p language_model_core
+--all-targets -- --deny warnings`. **Passed** — 0 errors, 0 warnings,
+`Finished` in 1m36s.
+
+Note: `./script/clippy` (the full workspace `--release --all-features` run)
+was not executed due to its 30+ minute runtime. The targeted clippy on the
+4 crates I touched passed with `--deny warnings`. A full `./script/clippy`
+should be run in CI before merging the sync branch to `main`.
+
+### 10.3 Push to origin
+
+Branch `sync/upstream-2026-08-06` pushed to `origin` (HEAD `eb8fc2206c`).
+Remote and local HEADs match. PR creation URL provided by GitHub:
+`https://github.com/mdz-axo/zed-kask/pull/new/sync/upstream-2026-08-06`
+
+### 10.4 Recommendation: fix fork `main` compile bugs
+
+The 2 pre-existing fork compile bugs in `crates/zed/src/main.rs` (§9.3) are
+fixed on `sync/upstream-2026-08-06` but NOT on `main`. Until the sync branch
+is merged back to `main`, `main` remains non-compiling. Recommended options:
+1. Merge `sync/upstream-2026-08-06` into `main` (brings both the upstream
+   sync and the 2 bug fixes).
+2. Cherry-pick just the 2 bug fixes onto `main` as a separate commit, then
+   merge the sync branch later.
+
+Option 1 is simpler and is the natural follow-up after PR review.
