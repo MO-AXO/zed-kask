@@ -2037,38 +2037,11 @@ mod tests {
 
     #[test]
     fn domain_bias_delta_data_derived_when_underconfident() {
-        // 6 resolved forecasts at p=0.7, all missed (outcome=false). The
-        // domain is underconfident (forecasts say 70% but reality is 0%).
-        // bias = expected − hit_rate = 0.7 − 0.0 = 0.7 (underconfident).
-        // δ = |bias| = 0.7, clamped to 0.5.
-        let mut store = ForecastStore::default();
-        for i in 0..6 {
-            store.insert(
-                format!("f{i}"),
-                StoredForecastRecord {
-                    schema_version: 2,
-                    forecast_id: format!("f{i}"),
-                    event_id: format!("e{i}"),
-                    event_name: format!("e{i}"),
-                    subject: "test".into(),
-                    probability: 0.7,
-                    created_at: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
-                    outcome: Some(false),
-                    resolved_at: Some(chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()),
-                    category: Some("Elections".into()),
-                },
-            );
-        }
-        let delta = domain_bias_delta(Some(&store), "Elections");
-        assert!(delta > 0.0, "underconfident domain must get δ > 0: {delta}");
-        assert!(delta <= 0.5, "δ must be clamped to 0.5: {delta}");
-    }
-
-    #[test]
-    fn domain_bias_delta_zero_when_overconfident() {
         // 6 resolved forecasts at p=0.3, all hit (outcome=true). The domain
-        // is overconfident (forecasts say 30% but reality is 100%). De-compression
-        // would make overconfidence worse, so δ=0.0.
+        // is underconfident (forecasts say 30% but reality is 100%).
+        // bias = expected − hit_rate = 0.3 − 1.0 = −0.7 (negative = underconfident).
+        // δ = |bias| = 0.7, clamped to 0.5. De-compression corrects
+        // underconfidence by moving probabilities away from 0.5.
         let mut store = ForecastStore::default();
         for i in 0..6 {
             store.insert(
@@ -2082,6 +2055,35 @@ mod tests {
                     probability: 0.3,
                     created_at: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
                     outcome: Some(true),
+                    resolved_at: Some(chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()),
+                    category: Some("Elections".into()),
+                },
+            );
+        }
+        let delta = domain_bias_delta(Some(&store), "Elections");
+        assert!(delta > 0.0, "underconfident domain must get δ > 0: {delta}");
+        assert!(delta <= 0.5, "δ must be clamped to 0.5: {delta}");
+    }
+
+    #[test]
+    fn domain_bias_delta_zero_when_overconfident() {
+        // 6 resolved forecasts at p=0.7, all missed (outcome=false). The
+        // domain is overconfident (forecasts say 70% but reality is 0%).
+        // bias = expected − hit_rate = 0.7 − 0.0 = 0.7 (positive = overconfident).
+        // De-compression would make overconfidence worse, so δ=0.0.
+        let mut store = ForecastStore::default();
+        for i in 0..6 {
+            store.insert(
+                format!("f{i}"),
+                StoredForecastRecord {
+                    schema_version: 2,
+                    forecast_id: format!("f{i}"),
+                    event_id: format!("e{i}"),
+                    event_name: format!("e{i}"),
+                    subject: "test".into(),
+                    probability: 0.7,
+                    created_at: chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap(),
+                    outcome: Some(false),
                     resolved_at: Some(chrono::NaiveDate::from_ymd_opt(2026, 2, 1).unwrap()),
                     category: Some("Elections".into()),
                 },

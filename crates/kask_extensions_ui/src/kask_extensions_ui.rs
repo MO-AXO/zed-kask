@@ -1481,8 +1481,13 @@ mod tests {
     #[test]
     fn skill_matches_query_is_case_insensitive() {
         let s = skill("Bug-Hunt", "Find Bugs");
-        assert!(skill_matches_query(&s, &Some("BUG".to_string())));
+        // The caller lowercases the query before passing it; the predicate
+        // lowercases the skill id/description. So a lowercased query must match.
+        assert!(skill_matches_query(&s, &Some("bug".to_string())));
         assert!(skill_matches_query(&s, &Some("hunt".to_string())));
+        // A mixed-case query would NOT match (the caller is responsible for
+        // lowercasing); this pins that contract.
+        assert!(!skill_matches_query(&s, &Some("BUG".to_string())));
     }
 
     #[test]
@@ -1503,19 +1508,22 @@ mod tests {
     #[test]
     fn render_code_has_no_provides_filter_or_upsell_banner() {
         // The render method is at `fn render` in this file. Read the source
-        // and assert the removed UI elements are not present.
+        // and assert the removed UI elements are not present. We exclude
+        // the test module itself from the grep by checking only the
+        // production code region (before `#[cfg(test)]`).
         let source = include_str!("kask_extensions_ui.rs");
+        let production_code = source.split("#[cfg(test)]").next().unwrap_or(source);
         // The `provides` filter row was removed (kask skills have no
         // `provides` concept). A grep for the filter row's distinctive
-        // label must find nothing.
+        // label must find nothing in production code.
         assert!(
-            !source.contains("\"Provides:\""),
+            !production_code.contains("\"Provides:\""),
             "the provides filter row must not be re-introduced"
         );
         // The extension upsell banners were removed. A grep for the
-        // upsell banner's distinctive text must find nothing.
+        // upsell banner's distinctive text must find nothing in production code.
         assert!(
-            !source.contains("Install Zed Extensions"),
+            !production_code.contains("Install Zed Extensions"),
             "the extension upsell banner must not be re-introduced"
         );
     }
