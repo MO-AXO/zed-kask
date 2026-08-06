@@ -219,31 +219,40 @@ alerts are forwarded to the sink.
 
 ## Efferent action dispatch
 
-The `CyberneticsLoop::act()` method converts **all** computed
-`RegulatoryAction`s into `Escalate` alerts routed to the Curator/human via
-the existing three-tier alert path (live channel → archive → email). The loop
-is a **sensor+advisor**, not an actuator.
+The `CyberneticsLoop::act()` method converts computed `RegulatoryAction`s
+into `Escalate` alerts routed to the Curator/human via the existing
+three-tier alert path (live channel → archive → email). The loop is a
+**sensor+advisor**, not an actuator.
 
 ### Design rationale
 
 The loop computes actions of type `Throttle`, `CircuitBreak`,
-`AdjustEnergyBudget`, `OverrideEnergyBudget`, `Notify`, `Substitute`, and
-`Calibrate` in addition to `Escalate`. These are _efferent signals_ — they
-would modify system behavior if dispatched (reduce inference rate, stop a
-loop, change a gas cap, etc.). The design decision is that the loop does not
-dispatch them autonomously. Instead:
+`AdjustEnergyBudget`, `OverrideEnergyBudget`, `ReplenishBudget`, `Prune`,
+and `Calibrate` in addition to `Escalate` and `Notify`. These are _efferent
+signals_ — they would modify system behavior if dispatched (reduce inference
+rate, stop a loop, change a gas cap, etc.). The design decision is that the
+loop does not dispatch them autonomously. Instead:
 
-1. Every action is converted to a `RuntimeAlert` with `AlertSeverity::Critical`.
-2. Actions that would have been direct efferent signals carry an
+1. Efferent actions (all types except `Escalate` and `Notify`) are converted
+   to a `RuntimeAlert` with `AlertSeverity::Critical`.
+2. `Notify` actions are **skipped** — they are observational ("no action
+   required, positive signal" per `ActionType::Notify`'s doc). Converting
+   them to Critical alerts would be a variety inversion (positive signal →
+   critical alert) and would pollute the escalation queue with non-actionable
+   noise.
+3. Actions that would have been direct efferent signals carry an
    `efferent_action` field in the persisted alert data (the `ActionType::as_str()`
-   of the original action, e.g. `"Throttle"`, `"CircuitBreak"`).
-3. The alert's `domain` is set to `efferent:{action_type}` for converted
+   of the original action, e.g. `"Throttle"`, `"CircuitBreak"`). This field
+   is included in both the primary escalation queue (`persist_alert_to_queue`)
+   and the archive fallback JSON, so the Curator's `curator_escalations` tool
+   sees the recommended action as structured data.
+4. The alert's `domain` is set to `efferent:{action_type}` for converted
    actions (empty string for native `Escalate` actions, preserving the
    prior behavior).
-4. The alert's `message` explains what the loop would have done and why:
+5. The alert's `message` explains what the loop would have done and why:
    `"Efferent action Throttle (target: Inference) recommended but not wired —
 reason: energy_budget_low"`.
-5. The alert flows through the standard three-tier path: live channel
+6. The alert flows through the standard three-tier path: live channel
    (`alerts_tx` → `MetacognitionLoop` → `ToastAlertSink`), archive
    (`RegulationSink::persist`), and email (`AlertEmailSink`).
 
@@ -270,13 +279,26 @@ Two reasons:
 
 `verify_impact()` classifies each action as Accept/Stage/Block based on
 whether the target metric improved. Since efferent actions are not executed
-(the actuator is not wired), the metric does not change, so `verify_impact`
-will typically classify them as Stage or Block. This is correct behavior: it
-surfaces that the recommended action did not improve the metric, which is
-true — it wasn't applied. The `StagnationDetector` and `try_substitute`
-ladder then explore alternative action types, which are _also_ routed as
-Escalate alerts. The loop cycles through the action space, advising the
-Curator at each step.
+(the actuator is not wired), the metric does not change.
+
+**Important:** `verify_impact` only handles four `RegulationData` variants
+(`EnergyBudgetLow`, `BudgetGuardEscalation`, `EnergyDepletionAutoAdjust`,
+`VarietyDeficitExceeded`). All other variants hit `_ => continue` and are
+**not classified** — they don't feed the `StagnationDetector` or
+`StrategyEvaluator`. This is a pre-existing gap, not introduced by the
+efferent dispatch refactor.
+
+For the four handled variants: a non-executed action produces zero metric
+change, which `classify_decision` treats as **Accept** (zero worsening is in
+the Accept band, not Stage/Block — those require worsening above
+`stage_worsening_ratio`). This means the loop records the non-action as
+"effective," and `try_substitute` does **not** fire for zero-worsening
+cases. Substitution only triggers when the underlying metric **worsens**
+despite the non-action — at which point the ladder cycles through
+alternative action types, each producing a new efferent alert. This can
+produce multiple Critical alerts for a persistent deviation (alert flood
+risk). The `StagnationDetector`'s `RegulatoryPlateauDetected` span is the
+signal that the loop has exhausted its substitution ladder.
 
 ### Future: wiring the actuators
 
