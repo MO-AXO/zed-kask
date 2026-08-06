@@ -1558,7 +1558,7 @@ pub fn export_csv(store: &PortfolioStore, name: &str) -> Result<String, Portfoli
 
 pub mod server;
 
-pub use server::run;
+pub use server::{map_portfolio_error, run};
 
 #[cfg(test)]
 mod tests;
