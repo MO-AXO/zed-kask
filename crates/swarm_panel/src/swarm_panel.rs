@@ -20,9 +20,11 @@
 //! **Steer mode** hosts a `ConversationView` scoped to the swarm MCP server.
 //! The operator asks the curator to compose/steer a swarm; the curator's
 //! `SkillTool` invokes the `swarm-intelligence` cascade (see
-//! `kask/docs/plans/abw-swarm-intelligence.md` §13). The conversation is not
-//! persisted — re-clicking Steer after a restart starts a fresh composition
-//! conversation.
+//! `kask/docs/plans/abw-swarm-intelligence.md` §13). The conversation is
+//! persisted via the global `ThreadStore` — the curator's live state
+//! (in-flight plans, collected `delegate_results`, prior iterations)
+//! survives panel close and restart, and every turn is ingested into the
+//! curator's sovereign memory for cross-composition learning.
 
 mod author;
 mod card;
@@ -712,7 +714,7 @@ impl SwarmPanel {
         let thread_store = ThreadStore::global(cx);
         let mode = Self::current_swarm_mode(cx);
         let agent_server = std::rc::Rc::new(
-            agent::CuratorAgentServer::new(self.fs.clone(), thread_store)
+            agent::CuratorAgentServer::new(self.fs.clone(), thread_store.clone())
                 .with_extra_static_context(steer_system_prompt(
                     self.selected_workspace.as_deref(),
                     mode,
@@ -740,7 +742,7 @@ impl SwarmPanel {
                 // empty so the operator types their composition intent.
                 self.workspace.clone(),
                 self.project.clone(),
-                None, // no thread_store — steer conversations are not persisted
+                Some(thread_store),
                 AgentThreadSource::AgentPanel,
                 window,
                 cx,

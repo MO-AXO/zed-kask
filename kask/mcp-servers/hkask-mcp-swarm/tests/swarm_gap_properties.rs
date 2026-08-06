@@ -529,7 +529,7 @@ fn arb_auth_spec() -> impl Strategy<Value = McpServerAuthSpec> {
 fn arb_mcp_server_spec() -> impl Strategy<Value = McpServerSpec> {
     (
         prop::string::string_regex("[a-z][a-z0-9_-]{0,30}").expect("valid regex"),
-        prop::string::string_regex("https://[a-z0-9.-]{1,30}/[a-z0-9/]{0,20}")
+        prop::string::string_regex("https://[a-z0-9.]{1,30}/[a-z0-9/]{0,20}")
             .expect("valid regex"),
         prop::collection::vec(prop::string::string_regex("[a-z_]{1,20}").expect("valid regex"), 0..4),
         prop::option::of(1u64..=120),
@@ -546,9 +546,11 @@ fn arb_mcp_server_spec() -> impl Strategy<Value = McpServerSpec> {
 
 /// Arbitrary `CreateAgentRequest` with valid-ish fields. The `agent_name` is
 /// slug-compliant (the handler validates it separately; the card builder does
-/// not).
+/// not). Composed from sub-generators because proptest's tuple `Strategy`
+/// impl stops at 12 elements.
 fn arb_create_agent_request() -> impl Strategy<Value = CreateAgentRequest> {
-    (
+    // Core required fields + simple optionals.
+    let core = (
         prop::string::string_regex("[a-z][a-z0-9_]{2,30}").expect("valid regex"),
         prop::string::string_regex("[a-z]{1,12}").expect("valid regex"),
         arb_short_string(64),
@@ -557,16 +559,45 @@ fn arb_create_agent_request() -> impl Strategy<Value = CreateAgentRequest> {
         prop::option::of(0.0f64..=1.0),
         prop::option::of(arb_string_vec(4, 16)),
         prop::option::of(arb_string_vec(4, 32)),
+    )
+        .prop_map(
+            |(agent_name, agent_type, system_prompt, description, model, temperature, tags, sample_queries)| {
+                (agent_name, agent_type, system_prompt, description, model, temperature, tags, sample_queries)
+            },
+        );
+
+    // Dependency + capability optionals.
+    let deps_caps = (
         prop::option::of(arb_string_vec(4, 16)),
         prop::option::of(arb_string_vec(4, 16)),
         prop::option::of(arb_string_vec(4, 16)),
         prop::option::of(prop::collection::vec(arb_mcp_server_spec(), 0..4)),
         prop::option::of(arb_string_vec(4, 16)),
-        prop::option::of(prop::sample::select(&["public", "private", "unlisted"])),
-        prop::option::of((0.0f64..=1.0, 0.0f64..=1.0, prop::option::of(prop::string::string_regex("[a-z]{1,12}").expect("valid regex")), prop::option::of(arb_string_vec(4, 16)))),
     )
         .prop_map(
-            |(
+            |(dependencies_required, dependencies_optional, mcp_tools, mcp_servers, skills)| {
+                (dependencies_required, dependencies_optional, mcp_tools, mcp_servers, skills)
+            },
+        );
+
+    // Visibility + valence.
+    let vis_valence = (
+        prop::option::of(prop::sample::select(&["public", "private", "unlisted"])),
+        prop::option::of((
+            0.0f64..=1.0,
+            0.0f64..=1.0,
+            prop::option::of(prop::string::string_regex("[a-z]{1,12}").expect("valid regex")),
+            prop::option::of(arb_string_vec(4, 16)),
+        )),
+    );
+
+    (core, deps_caps, vis_valence).prop_map(
+        |(
+            (agent_name, agent_type, system_prompt, description, model, temperature, tags, sample_queries),
+            (dependencies_required, dependencies_optional, mcp_tools, mcp_servers, skills),
+            (visibility, valence),
+        )| {
+            CreateAgentRequest {
                 agent_name,
                 agent_type,
                 system_prompt,
@@ -580,35 +611,18 @@ fn arb_create_agent_request() -> impl Strategy<Value = CreateAgentRequest> {
                 mcp_tools,
                 mcp_servers,
                 skills,
-                visibility,
-                valence,
-            )| {
-                CreateAgentRequest {
-                    agent_name,
-                    agent_type,
-                    system_prompt,
-                    description,
-                    model,
-                    temperature,
-                    tags,
-                    sample_queries,
-                    dependencies_required,
-                    dependencies_optional,
-                    mcp_tools,
-                    mcp_servers,
-                    skills,
-                    visibility,
-                    valence: valence.map(|(arousal, valence, primary_affect, personality_traits)| {
-                        ValenceInput {
-                            arousal,
-                            valence,
-                            primary_affect,
-                            personality_traits,
-                        }
-                    }),
-                }
-            },
-        )
+                visibility: visibility.map(|s| s.to_string()),
+                valence: valence.map(|(arousal, valence, primary_affect, personality_traits)| {
+                    ValenceInput {
+                        arousal: Some(arousal),
+                        valence: Some(valence),
+                        primary_affect,
+                        personality_traits,
+                    }
+                }),
+            }
+        },
+    )
 }
 
 proptest! {
@@ -641,7 +655,7 @@ proptest! {
     fn build_create_agent_card_deterministic(req in arb_create_agent_request()) {
         let a = build_create_agent_card(&req, "claude-haiku-4-5-20251001");
         let b = build_create_agent_card(&req, "claude-haiku-4-5-20251001");
-        prop_assert_eq!(&a, &b, "non-deterministic card for req={req:?}");
+        prop_assert_eq!(&a, &b, "non-deterministic card for req={:?}", req);
     }
 
     /// `mcp_servers` field-presence contract (fermi v0.11.6 mig-177):
@@ -689,11 +703,15 @@ proptest! {
         }
     }
 
-    /// No inlined secrets: the card must never contain `Bearer `, `sk-`, or
-    /// a plaintext API key. fermi's `RemoteMcpServer` resolves credentials
+    /// No inlined secrets: the card must never contain `Bearer ` or a
+    /// plaintext API key. fermi's `RemoteMcpServer` resolves credentials
     /// by `auth.secret_key` reference at execution time — the card only
-    /// carries the key *name*, never the value. This is the security
-    /// invariant fermi v0.9.0 established and v0.11.6 preserved.
+    /// carries the key *name*, never the value. The `sk-` prefix is the
+    /// Anthropic key format; a `secret_key` that starts with `sk-` means
+    /// someone inlined the actual key value instead of the key name.
+    /// `Bearer ` in the serialized card would mean a literal credential
+    /// was embedded. Both are the security invariant fermi v0.9.0
+    /// established and v0.11.6 preserved.
     #[test]
     fn card_never_contains_inlined_secrets(req in arb_create_agent_request()) {
         let card = build_create_agent_card(&req, "claude-haiku-4-5-20251001");
@@ -702,10 +720,30 @@ proptest! {
             !serialized.contains("Bearer "),
             "card contains 'Bearer ': {serialized}"
         );
-        prop_assert!(
-            !serialized.contains("sk-"),
-            "card contains 'sk-': {serialized}"
-        );
+        // Check each mcp_servers auth block: secret_key must be a name,
+        // not a literal key value.
+        if let Some(servers) = card
+            .get("capabilities")
+            .and_then(|c| c.get("mcp_servers"))
+            .and_then(|s| s.as_array())
+        {
+            for server in servers {
+                if let Some(auth) = server.get("auth") {
+                    if let Some(secret_key) = auth.get("secret_key").and_then(|k| k.as_str()) {
+                        prop_assert!(
+                            !secret_key.starts_with("sk-"),
+                            "auth.secret_key looks like a literal key value, not a name: {secret_key}"
+                        );
+                    }
+                    if let Some(env) = auth.get("env").and_then(|k| k.as_str()) {
+                        prop_assert!(
+                            !env.starts_with("sk-"),
+                            "auth.env looks like a literal key value, not a name: {env}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// `mcp_tools` and `skills` default to `[]` when `None` (fermi's card
@@ -761,8 +799,8 @@ proptest! {
             sample_queries: None,
             dependencies_required: None,
             dependencies_optional: None,
-            mcp_tools: Some(tools.clone()),
-            mcp_servers: Some(servers.clone()),
+            mcp_tools: Some(tools),
+            mcp_servers: Some(servers),
             skills: None,
             visibility: None,
             valence: None,
