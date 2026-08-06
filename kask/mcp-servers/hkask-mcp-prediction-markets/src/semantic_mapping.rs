@@ -60,20 +60,6 @@ pub struct MappedEvent {
     pub base_object: Option<BaseEconomicObject>,
 }
 
-/// The graph proximity between two mapped events.
-///
-/// Proximity is the product of FIBO concept similarity and DC state
-/// similarity, in [0.0, 1.0]. A proximity of 1.0 means the events share the
-/// same FIBO concept and have identical DC state; 0.0 means no overlap.
-#[derive(Debug, Clone, Copy)]
-pub struct GraphProximity(pub f64);
-
-impl GraphProximity {
-    pub fn value(self) -> f64 {
-        self.0
-    }
-}
-
 /// Compute the FIBO concept similarity between two mapped events.
 ///
 /// - Same concept: 1.0
@@ -110,18 +96,6 @@ fn dc_state_similarity(a: &MappedEvent, b: &MappedEvent) -> f64 {
     } else {
         intersection / union
     }
-}
-
-/// Compute the graph proximity between two mapped events.
-///
-/// Proximity = FIBO similarity × DC state similarity. The product ensures
-/// both axes must agree — an event about Fed funds and an event about oil
-/// have zero proximity even if they share a DC subject like "economics",
-/// because their FIBO concepts are in different modules.
-pub fn event_proximity(a: &MappedEvent, b: &MappedEvent) -> GraphProximity {
-    let fibo_sim = fibo_similarity(a.fibo_concept, b.fibo_concept);
-    let dc_sim = dc_state_similarity(a, b);
-    GraphProximity(fibo_sim * dc_sim)
 }
 
 /// A constellation of events clustered around a base economic object.
@@ -634,30 +608,6 @@ mod tests {
         assert_eq!(
             fibo_similarity(fibo::POLICY_INTEREST_RATE, fibo::MARKET_INDEX),
             0.0
-        );
-    }
-
-    #[test]
-    fn event_proximity_same_object_high() {
-        let a = map_kalshi_event("KXFED-1", "KXFED", "Fed funds rate?", "Economics", None).unwrap();
-        let b = map_kalshi_event("KXFED-2", "KXFED", "Fed decision?", "Economics", None).unwrap();
-        let proximity = event_proximity(&a, &b);
-        // Same FIBO concept (1.0) × overlapping DC subjects (Jaccard > 0) > 0.
-        assert!(
-            proximity.value() > 0.0,
-            "events with same FIBO concept and overlapping subjects must have positive proximity"
-        );
-    }
-
-    #[test]
-    fn event_proximity_different_object_zero() {
-        let a = map_kalshi_event("KXFED-1", "KXFED", "Fed funds rate?", "Economics", None).unwrap();
-        let b = map_kalshi_event("KXWTI-1", "KXWTI", "Oil price?", "Commodities", None).unwrap();
-        let proximity = event_proximity(&a, &b);
-        assert_eq!(
-            proximity.value(),
-            0.0,
-            "events with different FIBO modules and no shared subjects must have zero proximity"
         );
     }
 
