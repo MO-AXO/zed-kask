@@ -1163,6 +1163,16 @@ impl CyberneticsLoop {
         let start = std::time::Instant::now();
 
         let signals = self.sense().await;
+        // Emit a runtime-posture signal span so the runtime-posture-monitor
+        // skill (and any downstream observer) has a production telemetry
+        // substrate even when the skill cascade is not explicitly invoked.
+        // The namespace `reg.runtime.select` is registered in
+        // CANONICAL_NAMESPACES; without this emitter it would be skill-only.
+        tracing::info!(
+            target: "reg.runtime.select",
+            signal_count = signals.len(),
+            "REG"
+        );
         let deviations = self.compare(&signals).await;
         let actions = self.compute(&deviations).await;
         self.act(&actions).await;
