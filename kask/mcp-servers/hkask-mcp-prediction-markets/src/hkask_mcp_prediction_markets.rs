@@ -1051,6 +1051,83 @@ impl PredictionMarketsServer {
         .await
     }
 
+    /// Compute the DR-AS structural volatility forecast for a single
+    /// prediction-market contract (arXiv:2607.08199). Returns the conditional
+    /// variance, its deadline-resolution and adverse-selection decomposition,
+    /// and a 95% prediction interval. All config fields are optional with
+    /// sensible defaults from the paper.
+    #[tool(
+        description = "Compute the DR-AS structural volatility forecast (arXiv:2607.08199) for a prediction-market contract: conditional variance = p(1−p)/τ + K·ν(V)·s²/4, with a 95% prediction interval. All config fields optional with paper defaults."
+    )]
+    pub async fn market_volatility(
+        &self,
+        Parameters(MarketVolatilityRequest {
+            price,
+            hours_to_resolution,
+            spread,
+            volume,
+            horizon_hours,
+            k,
+            activity_proxy,
+        }): Parameters<MarketVolatilityRequest>,
+    ) -> String {
+        execute_tool_semantic(
+            self,
+            "market_volatility",
+            Some(Self::ontology_anchor("market_volatility")),
+            async {
+                self.called_tools
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert("market_volatility".to_string());
+                let config = volatility::DrasConfig {
+                    k: k.unwrap_or_else(|| volatility::DrasConfig::default().k),
+                    activity_proxy: activity_proxy.unwrap_or_default(),
+                };
+                let inputs = volatility::VolatilityInputs {
+                    price,
+                    hours_to_resolution,
+                    spread,
+                    volume,
+                };
+                let fc = volatility::forecast(inputs, config, horizon_hours).ok_or_else(|| {
+                    hkask_mcp_server::server::McpToolError::invalid_argument(
+                        "degenerate inputs: price must be in [0,1], hours_to_resolution > 0, horizon > 0".to_string()
+                    )
+                })?;
+                serde_json::to_value(serde_json::json!({
+                    "price": price,
+                    "hours_to_resolution": hours_to_resolution,
+                    "spread": spread,
+                    "volume": volume,
+                    "horizon_hours": horizon_hours,
+                    "conditional_volatility": fc.conditional_volatility,
+                    "conditional_variance": fc.conditional_variance,
+                    "decomposition": {
+                        "deadline_resolution": fc.dr_variance,
+                        "adverse_selection": fc.as_variance,
+                    },
+                    "activity_value": fc.activity_value,
+                    "config": {
+                        "k": fc.config.k,
+                        "activity_proxy": fc.config.activity_proxy,
+                    },
+                    "interval_95": {
+                        "lower": fc.interval_95.0,
+                        "upper": fc.interval_95.1,
+                    },
+                    "model": "DR-AS (Xi, Moallemi, Pai & Wang, arXiv:2607.08199)",
+                }))
+                .map_err(|e| {
+                    hkask_mcp_server::server::McpToolError::internal(format!(
+                        "volatility serialization failed: {e}"
+                    ))
+                })
+            },
+        )
+        .await
+    }
+
     /// Store the CMP index curve for a registered base event as a
     /// transaction-ledger portfolio. Each tenor point on the curve becomes a
     /// constituent holding with weight = the synthesized probability. The

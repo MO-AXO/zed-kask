@@ -1,6 +1,6 @@
 //! Financial data tools — profile, quote, statements, metrics, history, search.
 use crate::{
-    CompaniesServer, providers,
+    CompaniesServer, fibo, providers,
     types::{HistoricalRequest, SearchRequest, SymbolLimitRequest, SymbolRequest},
     validate_symbol,
 };
