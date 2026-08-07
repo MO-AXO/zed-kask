@@ -333,8 +333,8 @@ fn task_record_delegation_writes_structured_fields() {
         .task_record_delegation(
             task.id,
             Some("swarm-1".to_string()),
-            delegate_result.clone(),
-            Some(verdict.clone()),
+            delegate_result,
+            Some(verdict),
             owner,
         )
         .unwrap();

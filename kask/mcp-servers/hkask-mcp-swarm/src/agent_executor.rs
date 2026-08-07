@@ -57,6 +57,11 @@ pub(crate) struct AgentExecutor {
     tool_dispatch: Arc<dyn hkask_types::ToolDispatchPort>,
     skill_exec: Arc<dyn hkask_types::SkillExecPort>,
     guard: Arc<hkask_guard::ContentGuard>,
+    /// Directory containing the zed-kask skill corpus (`.agents/skills/`),
+    /// used to inject skill descriptions into the local agent's system prompt
+    /// (Slice 6 — local agent skill-awareness). `None` = skill-awareness
+    /// disabled (the agent runs skill-blind).
+    skills_dir: Option<std::path::PathBuf>,
 }
 
 impl AgentExecutor {
@@ -65,12 +70,14 @@ impl AgentExecutor {
         tool_dispatch: Arc<dyn hkask_types::ToolDispatchPort>,
         skill_exec: Arc<dyn hkask_types::SkillExecPort>,
         guard: hkask_guard::ContentGuard,
+        skills_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             inference,
             tool_dispatch,
             skill_exec,
             guard: Arc::new(guard),
+            skills_dir,
         }
     }
 
@@ -107,7 +114,7 @@ impl AgentExecutor {
         skill_exec: Arc<dyn hkask_types::SkillExecPort>,
         guard: hkask_guard::ContentGuard,
     ) -> Self {
-        Self::new(inference, tool_dispatch, skill_exec, guard)
+        Self::new(inference, tool_dispatch, skill_exec, guard, None)
     }
 
     /// Scan input text through the content guard. Returns `Err` if the guard
