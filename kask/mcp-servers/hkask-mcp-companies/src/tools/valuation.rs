@@ -634,8 +634,8 @@ impl CompaniesServer {
             }
 
             let current_price = profile_data.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let hist_revenue_growth = hist.revenue_cagr();
 
-            let ranges = financial_model::McRange {
             let mut assumptions = financial_model::ProjectionAssumptions::from_history_with_overrides(
                 &hist,
                 types::ProjectionAssumptionOverrides::from(&req),
