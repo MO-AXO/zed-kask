@@ -847,11 +847,65 @@ pub struct EvaluateLocalRequest {
     pub spec: String,
 }
 
+/// A single delegation within an execute-plan request. The tool runs each
+/// delegation via `swarm_delegate_local`, then (when an evaluator is provided)
+/// stamps a deterministic `TaskSuccessVerdict` onto the result.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlanDelegation {
+    /// The agent id to delegate to. Must exist in the local registry.
+    pub agent_name: String,
+    /// The task text to send to the agent.
+    pub task: String,
+    /// Maximum credits authorized for this delegation.
+    pub credits_authorized: u32,
+    /// Optional deterministic evaluator. When provided, the tool runs the
+    /// check after the delegation and stamps `task_success` onto the result.
+    /// When absent, `task_success` is left null (open task, no oracle).
+    pub evaluator: Option<PlanEvaluator>,
+}
+
+/// An evaluator spec within a plan delegation.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PlanEvaluator {
+    /// The evaluator type: "contains", "not_contains", or "regex".
+    pub evaluator: String,
+    /// The spec: substring (contains/not_contains) or regex pattern. Case-sensitive.
+    pub spec: String,
+}
+
+/// Request for `swarm_execute_plan_local` — runs a swarm-intelligence plan
+/// (a list of delegations), evaluates each result, and returns the collected
+/// `LocalDelegateResult` array ready to feed back to swarm-intelligence. This
+/// closes the loop deterministically: the caller passes the plan, the tool
+/// executes it and stamps verdicts, the caller passes the results back. Works
+/// in any context — chat, autonomous pipeline, or API.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExecutePlanLocalRequest {
+    /// The delegations to execute, in order. Capped at 10 (same as fanout).
+    pub delegations: Vec<PlanDelegation>,
+}
+
 #[cfg(test)]
 mod schema_tests {
     use super::*;
     use hkask_mcp_server::find_boolean_schema_positions;
     use schemars::schema_for;
+
+    /// `EvaluateLocalRequest` uses only `String` fields, so its schema should
+    /// be free of bare-boolean property values. Asserted to match the pattern
+    /// every other kask MCP tool-input struct follows (the `.rules`
+    /// "AnyJsonValue" trap).
+    #[test]
+    fn evaluate_local_request_schema_has_no_boolean_property_values() {
+        let schema = schema_for!(EvaluateLocalRequest);
+        let value = serde_json::to_value(&schema).expect("schema serializes");
+        let violations = find_boolean_schema_positions(&value);
+        assert!(
+            violations.is_empty(),
+            "EvaluateLocalRequest schema has bare-boolean property values \
+             (Ollama/Gemini would reject): {violations:?}"
+        );
+    }
 
     /// `AiAssistRequest` uses only `String` fields, so its schema should be
     /// free of bare-boolean property values. Asserted anyway to match the
