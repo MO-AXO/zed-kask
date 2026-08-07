@@ -716,9 +716,16 @@ impl HMemStore {
     /// Query h_mems whose Dublin Core subject list (`$.dc_subject`) contains
     /// the given term as a substring.
     ///
-    /// `dc_subject` is an array, so this matches against its JSON rendering.
-    /// The subject must not contain SQL LIKE wildcards (`%`, `_`) — they
-    /// would be interpreted as wildcards.
+    /// `dc_subject` is an array, so the match runs against its JSON rendering
+    /// (`["a","b"]`). Two consequences the caller must know:
+    ///
+    /// - The subject must not contain SQL LIKE wildcards (`%`, `_`) — they
+    ///   would be interpreted as wildcards.
+    /// - JSON punctuation is part of the haystack, so a needle containing
+    ///   `"`, `[`, `]`, or `,` can match structure rather than content. A
+    ///   needle spanning two elements never matches (element boundaries are
+    ///   real separators), but `,` alone matches any multi-element row. Pass
+    ///   plain concept text.
     #[must_use = "result must be used"]
     pub fn query_by_dc_subject(&self, subject: &str) -> Result<Vec<HMem>, HMemError> {
         let valid = self.ontology_is_json();

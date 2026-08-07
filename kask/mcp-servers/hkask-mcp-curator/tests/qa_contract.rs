@@ -56,6 +56,38 @@ fn make_server_with_stores() -> CuratorServer {
     )
 }
 
+/// Build a CuratorServer whose memory holds one ontology-anchored h_mem:
+/// a `bibo:Article` semantic fact subject-tagged `ROIC` and namespace-tagged
+/// `fibo`. Used to exercise ontology-axis recall.
+fn make_server_with_ontology_h_mem() -> CuratorServer {
+    let h_mem_store = hkask_storage::HMemStore::from_driver(SqliteDriver::in_memory_driver())
+        .expect("hmem store");
+    let memory = Arc::new(
+        hkask_memory::MemoryStore::try_new_without_embeddings(h_mem_store)
+            .expect("embedding-free memory store"),
+    );
+    let owner = WebID::new();
+    let h_mem = hkask_storage::HMem::new(
+        "company:Apple",
+        "roic",
+        serde_json::json!(0.32),
+        owner,
+    )
+    .with_visibility(hkask_types::Visibility::Shared)
+    .with_ontology(
+        hkask_types::HMemOntology::semantic("bibo:Article", vec!["ROIC".to_string()], "10-K")
+            .with_ontology_tag("fibo", "return on invested capital"),
+    );
+    memory.store(h_mem).expect("store ontology h_mem");
+    CuratorServer::new(
+        owner,
+        Arc::new(CuratorDb::for_tests(CuratorStores {
+            memory: Some(memory),
+            ..CuratorStores::empty()
+        })),
+    )
+}
+
 /// Build a CuratorServer whose memory store has NO embedding capability —
 /// the shape `open_curator_stores` produces when `EmbeddingStore::from_driver`
 /// fails. Every curator memory tool recalls by entity/EAV, so all of them must
@@ -537,6 +569,108 @@ mod curator_semantic_search {
             ))
             .await;
         assert_no_error(&consult);
+    }
+}
+
+// ── curator_memory_recall: ontology-axis recall (P5.4) ────────────────────
+
+mod curator_memory_recall_ontology {
+    use super::*;
+
+    /// Each ontology axis must reach the anchored h_mem. This is the
+    /// enforcement point that makes the `HMemOntology` blob a query axis
+    /// rather than inert metadata — without a tool exposing it, the storage
+    /// query paths would have only test callers.
+    #[tokio::test]
+    async fn each_axis_recalls_the_anchored_h_mem() {
+        let server = make_server_with_ontology_h_mem();
+        for (axis, value) in [
+            ("dc_type", "bibo:Article"),
+            ("dc_subject", "ROIC"),
+            ("ontology_namespace", "fibo"),
+        ] {
+            let out = server
+                .curator_memory_recall(params::<MemoryRecallRequest>(serde_json::json!({
+                    "entity": "",
+                    "memory_type": null,
+                    "ontology_axis": axis,
+                    "ontology_value": value,
+                })))
+                .await;
+            assert_no_error(&out);
+            let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+            assert_eq!(
+                v.get("count").and_then(|c| c.as_u64()),
+                Some(1),
+                "axis '{axis}' must recall the anchored h_mem, got: {out}"
+            );
+        }
+    }
+
+    /// A semantic fact carries no PKO procedure, so the process axis must
+    /// return empty rather than matching on the state axis by accident.
+    #[tokio::test]
+    async fn process_axis_does_not_match_a_semantic_fact() {
+        let server = make_server_with_ontology_h_mem();
+        let out = server
+            .curator_memory_recall(params::<MemoryRecallRequest>(serde_json::json!({
+                "entity": "",
+                "memory_type": null,
+                "ontology_axis": "pko_procedure",
+                "ontology_value": "bibo:Article",
+            })))
+            .await;
+        assert_no_error(&out);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(v.get("count").and_then(|c| c.as_u64()), Some(0));
+    }
+
+    #[tokio::test]
+    async fn unknown_axis_is_invalid_argument() {
+        let server = make_server_with_ontology_h_mem();
+        let out = server
+            .curator_memory_recall(params::<MemoryRecallRequest>(serde_json::json!({
+                "entity": "",
+                "memory_type": null,
+                "ontology_axis": "not_an_axis",
+                "ontology_value": "x",
+            })))
+            .await;
+        assert_error_kind(&out, "invalid_argument");
+    }
+
+    #[tokio::test]
+    async fn axis_without_value_is_invalid_argument() {
+        let server = make_server_with_ontology_h_mem();
+        let out = server
+            .curator_memory_recall(params::<MemoryRecallRequest>(serde_json::json!({
+                "entity": "",
+                "memory_type": null,
+                "ontology_axis": "dc_type",
+                "ontology_value": null,
+            })))
+            .await;
+        assert_error_kind(&out, "invalid_argument");
+    }
+
+    /// Omitting the ontology fields must preserve the entity-recall behavior
+    /// byte-for-byte — the axis is additive, not a replacement.
+    #[tokio::test]
+    async fn absent_axis_falls_back_to_entity_recall() {
+        let server = make_server_with_ontology_h_mem();
+        let out = server
+            .curator_memory_recall(params::<MemoryRecallRequest>(serde_json::json!({
+                "entity": "company:Apple",
+                "memory_type": "semantic",
+            })))
+            .await;
+        assert_no_error(&out);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+        assert_eq!(
+            v.pointer("/semantic/count").and_then(|c| c.as_u64()),
+            Some(1),
+            "entity recall must still work: {out}"
+        );
     }
 }
 

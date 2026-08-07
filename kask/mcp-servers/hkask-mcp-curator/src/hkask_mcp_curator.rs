@@ -14,7 +14,9 @@ pub mod types;
 
 // Bridge crates: shared ontological vocabulary (P5.4 dual-axis framework)
 
-use hkask_mcp_server::server::{McpToolError, execute_tool, map_infra_error};
+use hkask_mcp_server::server::{
+    McpToolError, execute_tool, map_infra_error, map_memory_store_error,
+};
 use hkask_services_core::{ErrorKind, ServiceError};
 use hkask_storage::database::sqlite::SqliteDriver;
 
@@ -440,6 +442,50 @@ impl CuratorServer {
                 )));
             }
             let stores = self.db.get();
+
+            // Ontology-axis recall (P5.4): when an axis is named, recall along
+            // the dual-axis anchoring instead of the entity. This is what makes
+            // the ontology blob a query axis rather than inert metadata —
+            // "every step of procedure X" and "every bibo:Article" are
+            // questions the entity index cannot answer.
+            if let Some(axis) = req.ontology_axis.as_deref() {
+                let Some(value) = req.ontology_value.as_deref() else {
+                    return Err(McpToolError::invalid_argument(
+                        "ontology_axis requires ontology_value",
+                    ));
+                };
+                let memory = stores.memory()?;
+                let h_mems = match axis {
+                    "dc_type" => memory.query_by_dc_type(value),
+                    "dc_subject" => memory.query_by_dc_subject(value),
+                    "pko_procedure" => memory.query_by_pko_procedure(value),
+                    "ontology_namespace" => memory.query_by_ontology_namespace(value),
+                    other => {
+                        return Err(McpToolError::invalid_argument(format!(
+                            "unknown ontology_axis '{other}' — expected 'dc_type', \
+                             'dc_subject', 'pko_procedure', or 'ontology_namespace'"
+                        )));
+                    }
+                }
+                .map_err(|e| map_memory_store_error(e, "Ontology recall failed"))?;
+                let serialized: Vec<serde_json::Value> = h_mems
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "entity": t.entity, "attribute": t.attribute,
+                            "value": t.value, "confidence": t.confidence,
+                            "ontology": t.ontology,
+                        })
+                    })
+                    .collect();
+                return Ok(json!({
+                    "ontology_axis": axis,
+                    "ontology_value": value,
+                    "count": serialized.len(),
+                    "h_mems": serialized,
+                }));
+            }
+
             let mut result = json!({});
 
             if memory_type == "episodic" || memory_type == "both" {
