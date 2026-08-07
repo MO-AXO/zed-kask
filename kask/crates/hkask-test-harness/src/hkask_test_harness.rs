@@ -120,24 +120,26 @@ where
 /// Oracle 4: reference implementation that may be unable to handle an input.
 ///
 /// Like [`oracle_reference`], but the reference function returns
-/// `Result<JsonValue, String>`. An `Ok` output is compared against the test
-/// output (Pass/Fail); an `Err` means the reference could not evaluate this
-/// input, yielding [`OracleVerdict::Inconclusive`] — the oracle cannot
-/// determine correctness. This is the only constructor that produces
-/// `Inconclusive`, closing the HarnessLLM three-verdict model.
+/// `Option<JsonValue>`. A `Some` output is compared against the test output
+/// (Pass/Fail); a `None` means the reference could not evaluate this input,
+/// yielding [`OracleVerdict::Inconclusive`] — the oracle cannot determine
+/// correctness. This is the only constructor that produces `Inconclusive`,
+/// closing the HarnessLLM three-verdict model. The decline carries no payload
+/// (the verdict is Inconclusive regardless of why), so `Option` is the honest
+/// signature — a `Result<_, _>` error would be discarded.
 #[must_use]
 pub fn oracle_inconclusive<F>(reference: F) -> Box<dyn Oracle>
 where
-    F: Fn(&JsonValue) -> Result<JsonValue, String> + Send + Sync + 'static,
+    F: Fn(&JsonValue) -> Option<JsonValue> + Send + Sync + 'static,
 {
     struct InconclusiveOracle<F>(F);
     impl<F> Oracle for InconclusiveOracle<F>
     where
-        F: Fn(&JsonValue) -> Result<JsonValue, String> + Send + Sync,
+        F: Fn(&JsonValue) -> Option<JsonValue> + Send + Sync,
     {
         fn verify(&self, input: &JsonValue, output: &JsonValue) -> OracleVerdict {
             match (self.0)(input) {
-                Ok(expected) => {
+                Some(expected) => {
                     if output == &expected {
                         OracleVerdict::Pass
                     } else {
@@ -147,7 +149,7 @@ where
                         ))
                     }
                 }
-                Err(_) => OracleVerdict::Inconclusive,
+                None => OracleVerdict::Inconclusive,
             }
         }
     }

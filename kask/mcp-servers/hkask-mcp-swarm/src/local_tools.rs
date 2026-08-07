@@ -18,6 +18,27 @@ use crate::sanitize::{
 use hkask_mcp_server::server::{McpToolError, execute_tool_semantic};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
+/// Run a deterministic evaluator check against a response. Shared by
+/// `swarm_evaluate_local` and `swarm_execute_plan_local` so the evaluation
+/// logic lives once — a bad evaluator spec or regex errors propagate to the
+/// caller rather than silently stamping `pass: false` (which would produce a
+/// false fault attribution: the agent gets blamed for a bad evaluator).
+fn run_evaluator(response: &str, evaluator: &str, spec: &str) -> Result<bool, McpToolError> {
+    match evaluator {
+        "contains" => Ok(response.contains(spec)),
+        "not_contains" => Ok(!response.contains(spec)),
+        "regex" => {
+            let re = regex::Regex::new(spec).map_err(|e| {
+                McpToolError::invalid_argument(format!("invalid regex spec: {e}"))
+            })?;
+            Ok(re.is_match(response))
+        }
+        other => Err(McpToolError::invalid_argument(format!(
+            "evaluator must be 'contains', 'not_contains', or 'regex'; got '{other}'"
+        ))),
+    }
+}
+
 #[tool_router(router = local_router, vis = "pub")]
 impl SwarmServer {
     /// Delegate a task to a local agent. The agent must exist in the local
@@ -1167,21 +1188,7 @@ impl SwarmServer {
                     "response and spec must be non-empty".to_string(),
                 ));
             }
-            let pass = match req.evaluator.as_str() {
-                "contains" => req.response.contains(&req.spec),
-                "not_contains" => !req.response.contains(&req.spec),
-                "regex" => {
-                    let re = regex::Regex::new(&req.spec).map_err(|e| {
-                        McpToolError::invalid_argument(format!("invalid regex spec: {e}"))
-                    })?;
-                    re.is_match(&req.response)
-                }
-                other => {
-                    return Err(McpToolError::invalid_argument(format!(
-                        "evaluator must be 'contains', 'not_contains', or 'regex'; got '{other}'"
-                    )));
-                }
-            };
+            let pass = run_evaluator(&req.response, &req.evaluator, &req.spec)?;
             let detail = format!(
                 "evaluator={}, spec_len={}, pass={}",
                 req.evaluator,

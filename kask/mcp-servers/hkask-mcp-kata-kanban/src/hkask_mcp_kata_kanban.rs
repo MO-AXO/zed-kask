@@ -899,6 +899,24 @@ impl KanbanServer {
                     .map_err(hkask_mcp_swarm::SwarmError::into_tool_error)?;
 
                 // Record the delegation result on the task (comment + status).
+                // Write the structured `LocalDelegateResult` + verdict to the
+                // task's persisted fields first (the durable coordination
+                // source of truth), then append the human-readable comment.
+                let verdict = result.task_success.clone();
+                if let Err(error) = self.service.task_record_delegation(
+                    tid,
+                    None,
+                    result.clone(),
+                    verdict,
+                    self.webid,
+                ) {
+                    tracing::warn!(
+                        target: "hkask.mcp.kata_kanban",
+                        task_id = %tid,
+                        %error,
+                        "could not record structured delegation result — falling back to comment-only"
+                    );
+                }
                 let result_note = format!(
                     "Spawn executed: agent={agent_id}, model={model}, tokens={tokens}, \
                      cost={cost} credits, balance={balance}, latency={latency_ms}ms\n\
