@@ -23,7 +23,7 @@ fn validate_finite(name: &str, value: f64) -> Result<(), McpToolError> {
 fn validate_unit_interval(name: &str, value: f64) -> Result<(), McpToolError> {
     validate_finite(name, value)?;
     if (0.0..=1.0).contains(&value) {
-        Ok(());
+        Ok(())
     } else {
         Err(McpToolError::invalid_argument(format!(
             "{name} must be within 0.0..=1.0"
@@ -51,7 +51,7 @@ fn extract_historical_arrays<'a>(
     let income_data = income.as_array().filter(|a| !a.is_empty())?;
     let balance_data = balance.as_array().filter(|a| !a.is_empty())?;
     let cf_data = cf.as_array().filter(|a| !a.is_empty())?;
-    let metrics_data = metrics.as_array().unwrap_or(&[]);
+    let metrics_data = metrics.as_array().unwrap_or(&[] as &[serde_json::Value]);
     let profile_data = profile.as_array().and_then(|a| a.first())?;
     Some((income_data, balance_data, cf_data, metrics_data, profile_data))
 }
@@ -316,7 +316,7 @@ impl CompaniesServer {
                 };
 
             let Some((income_data, balance_data, cf_data, metrics_data, profile_data)) =
-                extract_historical_arrays(income, balance, cf, metrics, profile)
+                extract_historical_arrays(&income, &balance, &cf, &metrics, &profile)
             else {
                 return Ok(serde_json::json!({"symbol": req.symbol, "error": "insufficient data for sensitivity analysis"}));
             };
@@ -415,7 +415,7 @@ impl CompaniesServer {
                 };
 
             let Some((income_data, balance_data, cf_data, metrics_data, profile_data)) =
-                extract_historical_arrays(income, balance, cf, metrics, profile)
+                extract_historical_arrays(&income, &balance, &cf, &metrics, &profile)
             else {
                 return Ok(serde_json::json!({"symbol": req.symbol, "error": "insufficient data"}));
             };
@@ -498,7 +498,7 @@ impl CompaniesServer {
                 };
 
             let Some((income_data, balance_data, cf_data, metrics_data, profile_data)) =
-                extract_historical_arrays(income, balance, cf, metrics, profile)
+                extract_historical_arrays(&income, &balance, &cf, &metrics, &profile)
             else {
                 return Ok(serde_json::json!({"symbol": req.symbol, "error": "insufficient data"}));
             };
@@ -512,9 +512,12 @@ impl CompaniesServer {
             }
 
             let current_price = profile_data.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let hist_revenue_growth = hist.revenue_cagr();
 
-            let ref_class = req.reference_class.unwrap_or_else(|| "S&P 500 large-cap, 2015-2025".into());
+            let assumptions = financial_model::ProjectionAssumptions::from_history_with_overrides(
+                &hist,
+                types::ProjectionAssumptionOverrides::from(&req),
+            )
+            .map_err(|err| McpToolError::invalid_argument(err.to_string()))?;
             let ranges = financial_model::McRange {
                 revenue_growth: req.range_revenue_growth,
                 gross_margin: req.range_gross_margin,
@@ -620,7 +623,7 @@ impl CompaniesServer {
                 };
 
             let Some((income_data, balance_data, cf_data, metrics_data, profile_data)) =
-                extract_historical_arrays(income, balance, cf, metrics, profile)
+                extract_historical_arrays(&income, &balance, &cf, &metrics, &profile)
             else {
                 return Ok(serde_json::json!({"symbol": req.symbol, "error": "insufficient data"}));
             };
