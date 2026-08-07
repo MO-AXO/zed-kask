@@ -184,18 +184,18 @@ proptest! {
             let in_name = input["prefixed_name"].as_str().unwrap_or("");
             let out_name = output["name"].as_str().unwrap_or("");
             if in_name != out_name {
-                return Some(format!("name not preserved: {in_name:?} != {out_name:?}"));
+                return Err(format!("name not preserved: {in_name:?} != {out_name:?}"));
             }
             for key in ["family", "parameter_size", "quantization_level", "size_bytes"] {
                 if !output[key].is_null() {
-                    return Some(format!("{key} must be null, got {}", output[key]));
+                    return Err(format!("{key} must be null, got {}", output[key]));
                 }
             }
             let provider = output["provider"].as_str().unwrap_or("");
             if !ALL_PROVIDER_IDS.contains(&provider) {
-                return Some(format!("invalid provider serde id: {provider}"));
+                return Err(format!("invalid provider serde id: {provider}"));
             }
-            None
+            Ok(())
         });
 
         let entry = ModelEntry {

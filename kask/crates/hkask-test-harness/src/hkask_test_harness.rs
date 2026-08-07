@@ -95,25 +95,32 @@ where
 /// Oracle 3: invariant checking.
 ///
 /// Scales best — check properties of the output, not the output itself.
-/// The check function receives `(input, output)` and returns `None` if the
-/// invariant holds, or `Some(message)` if it is violated.
+/// The check function receives `(input, output)` and returns `Ok(())` if the
+/// invariant holds, or `Err(message)` if it is violated. The error type is
+/// generic over any [`Display`](std::fmt::Display) type, so callers may return
+/// `String` or a structured `thiserror` enum — the message is stringified into
+/// [`OracleVerdict::Fail`].
 #[must_use]
-pub fn oracle_invariant<F>(check: F) -> Box<dyn Oracle>
+pub fn oracle_invariant<F, E>(check: F) -> Box<dyn Oracle>
 where
-    F: Fn(&JsonValue, &JsonValue) -> Option<String> + Send + Sync + 'static,
+    F: Fn(&JsonValue, &JsonValue) -> Result<(), E> + Send + Sync + 'static,
+    E: std::fmt::Display + Send + Sync + 'static,
 {
-    struct InvariantOracle<F>(F);
-    impl<F> Oracle for InvariantOracle<F>
+    struct InvariantOracle<F, E>(F, std::marker::PhantomData<E>);
+    impl<F, E> Oracle for InvariantOracle<F, E>
     where
-        F: Fn(&JsonValue, &JsonValue) -> Option<String> + Send + Sync,
+        F: Fn(&JsonValue, &JsonValue) -> Result<(), E> + Send + Sync,
+        E: std::fmt::Display + Send + Sync,
     {
         fn verify(&self, input: &JsonValue, output: &JsonValue) -> OracleVerdict {
             match (self.0)(input, output) {
-                None => OracleVerdict::Pass,
-                Some(msg) => OracleVerdict::Fail(msg),
+                Ok(()) => OracleVerdict::Pass,
+                Err(msg) => OracleVerdict::Fail(msg.to_string()),
             }
         }
     }
+    Box::new(InvariantOracle(check, std::marker::PhantomData))
+}
     Box::new(InvariantOracle(check))
 }
 

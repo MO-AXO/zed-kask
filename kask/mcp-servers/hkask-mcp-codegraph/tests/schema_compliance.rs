@@ -87,8 +87,8 @@ proptest! {
     fn request_structs_deserialize_arbitrary_json_without_panicking(value in arb_json_value()) {
         let oracle = oracle_invariant(|_input: &JsonValue, output: &JsonValue| {
             match output.get("panicked").and_then(|v| v.as_bool()) {
-                Some(false) => None,
-                _ => Some("a codegraph request struct panicked during deserialization".into()),
+                Some(false) => Ok(()),
+                _ => Err("a codegraph request struct panicked during deserialization".into()),
             }
         });
 

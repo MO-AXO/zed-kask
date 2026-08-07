@@ -56,12 +56,12 @@ fn invariant_oracle_checks_predicate() {
             .and_then(|v| v.as_array().map(|a| a.len()))
             .unwrap_or(0);
         if output_len > input_len {
-            Some(format!(
+            Err(format!(
                 "output {} longer than input {}",
                 output_len, input_len
             ))
         } else {
-            None
+            Ok(())
         }
     });
     let input = serde_json::json!({"data": [1, 2, 3]});
