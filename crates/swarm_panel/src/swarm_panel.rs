@@ -151,7 +151,7 @@ fn steer_system_prompt(
          from roster), `swarm_create_agent`, `swarm_create_swarm`, \
          `swarm_generate_prompt`, `swarm_generate_ontology`, \
          `swarm_fork_agent` (derivative fork), `swarm_run_status`, \
-         `swarm_search_knowledge` (vector knowledge-graph search), \
+         `swarm_search_knowledge` (knowledge-graph search), \
          `swarm_publish_checks` + `swarm_publish_agent` (catalogue publish, \
          with an audited admin force-publish path), `swarm_xaman`. These \
          route to Agent Bestiary World and require the ABW API key.\n\

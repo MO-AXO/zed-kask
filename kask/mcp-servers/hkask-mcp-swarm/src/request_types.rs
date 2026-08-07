@@ -554,16 +554,22 @@ pub struct DeleteSwarmRequest {
 
 // ── Knowledge search (fermi v0.10.26 embedder fix) ───────────────────────────
 
-/// Search an agent's consolidated dreaming-memory knowledge graph via ABW's
-/// vector search (`GET /api/agents/{id}/knowledge/search?q=`). The embedder was
-/// broken platform-wide for 6 weeks (an Anthropic embeddings endpoint that does
-/// not exist); v0.10.26 fixed it to OpenAI `text-embedding-3-large` @ 1024,
-/// matching the existing pgvector column. Requires API key.
+/// Search an agent's consolidated dreaming-memory knowledge graph. fermi
+/// does not expose a vector-search HTTP endpoint — the `MemoryStore` has
+/// the capability (`search_similar_episodes`, semantic entity/rule search
+/// via pgvector `<=>` cosine distance) but it's not wired to a route. The
+/// tool fetches `GET /api/agents/{id}/kg/rules` + `GET /api/agents/{id}/kg/entities`
+/// and does client-side text matching against the query. The v0.10.26
+/// embedder fix (OpenAI `text-embedding-3-large` @ 1024) is still
+/// load-bearing — without it, consolidation never runs and the KG tables
+/// stay empty. Requires API key.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchKnowledgeRequest {
     /// Agent name (slug) or UUID.
     pub agent_name: String,
-    /// Natural-language query to vector-search the agent's knowledge graph.
+    /// Natural-language query to search the agent's knowledge graph
+    /// (rules + entities). Matched client-side against `rule_content`,
+    /// `rule_description`, `entity_name`, and `entity_summary`.
     pub query: String,
 }
 
@@ -903,6 +909,21 @@ mod schema_tests {
         assert!(
             violations.is_empty(),
             "EvaluateLocalRequest schema has bare-boolean property values \
+             (Ollama/Gemini would reject): {violations:?}"
+        );
+    }
+
+    /// `ExecutePlanLocalRequest` and its sub-structs use only `String`, `u32`,
+    /// and `Vec` fields, so the schema should be free of bare-boolean property
+    /// values. Asserted to match the `.rules` "AnyJsonValue" trap pattern.
+    #[test]
+    fn execute_plan_local_request_schema_has_no_boolean_property_values() {
+        let schema = schema_for!(ExecutePlanLocalRequest);
+        let value = serde_json::to_value(&schema).expect("schema serializes");
+        let violations = find_boolean_schema_positions(&value);
+        assert!(
+            violations.is_empty(),
+            "ExecutePlanLocalRequest schema has bare-boolean property values \
              (Ollama/Gemini would reject): {violations:?}"
         );
     }
