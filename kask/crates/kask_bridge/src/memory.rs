@@ -203,7 +203,7 @@ impl RealMemoryPort {
         let memory_life_days = match std::env::var("HKASK_MEMORY_LIFE_DAYS") {
             Ok(raw) => match raw.trim().parse::<f64>() {
                 Ok(days) if days >= 0.0 => days,
-                Ok(negative) => {
+                Ok(_negative) => {
                     tracing::warn!(
                         target: "reg.memory",
                         value = %raw,
