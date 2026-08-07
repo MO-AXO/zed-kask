@@ -480,11 +480,7 @@ fn parse_skill_frontmatter(content: &str) -> Option<(String, String)> {
         return None;
     }
     // Find the closing `---`.
-    let end = lines
-        .iter()
-        .skip(1)
-        .position(|l| l.trim() == "---")?
-        + 1;
+    let end = lines.iter().skip(1).position(|l| l.trim() == "---")? + 1;
     let frontmatter = &lines[1..end];
     let mut name: Option<String> = None;
     let mut description: Option<String> = None;

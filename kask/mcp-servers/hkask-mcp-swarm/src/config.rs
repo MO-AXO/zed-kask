@@ -279,11 +279,9 @@ impl SwarmConfig {
                 if std::path::Path::new(&raw).is_absolute() {
                     raw
                 } else {
-                    hkask_types::agent_paths::resolve_under_data_dir(
-                        std::path::Path::new(&raw),
-                    )
-                    .to_string_lossy()
-                    .to_string()
+                    hkask_types::agent_paths::resolve_under_data_dir(std::path::Path::new(&raw))
+                        .to_string_lossy()
+                        .to_string()
                 }
             });
         let warning = if api_key.is_none() && mode == SwarmMode::Abw {
@@ -362,6 +360,15 @@ mod tests {
         // HKASK_ABW_MAX_CREDITS.
         let c = SwarmConfig::default();
         assert_eq!(c.max_credits_per_dispatch, 50);
+    }
+
+    #[test]
+    fn config_skills_dir_default_is_none() {
+        // Slice 6: skills_dir defaults to None (skill-awareness disabled)
+        // until the bridge sets HKASK_SKILLS_DIR from the project's
+        // .agents/skills/ directory.
+        let c = SwarmConfig::default();
+        assert!(c.skills_dir.is_none(), "skills_dir should default to None");
     }
 
     #[test]
