@@ -1241,17 +1241,17 @@ mod proptests {
                 let requested_year = input.get("year").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                 let requested_quarter = input.get("quarter").and_then(|v| v.as_u64()).unwrap_or(0) as u8;
                 if output.is_null() {
-                    return Ok(());
+                    return None;
                 }
                 let record_year = output.get("year").and_then(|v| v.as_u64()).unwrap_or(u64::MAX) as u32;
                 let record_quarter = output.get("quarter").and_then(|v| v.as_u64()).unwrap_or(u64::MAX) as u8;
                 if record_year != requested_year {
-                    return Err(format!("record.year {record_year} != requested {requested_year}"));
+                    return Some(format!("record.year {record_year} != requested {requested_year}"));
                 }
                 if record_quarter != requested_quarter {
-                    return Err(format!("record.quarter {record_quarter} != requested {requested_quarter}"));
+                    return Some(format!("record.quarter {record_quarter} != requested {requested_quarter}"));
                 }
-                Ok(())
+                None
             });
 
             let body = serde_json::to_string(&body_value).unwrap_or_default();

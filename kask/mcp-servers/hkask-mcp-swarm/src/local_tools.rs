@@ -1216,7 +1216,7 @@ impl SwarmServer {
     /// pipeline, or API. Capped at 10 delegations (same as fanout). Each
     /// delegation runs sequentially to avoid ledger TOCTOU.
     #[tool(
-        description = "Execute a swarm-intelligence plan: run each delegation via swarm_delegate_local, evaluate each result with a deterministic check (when an evaluator is provided), and return the collected LocalDelegateResult array with task_success verdicts stamped. Capped at 10 delegations. Each delegation runs sequentially to avoid ledger TOCTOU. The returned array is ready to feed back to swarm-intelligence as delegate_results. No consent token — local mode."
+        description = "Execute a swarm-intelligence plan: run each delegation via the local runtime, evaluate each result with a deterministic check (when an evaluator is provided), and return the collected LocalDelegateResult array with task_success verdicts stamped. Capped at 10 delegations. Each delegation runs sequentially to avoid ledger TOCTOU. The returned array is ready to feed back to swarm-intelligence as delegate_results. No consent token — local mode."
     )]
     pub(crate) async fn swarm_execute_plan_local(
         &self,
@@ -1261,17 +1261,11 @@ impl SwarmServer {
                         total_tokens += r.tokens_used;
                         // Stamp the deterministic verdict when an evaluator is provided.
                         if let Some(ev) = &entry.evaluator {
-                            let pass = match ev.evaluator.as_str() {
-                                "contains" => r.response.contains(&ev.spec),
-                                "not_contains" => !r.response.contains(&ev.spec),
-                                "regex" => {
-                                    match regex::Regex::new(&ev.spec) {
-                                        Ok(re) => re.is_match(&r.response),
-                                        Err(_) => false,
-                                    }
-                                }
-                                _ => false,
-                            };
+                            let pass = run_evaluator(
+                                &r.response,
+                                &ev.evaluator,
+                                &ev.spec,
+                            )?;
                             r.task_success = Some(
                                 crate::local_runtime::TaskSuccessVerdict {
                                     pass,

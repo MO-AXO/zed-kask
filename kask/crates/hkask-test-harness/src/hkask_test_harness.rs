@@ -95,22 +95,22 @@ where
 /// Oracle 3: invariant checking.
 ///
 /// Scales best — check properties of the output, not the output itself.
-/// The check function receives `(input, output)` and returns `Ok(())` if the
-/// invariant holds, or `Err(message)` if it is violated.
+/// The check function receives `(input, output)` and returns `None` if the
+/// invariant holds, or `Some(message)` if it is violated.
 #[must_use]
 pub fn oracle_invariant<F>(check: F) -> Box<dyn Oracle>
 where
-    F: Fn(&JsonValue, &JsonValue) -> Result<(), String> + Send + Sync + 'static,
+    F: Fn(&JsonValue, &JsonValue) -> Option<String> + Send + Sync + 'static,
 {
     struct InvariantOracle<F>(F);
     impl<F> Oracle for InvariantOracle<F>
     where
-        F: Fn(&JsonValue, &JsonValue) -> Result<(), String> + Send + Sync,
+        F: Fn(&JsonValue, &JsonValue) -> Option<String> + Send + Sync,
     {
         fn verify(&self, input: &JsonValue, output: &JsonValue) -> OracleVerdict {
             match (self.0)(input, output) {
-                Ok(()) => OracleVerdict::Pass,
-                Err(msg) => OracleVerdict::Fail(msg),
+                None => OracleVerdict::Pass,
+                Some(msg) => OracleVerdict::Fail(msg),
             }
         }
     }
