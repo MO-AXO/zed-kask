@@ -17,18 +17,6 @@ use tracing::warn;
 pub(crate) fn evaluate_step_condition(condition: &str, context: &HashMap<String, Value>) -> bool {
     let condition = condition.trim();
 
-    // Rendered boolean literals: minijinja renders `{{ x == y }}` to the
-    // string "True"/"False" (Python str() style, capital T/F). Without this
-    // check, "True" falls through to the context-key lookup below, finds no
-    // key named "True", and returns false — silently skipping every
-    // Jinja-conditioned step. This affected 66 condition gates across 9
-    // manifests (skill-maintenance, graph-audit, kata-*, etc.).
-    match condition.to_ascii_lowercase().as_str() {
-        "true" => return true,
-        "false" => return false,
-        _ => {}
-    }
-
     // Check for boolean operators
     if let Some(pos) = condition.find(" AND ") {
         let left = &condition[..pos].trim();
@@ -259,29 +247,6 @@ mod tests {
         ctx.insert("v".into(), Value::Null);
         assert!(evaluate_step_condition("v == null", &ctx));
     }
-
-    // minijinja renders `{{ x == y }}` to the string "True"/"False"
-    // (Python str() style). Before this fix, "True" fell through to the
-    // context-key lookup, found no key named "True", and returned false —
-    // silently skipping every Jinja-conditioned step. This affected 66
-    // condition gates across 9 manifests (skill-maintenance, graph-audit,
-    // kata-*, metacognition, refactor-architecture, self-improvement,
-    // sequential-inquiry, swarm-intelligence).
-    #[test]
-    fn step_condition_recognizes_rendered_boolean_strings() {
-        let ctx = HashMap::new();
-        // minijinja Python-style capitalization
-        assert!(evaluate_step_condition("True", &ctx));
-        assert!(!evaluate_step_condition("False", &ctx));
-        // lowercase also accepted
-        assert!(evaluate_step_condition("true", &ctx));
-        assert!(!evaluate_step_condition("false", &ctx));
-        // whitespace trimmed
-        assert!(evaluate_step_condition("  True  ", &ctx));
-        // non-empty non-boolean string still falls through to context lookup
-        assert!(!evaluate_step_condition("maintenance", &ctx));
-    }
-}
 
     // Rendered-boolean-string gating — a `{{ ... == ... }}` Jinja condition
     // renders to a boolean string (minijinja emits lowercase "true"/"false";
