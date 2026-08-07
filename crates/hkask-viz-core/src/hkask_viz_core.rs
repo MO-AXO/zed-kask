@@ -352,10 +352,12 @@ mod tests {
             .expect("graph body parses");
         assert_eq!(graph.ontology.as_deref(), Some("dcterms:Dataset"));
 
-        // Kanban widget
-        let kanban = parse_kanban_body(r#"{"viz":"kanban","ontology":"pko:Step"}"#)
-            .expect("kanban body parses");
-        assert_eq!(kanban.ontology.as_deref(), Some("pko:Step"));
+        // Kanban widget — ontology is per-task, not on the block body.
+        let kanban = parse_kanban_body(
+            r#"{"viz":"kanban","tasks":[{"task_id":"t1","title":"T","status":"backlog","ontology":"pko:Step"}]}"#,
+        )
+        .expect("kanban body parses");
+        assert_eq!(kanban.tasks[0].ontology.as_deref(), Some("pko:Step"));
 
         // Portfolio widget
         let portfolio = parse_portfolio_body(r#"{"viz":"portfolio","ontology":"fibo:Portfolio"}"#)

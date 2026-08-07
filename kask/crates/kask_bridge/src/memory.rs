@@ -935,10 +935,10 @@ impl MemoryPort for RealMemoryPort {
             // re-attempts the open when they're down (self-healing) and
             // signals persistent failure with a warn-once, so the writes
             // below can treat `None` as "already signaled, skip".
-            let (curator_episodic, curator_semantic) = self.curator_stores.get();
+            let curator_store = self.curator_store.get();
             // Rebuild the curator consolidation service after a heal so the
-            // timer promotes freshly-ingested curator episodic h_mems.
-            if curator_episodic.is_some() && curator_semantic.is_some() {
+            // timer promotes freshly-ingested curator h_mems.
+            if curator_store.is_some() {
                 let needs_rebuild = match self.curator_consolidation.read() {
                     Ok(guard) => guard.is_none(),
                     Err(_) => true,
@@ -946,7 +946,7 @@ impl MemoryPort for RealMemoryPort {
                 if needs_rebuild && self.consolidation_cadence_secs > 0 {
                     let rebuilt = build_curator_consolidation(
                         self.consolidation_cadence_secs,
-                        &(curator_episodic.clone(), curator_semantic.clone()),
+                        &curator_store,
                     );
                     if let Ok(mut guard) = self.curator_consolidation.write()
                         && guard.is_none()
@@ -973,7 +973,7 @@ impl MemoryPort for RealMemoryPort {
             .with_perspective(self.user_webid)
             .with_visibility(Visibility::Private);
 
-            if let Err(e) = self.episodic.store(episodic_h_mem) {
+            if let Err(e) = self.store.store(episodic_h_mem) {
                 tracing::warn!(
                     target: "reg.memory",
                     thread_id = %thread_id,
@@ -1002,8 +1002,8 @@ impl MemoryPort for RealMemoryPort {
                 .with_perspective(self.curator_webid)
                 .with_visibility(Visibility::Private);
 
-                if let Some(ref curator_episodic) = curator_episodic {
-                    if let Err(e) = curator_episodic.store(episodic_h_mem) {
+                if let Some(ref curator_store) = curator_store {
+                    if let Err(e) = curator_store.store(episodic_h_mem) {
                         tracing::warn!(
                             target: "reg.memory",
                             thread_id = %thread_id,
@@ -1020,7 +1020,7 @@ impl MemoryPort for RealMemoryPort {
                     tracing::trace!(
                         target: "reg.memory",
                         thread_id = %thread_id,
-                        "Curator episodic store unavailable — skipping curator episodic write"
+                        "Curator store unavailable — skipping curator episodic write"
                     );
                 }
             }
@@ -1037,8 +1037,8 @@ impl MemoryPort for RealMemoryPort {
             )
             .with_visibility(Visibility::Shared);
 
-            if let Some(ref curator_semantic) = curator_semantic {
-                if let Err(e) = curator_semantic.store(curator_h_mem) {
+            if let Some(ref curator_store) = curator_store {
+                if let Err(e) = curator_store.store(curator_h_mem) {
                     tracing::warn!(
                         target: "reg.memory",
                         thread_id = %thread_id,
@@ -1052,7 +1052,7 @@ impl MemoryPort for RealMemoryPort {
                 tracing::trace!(
                     target: "reg.memory",
                     thread_id = %thread_id,
-                    "Curator semantic store unavailable — skipping curator copy"
+                    "Curator store unavailable — skipping curator copy"
                 );
             }
 
@@ -1082,7 +1082,7 @@ impl MemoryPort for RealMemoryPort {
             match vectors {
                 Ok(Ok(vectors)) => {
                     if let Some(vector) = vectors.into_iter().next() {
-                        if let Err(e) = self.semantic.store_embedding(
+                        if let Err(e) = self.store.store_embedding(
                             &embedding_entity,
                             &vector,
                             &self.embedding_model,
@@ -1095,8 +1095,8 @@ impl MemoryPort for RealMemoryPort {
                             );
                         }
                         if is_curator_turn
-                            && let Some(ref curator_semantic) = curator_semantic
-                            && let Err(e) = curator_semantic.store_embedding(
+                            && let Some(ref curator_store) = curator_store
+                            && let Err(e) = curator_store.store_embedding(
                                 &embedding_entity,
                                 &vector,
                                 &self.embedding_model,
@@ -1154,8 +1154,8 @@ impl MemoryPort for RealMemoryPort {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a>> {
         Box::pin(async move {
             self.recall_from(
-                Some(&self.episodic),
-                &self.semantic,
+                &self.store,
+                Some(self.user_webid),
                 self.user_webid,
                 query,
                 limit,
@@ -1171,15 +1171,15 @@ impl MemoryPort for RealMemoryPort {
         limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a>> {
         Box::pin(async move {
-            // The semantic copy of a user turn is written to `curator_semantic`
-            // (the curator's sovereign DB) under entity `curator:thread:{id}` —
-            // not to the user's own `semantic` store, which holds consolidated
-            // facts rather than per-turn records. So the semantic leg queries
-            // `curator_semantic`, not `self.semantic`.
-            let (_, curator_semantic) = self.curator_stores.get();
+            // The semantic copy of a user turn is written to the curator's
+            // sovereign DB under entity `curator:thread:{id}` — not to the
+            // user's own store, which holds consolidated facts rather than
+            // per-turn records. So the semantic leg queries the curator
+            // store, not `self.store`.
+            let curator_store = self.curator_store.get();
             self.recall_thread_from(
-                Some(&self.episodic),
-                curator_semantic.as_ref(),
+                &self.store,
+                curator_store.as_ref(),
                 self.user_webid,
                 thread_id,
                 limit,
@@ -1200,12 +1200,10 @@ impl RealMemoryPort {
     /// Side-effect-free: reads availability without triggering a heal, so
     /// polling doesn't drive the re-open path.
     pub fn memory_health_json(&self) -> serde_json::Value {
-        let (curator_episodic_up, curator_semantic_up) = self.curator_stores.availability();
-        let degraded = !curator_episodic_up || !curator_semantic_up;
+        let curator_up = self.curator_store.availability();
         serde_json::json!({
-            "curator_episodic": curator_episodic_up,
-            "curator_semantic": curator_semantic_up,
-            "degraded": degraded,
+            "curator_store": curator_up,
+            "degraded": !curator_up,
         })
     }
 
@@ -1227,13 +1225,12 @@ impl RealMemoryPort {
         limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a>> {
         Box::pin(async move {
-            let (curator_episodic, curator_semantic) = self.curator_stores.get();
-            let Some(ref curator_semantic) = curator_semantic else {
+            let Some(ref curator_store) = self.curator_store.get() else {
                 return Ok(Vec::new());
             };
             self.recall_from(
-                curator_episodic.as_ref(),
-                curator_semantic,
+                curator_store,
+                Some(self.curator_webid),
                 self.curator_webid,
                 query,
                 limit,
@@ -1256,13 +1253,12 @@ impl RealMemoryPort {
         limit: usize,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<MemorySnippet>, MemoryError>> + Send + 'a>> {
         Box::pin(async move {
-            let (curator_episodic, curator_semantic) = self.curator_stores.get();
-            let Some(ref curator_semantic) = curator_semantic else {
+            let Some(ref curator_store) = self.curator_store.get() else {
                 return Ok(Vec::new());
             };
             self.recall_thread_from(
-                curator_episodic.as_ref(),
-                Some(curator_semantic),
+                curator_store,
+                Some(curator_store),
                 self.curator_webid,
                 thread_id,
                 limit,
@@ -1285,8 +1281,8 @@ impl RealMemoryPort {
     /// (a fix to one had to be manually mirrored in the other).
     async fn recall_from<'a>(
         &'a self,
-        episodic: Option<&'a Arc<EpisodicMemory>>,
-        semantic: &'a Arc<SemanticMemory>,
+        store: &'a Arc<MemoryStore>,
+        episodic_perspective: Option<WebID>,
         perspective: WebID,
         query: &'a str,
         limit: usize,
@@ -1326,14 +1322,14 @@ impl RealMemoryPort {
         if let Ok(Ok(vectors)) = vectors
             && let Some(query_vector) = vectors.into_iter().next()
         {
-            match semantic.search_similar(&query_vector, limit) {
+            match store.search_similar(&query_vector, limit) {
                 Ok(results) => {
                     for result in results {
                         // Retrieve the h_mem associated with this embedding
                         // to get the full text content. Use the untouched
                         // variant — we touch only the injected ones below.
                         let entity_ref = &result.embedding.entity_ref;
-                        if let Ok(h_mems) = semantic.query_deduped_untouched(entity_ref) {
+                        if let Ok(h_mems) = store.query_deduped_untouched(entity_ref) {
                             for h_mem in h_mems {
                                 let text = h_mem.value.as_str().unwrap_or("").to_string();
                                 if !text.is_empty() {
@@ -1381,7 +1377,7 @@ impl RealMemoryPort {
             .collect();
 
         if !query_words.is_empty()
-            && let Some(episodic) = episodic
+            && let Some(episodic_perspective) = episodic_perspective
         {
             // Use a prefix query to load all chat:thread:* episodic h_mems
             // in a single SQL call. The previous implementation queried
@@ -1398,9 +1394,9 @@ impl RealMemoryPort {
             // reasonable pool to filter from without unbounded loading.
             let entity_prefix = "chat:thread:".to_string();
             let recall_budget = limit.saturating_mul(10).max(50);
-            if let Ok(h_mems) = episodic.query_for_deduped_untouched_by_prefix(
+            if let Ok(h_mems) = store.query_for_deduped_untouched_by_prefix(
                 &entity_prefix,
-                perspective,
+                episodic_perspective,
                 recall_budget,
             ) {
                 for h_mem in h_mems {
