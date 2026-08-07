@@ -128,9 +128,6 @@ pub(crate) struct SwarmConfig {
     /// `HKASK_SKILLS_DIR`; an absolute path is used as-is, a relative path is
     /// resolved under the hKask data dir. The bridge sets this from the
     /// project's `.agents/skills/` directory.
-    // Not yet read: `AgentExecutor::build_skill_catalog` (Slice 6) is scaffolded
-    // but not wired. Remove this allow once that consumer lands.
-    #[allow(dead_code)]
     pub skills_dir: Option<String>,
 }
 
