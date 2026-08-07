@@ -36,7 +36,7 @@ impl SwarmPanel {
                 let remove_name = agent_name.clone();
                 let publish_name = agent_name.clone();
                 let edit_name = agent_name.clone();
-                let edit_source = source.clone();
+                let edit_source = source;
                 MarketplaceCard::new().child(
                     h_flex()
                         .w_full()

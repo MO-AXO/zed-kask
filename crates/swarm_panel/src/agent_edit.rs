@@ -219,7 +219,6 @@ impl SwarmPanel {
         let is_local = source == AgentSource::Local;
         cx.spawn({
             let invoker = invoker.clone();
-            let agent_id = agent_id.clone();
             async move |this, cx| {
                 let result = if is_local {
                     let list_result = invoker

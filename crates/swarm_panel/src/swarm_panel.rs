@@ -417,6 +417,10 @@ pub struct SwarmPanel {
     mode: PanelMode,
     /// Authoring form state.
     author: AuthorForm,
+    /// A loaded agent detail waiting to be applied to the author form on the
+    /// next `render` (which has `&mut Window` for `Editor::set_text`). Set by
+    /// `load_agent_into_author`'s spawn; consumed by `apply_pending_author_load`.
+    pending_author_load: Option<crate::agent_edit::AgentDetail>,
     /// Composition form state.
     compose: ComposeForm,
     /// Lazily-constructed `ConversationView` for Steer mode, scoped to the
@@ -620,6 +624,7 @@ impl SwarmPanel {
                 run_status: None,
                 mode: PanelMode::Browse,
                 author,
+                pending_author_load: None,
                 compose,
                 steer_conversation: None,
                 steer_connection_store: None,
@@ -2191,6 +2196,12 @@ impl SwarmPanel {
 
 impl Render for SwarmPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Apply a pending agent load (set by `load_agent_into_author`'s spawn)
+        // to the author form. Deferred to `render` because `Editor::set_text`
+        // requires `&mut Window`, which the spawn closure does not have.
+        if self.pending_author_load.is_some() {
+            self.apply_pending_author_load(window, cx);
+        }
         // If deserialized into Steer mode (or the operator switched via a
         // path that didn't go through the toggle handler), ensure the
         // conversation exists before rendering.
