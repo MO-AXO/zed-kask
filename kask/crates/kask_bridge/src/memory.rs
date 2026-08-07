@@ -9,7 +9,7 @@
 //! `agent` crate doesn't depend on `kask_bridge`. When the port is not yet
 //! wired (pre-login), the thread's ingest call site no-ops on `None`.
 
-use hkask_memory::{ConsolidationBridge, ConsolidationService, EpisodicMemory, SemanticMemory};
+use hkask_memory::{ConsolidationBridge, ConsolidationService, MemoryStore};
 use hkask_storage::{Database, EmbeddingStore, HMem, HMemStore};
 use hkask_types::{MemoryError, MemoryPort, MemorySnippet, TurnRecord, Visibility, WebID};
 use std::future::Future;
@@ -40,16 +40,15 @@ use crate::inference::LanguageModelEmbeddingPort;
 /// Construction requires a SQLCipher database path and passphrase. When these
 /// are not available, the port is simply not wired (the hook stays `None`).
 pub struct RealMemoryPort {
-    episodic: Arc<EpisodicMemory>,
-    semantic: Arc<SemanticMemory>,
-    /// The curator's sovereign stores (`agents/curator/pod.db`) behind a
+    store: Arc<MemoryStore>,
+    /// The curator's sovereign store (`agents/curator/pod.db`) behind a
     /// self-healing handle: when the curator DB cannot be opened at startup
-    /// (locked by a previous MCP server instance, transient I/O), the stores
-    /// are `None` and every access re-attempts the open. A successful
+    /// (locked by a previous MCP server instance, transient I/O), the store
+    /// is `None` and every access re-attempts the open. A successful
     /// re-open restores curator memory without an app restart; persistent
     /// failure is signaled with a warn-once per healing attempt, never
     /// silently.
-    curator_stores: Arc<CuratorStores>,
+    curator_store: Arc<CuratorStore>,
     embedding_port: LanguageModelEmbeddingPort,
     embedding_model: String,
     user_webid: WebID,
@@ -121,11 +120,7 @@ impl RealMemoryPort {
             hkask_storage::database::sqlite::SqliteDriver::new_labeled(pool, db_path),
         );
 
-        // Episodic store — first-person, Private, perspective-bound
-        let h_mem_store = HMemStore::from_driver(Arc::clone(&driver)).map_err(|e| e.to_string())?;
-        let episodic = Arc::new(EpisodicMemory::new(h_mem_store));
-
-        // Semantic store — shared knowledge graph with embeddings.
+        // Unified memory store — h_mems + embeddings, same SQLCipher DB.
         // The embedding dimension must match the embedding model's output —
         // a mismatch causes `DimensionMismatch` errors on every store call,
         // silently disabling embedding-based recall. The caller resolves
@@ -167,29 +162,25 @@ impl RealMemoryPort {
         } else {
             embedding_dim
         };
-        let h_mem_store2 = HMemStore::from_driver(Arc::clone(&driver))
-            .map_err(|e| format!("Failed to create second HMemStore for semantic memory: {e}"))?;
+        let h_mem_store = HMemStore::from_driver(Arc::clone(&driver)).map_err(|e| e.to_string())?;
         let embedding_store = EmbeddingStore::from_driver(driver, embedding_dim)
             .map_err(|e| format!("Failed to create EmbeddingStore: {e}"))?;
-        let semantic = Arc::new(SemanticMemory::new(h_mem_store2, embedding_store));
+        let store = Arc::new(MemoryStore::new(h_mem_store, embedding_store));
 
         let curator_webid = WebID::from_persona(b"curator");
 
-        // Curator stores behind the self-healing handle — see the field docs.
-        let curator_stores = Arc::new(CuratorStores::new(passphrase, embedding_dim));
+        // Curator store behind the self-healing handle — see the field docs.
+        let curator_store = Arc::new(CuratorStore::new(passphrase, embedding_dim));
 
-        // Consolidation service — episodic → semantic promotion.
+        // Consolidation service — perspective-bound → shared promotion.
         // Only constructed when the cadence is non-zero; a zero cadence disables
         // the trigger entirely (the operator can still fire consolidation
         // manually via the curator MCP server).
         let consolidation = if consolidation_cadence_secs > 0 {
-            let bridge = Arc::new(ConsolidationBridge::new(
-                Arc::clone(&episodic),
-                Arc::clone(&semantic),
-            ));
+            let bridge = Arc::new(ConsolidationBridge::new(Arc::clone(&store)));
             Some(Arc::new(ConsolidationService::new(
                 bridge,
-                Arc::clone(&semantic),
+                Arc::clone(&store),
             )))
         } else {
             None
@@ -197,13 +188,12 @@ impl RealMemoryPort {
 
         let curator_consolidation = RwLock::new(build_curator_consolidation(
             consolidation_cadence_secs,
-            &curator_stores.get(),
+            &curator_store.get(),
         ));
 
         Ok(Self {
-            episodic,
-            semantic,
-            curator_stores,
+            store,
+            curator_store,
             embedding_port,
             embedding_model,
             user_webid,
