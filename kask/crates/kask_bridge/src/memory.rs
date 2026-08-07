@@ -950,6 +950,13 @@ fn open_curator_store(
         }
     };
     let store = Arc::new({
+        // The curator uses the default storage budget (10_000) with no env
+        // override — a deliberate design decision: the curator must shed
+        // low-utility/low-saliency memories rather than grow unbounded. The
+        // default budget is the Ashby attenuator that forces consolidation
+        // to prune. The user store reads HKASK_MEMORY_STORAGE_BUDGET; the
+        // curator intentionally does not, so an operator cannot raise the
+        // curator's cap without changing the default constant.
         let base = MemoryStore::new(h_mem_store, embedding_store);
         // Wire the `reg.memory.encode` span sink on the curator's own DB —
         // mirrors the user-store wiring in `RealMemoryPort::new`. The
