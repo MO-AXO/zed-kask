@@ -9,7 +9,7 @@
 //! `agent` crate doesn't depend on `kask_bridge`. When the port is not yet
 //! wired (pre-login), the thread's ingest call site no-ops on `None`.
 
-use hkask_memory::{ConsolidationBridge, ConsolidationService, MemoryStore};
+use hkask_memory::{ConsolidationBridge, ConsolidationService, MemoryStore, MemoryStoreError};
 use hkask_storage::{Database, EmbeddingStore, HMem, HMemStore};
 use hkask_types::{MemoryError, MemoryPort, MemorySnippet, TurnRecord, Visibility, WebID};
 use std::future::Future;
@@ -682,54 +682,32 @@ impl hkask_regulation::AlertEscalationSink for BridgeAlertEscalationSink {
 
 /// The curator store pair: first-person episodic + shared semantic, both
 /// backed by the curator's sovereign `pod.db`.
-type CuratorStorePair = (Option<Arc<EpisodicMemory>>, Option<Arc<SemanticMemory>>);
-
-/// The curator's sovereign stores, with self-healing open.
+/// The curator's sovereign store, with self-healing open.
 ///
-/// Wraps the `(episodic, semantic)` pair in an `RwLock` plus the parameters
-/// needed to re-open them (passphrase, embedding dim). When the initial open
-/// fails — the common causes are transient (DB locked by a previous curator
-/// MCP server instance still shutting down, transient I/O) — the stores are
-/// `None` and every access via `get()` re-attempts the open. A successful
-/// re-open restores curator memory mid-session without an app restart.
-///
-/// Failure is never silent: the initial failure logs `error!` (with the DB
-/// path and remediation), each subsequent healing attempt logs `warn!` once
-/// per attempt, and a successful heal logs `info!`. This is the fail-loud
-/// half of the contract; the lazy re-open is the self-healing half.
-struct CuratorStores {
-    stores: RwLock<CuratorStorePair>,
+/// Wraps the `Option<Arc<MemoryStore>>` in an `RwLock` plus the parameters
+/// needed to re-open it (passphrase, embedding dim). When the initial open
+/// fails, the store is `None` and every access via `get()` re-attempts the
+/// open. A successful re-open restores curator memory mid-session.
+struct CuratorStore {
+    store: RwLock<Option<Arc<MemoryStore>>>,
     passphrase: String,
     embedding_dim: usize,
-    /// Set once the first post-construction failure has been logged, so a
-    /// persistently-broken DB produces one warn per healing *attempt*
-    /// (driven by ingestion cadence) rather than one per skipped write.
     heal_attempt_logged: std::sync::atomic::AtomicBool,
-    /// When false, `get()` never attempts a re-open. Tests construct handles
-    /// over in-memory stores with no valid passphrase/path — a heal attempt
-    /// there would touch the real filesystem.
     heal_enabled: bool,
 }
 
-impl CuratorStores {
+impl CuratorStore {
     fn new(passphrase: &str, embedding_dim: usize) -> Self {
-        let stores = open_curator_stores(passphrase, embedding_dim);
-        if stores.0.is_none() || stores.1.is_none() {
-            // `open_curator_stores` already logged the specific failure at
-            // warn; escalate the operator-facing summary to error since the
-            // curator now runs without memory until a heal succeeds.
+        let store = open_curator_store(passphrase, embedding_dim);
+        if store.is_none() {
             tracing::error!(
                 target: "reg.memory",
                 db_path = %curator_db_path(),
-                "Curator memory stores unavailable — the curator runs WITHOUT \
-                 episodic/semantic memory. Every curator-turn write will be \
-                 attempted again on ingestion (self-healing); check the DB \
-                 path above, that no other process holds the SQLCipher lock, \
-                 and that the passphrase matches the user's hKask keychain entry."
+                "Curator memory store unavailable — the curator runs WITHOUT                  memory. Every curator-turn write will be                  attempted again on ingestion (self-healing); check the DB                  path above, that no other process holds the SQLCipher lock,                  and that the passphrase matches the user's hKask keychain entry."
             );
         }
         Self {
-            stores: RwLock::new(stores),
+            store: RwLock::new(store),
             passphrase: passphrase.to_string(),
             embedding_dim,
             heal_attempt_logged: std::sync::atomic::AtomicBool::new(false),
@@ -737,16 +715,10 @@ impl CuratorStores {
         }
     }
 
-    /// Construct a handle over pre-built stores (tests). Never attempts a
-    /// re-open — the passphrase is empty and healing is disabled. For the
-    /// absent-store case, pass `None`s.
     #[cfg(test)]
-    fn for_tests(
-        episodic: Option<Arc<EpisodicMemory>>,
-        semantic: Option<Arc<SemanticMemory>>,
-    ) -> Self {
+    fn for_tests(store: Option<Arc<MemoryStore>>) -> Self {
         Self {
-            stores: RwLock::new((episodic, semantic)),
+            store: RwLock::new(store),
             passphrase: String::new(),
             embedding_dim: 1024,
             heal_attempt_logged: std::sync::atomic::AtomicBool::new(false),
@@ -754,73 +726,44 @@ impl CuratorStores {
         }
     }
 
-    /// Test helper: replace the stores after construction, simulating an
-    /// outage or a heal.
     #[cfg(test)]
-    fn set_for_tests(
-        &self,
-        episodic: Option<Arc<EpisodicMemory>>,
-        semantic: Option<Arc<SemanticMemory>>,
-    ) {
-        if let Ok(mut guard) = self.stores.write() {
-            *guard = (episodic, semantic);
+    fn set_for_tests(&self, store: Option<Arc<MemoryStore>>) {
+        if let Ok(mut guard) = self.store.write() {
+            *guard = store;
         }
     }
 
-    /// True when the DB-open level failed (both stores `None`) — the case a
-    /// re-open can fix. Partial degradation (one store `Some`, the other
-    /// `None` from a per-store init failure) is NOT healable by re-open and
-    /// must not churn re-opens on every access.
-    fn db_level_down(stores: &CuratorStorePair) -> bool {
-        stores.0.is_none() && stores.1.is_none()
-    }
-
-    /// Read the current store availability WITHOUT attempting a heal — for
-    /// status reporting. A health probe must not have side effects: if the
-    /// probe itself triggered the re-open, the curator's status would flap
-    /// between "down" and "healing" on every poll and the warn-once signal
-    /// would be driven by the probe rather than by real traffic.
-    fn availability(&self) -> (bool, bool) {
-        match self.stores.read() {
-            Ok(guard) => (guard.0.is_some(), guard.1.is_some()),
-            Err(_) => (false, false),
+    fn availability(&self) -> bool {
+        match self.store.read() {
+            Ok(guard) => guard.is_some(),
+            Err(_) => false,
         }
     }
 
-    /// Read the current stores, attempting a re-open when they're down.
-    ///
-    /// The re-open is cheap when it keeps failing (SQLCipher open fails fast
-    /// on a locked/absent DB) and runs at most once per call. Callers get a
-    /// cloned pair of `Arc`s, so a heal mid-ingestion takes effect on the
-    /// next turn.
-    fn get(&self) -> CuratorStorePair {
-        let needs_heal = match self.stores.read() {
-            Ok(guard) => Self::db_level_down(&guard),
-            Err(_) => true, // poisoned — attempt re-open to rebuild state
+    fn get(&self) -> Option<Arc<MemoryStore>> {
+        let needs_heal = match self.store.read() {
+            Ok(guard) => guard.is_none(),
+            Err(_) => true,
         };
         if needs_heal && self.heal_enabled {
             self.try_heal();
         }
-        match self.stores.read() {
+        match self.store.read() {
             Ok(guard) => (*guard).clone(),
-            Err(_) => (None, None),
+            Err(_) => None,
         }
     }
 
-    /// Attempt to (re)open the curator stores. On success, replaces the slot
-    /// and logs the heal; on failure, warns once per attempt round.
     fn try_heal(&self) {
-        let fresh = open_curator_stores(&self.passphrase, self.embedding_dim);
-        let fresh_ok = !Self::db_level_down(&fresh);
-        let replaced = match self.stores.write() {
+        let fresh = open_curator_store(&self.passphrase, self.embedding_dim);
+        let fresh_ok = fresh.is_some();
+        let replaced = match self.store.write() {
             Ok(mut guard) => {
-                let was_down = Self::db_level_down(&guard);
+                let was_down = guard.is_none();
                 if fresh_ok && was_down {
                     *guard = fresh;
                     true
                 } else {
-                    // Already healed by a concurrent caller, or the re-open
-                    // failed — drop our copy.
                     false
                 }
             }
@@ -828,7 +771,7 @@ impl CuratorStores {
                 tracing::warn!(
                     target: "reg.memory",
                     error = %e,
-                    "Curator stores lock poisoned — cannot attempt heal"
+                    "Curator store lock poisoned — cannot attempt heal"
                 );
                 false
             }
@@ -837,13 +780,11 @@ impl CuratorStores {
             tracing::info!(
                 target: "reg.memory",
                 db_path = %curator_db_path(),
-                "Curator memory stores healed — curator memory restored"
+                "Curator memory store healed — curator memory restored"
             );
             self.heal_attempt_logged
                 .store(false, std::sync::atomic::Ordering::Relaxed);
         } else if !fresh_ok {
-            // One warn per attempt round; the flag resets on a successful
-            // heal so a later outage re-arms the signal.
             if !self
                 .heal_attempt_logged
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
@@ -851,41 +792,34 @@ impl CuratorStores {
                 tracing::warn!(
                     target: "reg.memory",
                     db_path = %curator_db_path(),
-                    "Curator memory stores still unavailable after re-open \
-                     attempt — curator-turn writes are being dropped"
+                    "Curator memory store still unavailable after re-open                      attempt — curator-turn writes are being dropped"
                 );
             }
         }
     }
 }
 
-/// Build the curator consolidation service from an already-resolved store
-/// pair. Returns `None` when the cadence is zero (consolidation disabled) or
-/// either store is unavailable. Called at construction and after a heal.
 fn build_curator_consolidation(
     consolidation_cadence_secs: u64,
-    stores: &CuratorStorePair,
+    store: &Option<Arc<MemoryStore>>,
 ) -> Option<Arc<ConsolidationService>> {
     if consolidation_cadence_secs == 0 {
         return None;
     }
-    let (Some(curator_episodic), Some(curator_semantic)) = stores else {
+    let Some(store) = store else {
         return None;
     };
-    let bridge = Arc::new(ConsolidationBridge::new(
-        Arc::clone(curator_episodic),
-        Arc::clone(curator_semantic),
-    ));
+    let bridge = Arc::new(ConsolidationBridge::new(Arc::clone(store)));
     Some(Arc::new(ConsolidationService::new(
         bridge,
-        Arc::clone(curator_semantic),
+        Arc::clone(store),
     )))
 }
 
-fn open_curator_stores(
+fn open_curator_store(
     passphrase: &str,
     embedding_dim: usize,
-) -> (Option<Arc<EpisodicMemory>>, Option<Arc<SemanticMemory>>) {
+) -> Option<Arc<MemoryStore>> {
     let curator_db_path = std::env::var("HKASK_CURATOR_DB").unwrap_or_else(|_| {
         let p = hkask_types::agent_paths::agent_pod_db("curator");
         let resolved = hkask_types::agent_paths::resolve_under_data_dir(&p);
@@ -902,11 +836,9 @@ fn open_curator_stores(
                 target: "reg.memory",
                 error = %e,
                 db_path = %curator_db_path,
-                "Failed to open curator DB — curator copies will be skipped. \
-                 Set HKASK_CURATOR_DB to override the path, or ensure the \
-                 curator agent directory exists under the hKask data dir."
+                "Failed to open curator DB — curator copies will be skipped.                  Set HKASK_CURATOR_DB to override the path, or ensure the                  curator agent directory exists under the hKask data dir."
             );
-            return (None, None);
+            return None;
         }
     };
     let pool = match db.sqlite_pool() {
@@ -917,37 +849,21 @@ fn open_curator_stores(
                 error = %e,
                 "Failed to get SQLite pool for curator DB"
             );
-            return (None, None);
+            return None;
         }
     };
     let driver: Arc<dyn hkask_storage::DatabaseDriver> = Arc::new(
         hkask_storage::database::sqlite::SqliteDriver::new_labeled(pool, curator_db_path.as_str()),
     );
-    // HMem store for the curator's episodic memory (first-person, Private).
-    let h_mem_store_episodic = match HMemStore::from_driver(Arc::clone(&driver)) {
+    let h_mem_store = match HMemStore::from_driver(Arc::clone(&driver)) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(
                 target: "reg.memory",
                 error = %e,
-                "Failed to create HMemStore for curator episodic DB"
+                "Failed to create HMemStore for curator DB"
             );
-            return (None, None);
-        }
-    };
-    // HMem store for the curator's semantic memory (shared, with embeddings).
-    let h_mem_store_semantic = match HMemStore::from_driver(Arc::clone(&driver)) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                target: "reg.memory",
-                error = %e,
-                "Failed to create HMemStore for curator semantic DB"
-            );
-            return (
-                Some(Arc::new(EpisodicMemory::new(h_mem_store_episodic))),
-                None,
-            );
+            return None;
         }
     };
     let embedding_store = match EmbeddingStore::from_driver(driver, embedding_dim) {
@@ -956,23 +872,18 @@ fn open_curator_stores(
             tracing::warn!(
                 target: "reg.memory",
                 error = %e,
-                "Failed to create EmbeddingStore for curator semantic DB"
+                "Failed to create EmbeddingStore for curator DB"
             );
-            return (
-                Some(Arc::new(EpisodicMemory::new(h_mem_store_episodic))),
-                None,
-            );
+            return None;
         }
     };
-    let episodic = Arc::new(EpisodicMemory::new(h_mem_store_episodic));
-    let semantic = Arc::new(SemanticMemory::new(h_mem_store_semantic, embedding_store));
+    let store = Arc::new(MemoryStore::new(h_mem_store, embedding_store));
     tracing::info!(
         target: "reg.memory",
         db_path = %curator_db_path,
-        "Curator episodic + semantic stores opened — \
-         curator turns will be ingested into curator memory (perspective = curator)"
+        "Curator memory store opened —          curator turns will be ingested into curator memory (perspective = curator)"
     );
-    (Some(episodic), Some(semantic))
+    Some(store)
 }
 
 impl MemoryPort for RealMemoryPort {

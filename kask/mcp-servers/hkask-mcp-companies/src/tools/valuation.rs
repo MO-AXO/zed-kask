@@ -51,7 +51,7 @@ fn extract_historical_arrays<'a>(
     let income_data = income.as_array().filter(|a| !a.is_empty())?;
     let balance_data = balance.as_array().filter(|a| !a.is_empty())?;
     let cf_data = cf.as_array().filter(|a| !a.is_empty())?;
-    let metrics_data = metrics.as_array().unwrap_or(&[] as &[serde_json::Value]);
+    let metrics_data: &[serde_json::Value] = metrics.as_array().map_or(&[], |v| v);
     let profile_data = profile.as_array().and_then(|a| a.first())?;
     Some((income_data, balance_data, cf_data, metrics_data, profile_data))
 }

@@ -185,6 +185,21 @@ impl AgentExecutor {
         let skills_dir = self.skills_dir.as_ref()?;
         let mut entries = Vec::new();
         for skill_id in declared_skills {
+            // Validate the skill id before joining it into a path — a
+            // malicious cloned ABW card could declare `skills:
+            // ["../../../etc/passwd"]` to read arbitrary files via path
+            // traversal. Skill ids must be lowercase letters, numbers, and
+            // hyphens only (mirrors `agent_skills::validate_name`, which the
+            // swarm server can't depend on — it's GPUI-bound). Reject any id
+            // containing path separators or `..`.
+            if !is_valid_skill_id(skill_id) {
+                tracing::warn!(
+                    target: "hkask.mcp.swarm",
+                    skill = skill_id.as_str(),
+                    "invalid skill id (path traversal or invalid chars) — skipped from catalog"
+                );
+                continue;
+            }
             let skill_md = skills_dir.join(skill_id).join("SKILL.md");
             match std::fs::read_to_string(&skill_md) {
                 Ok(content) => {
