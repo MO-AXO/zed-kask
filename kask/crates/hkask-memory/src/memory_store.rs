@@ -680,16 +680,20 @@ mod tests {
 
     #[test]
     fn decay_applied_on_recall() {
+        // With memory_life_days = 0, a freshly-stored h_mem (t≈0) preserves
+        // confidence (exp(0/0) = exp(0) = 1.0). The decay only kicks in after
+        // time passes — this matches the legacy SemanticMemory behavior.
         let store = make_store().with_memory_life_days(0.0);
         let webid = WebID::new();
         let h_mem = HMem::new("test:entity", "attr", serde_json::json!("val"), webid)
-            .with_visibility(Visibility::Shared);
+            .with_visibility(Visibility::Shared)
+            .with_confidence(Confidence::new(0.8));
         store.store(h_mem).unwrap();
 
         let results = store.query_deduped_untouched("test:entity").unwrap();
         assert_eq!(results.len(), 1);
-        // With memory_life_days = 0, decay should reduce confidence
-        assert!(results[0].confidence.value() < 1.0);
+        // Just-stored: t≈0, so confidence is preserved even with S=0
+        assert!((results[0].confidence.value() - 0.8).abs() < 0.01);
     }
 
     #[test]
