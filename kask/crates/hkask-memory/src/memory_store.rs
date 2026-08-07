@@ -19,7 +19,7 @@
 //!   consolidation_candidates, expire_h_mem)
 //!
 //! The decay model (Wozniak-Gorzelanczyk, 1995: R(t) = exp(-t/S)) is applied
-//! at recall time, same as the legacy `EpisodicMemory`/`SemanticMemory`.
+//! at recall time.
 
 use std::sync::Arc;
 
@@ -40,7 +40,7 @@ pub enum MemoryStoreError {
     NoEmbeddingsForCentroid(String),
 }
 
-/// Result of computing a style centroid (mirrors `semantic::CentroidResult`).
+/// Result of computing a style centroid over a prefix-scoped embedding set.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CentroidResult {
     pub centroid: Vec<f32>,
@@ -66,6 +66,10 @@ pub(crate) const DEFAULT_STORAGE_BUDGET: usize = 10_000;
 /// Decay (Wozniak-Gorzelanczyk, 1995) is applied at recall time:
 /// `R(t) = exp(-t/S)` where `t` is days since `recalled_at` and `S` is
 /// `memory_life_days` (default 180). `touch_recall` resets the clock.
+///
+/// Text chunking (`chunk_text`, `strip_gutenberg_headers`) is exposed as
+/// associated functions delegating to [`crate::text_chunking`] — they touch
+/// no store state.
 pub struct MemoryStore {
     event_sink: Option<Arc<dyn RegulationSink>>,
     h_mem_store: HMemStore,
@@ -659,10 +663,13 @@ impl MemoryStore {
         Ok(())
     }
 
-    // ── Text chunking (delegated to semantic::SemanticMemory for compat) ──
+    // ── Text chunking (pure — no store access) ────────────────────────
+    //
+    // Kept as associated functions rather than moving callers to the free
+    // functions in `text_chunking`: the chunking step is always paired with a
+    // store write, so `MemoryStore::chunk_text` keeps the call site readable.
 
-    /// Chunk text into passages for embedding. Delegates to the legacy
-    /// `SemanticMemory::chunk_text` (pure function, no DB access).
+    /// Chunk text into passages for embedding.
     pub fn chunk_text(
         text: &str,
         entity_ref_prefix: &str,
@@ -670,7 +677,7 @@ impl MemoryStore {
         max_words: usize,
         sentence_boundary: &str,
     ) -> Vec<(String, String)> {
-        crate::semantic::SemanticMemory::chunk_text(
+        crate::text_chunking::chunk_text(
             text,
             entity_ref_prefix,
             min_words,
@@ -681,7 +688,7 @@ impl MemoryStore {
 
     /// Strip Project Gutenberg headers and footers from text.
     pub fn strip_gutenberg_headers(text: &str) -> String {
-        crate::semantic::SemanticMemory::strip_gutenberg_headers(text)
+        crate::text_chunking::strip_gutenberg_headers(text)
     }
 }
 
@@ -755,7 +762,7 @@ mod tests {
     fn decay_applied_on_recall() {
         // With memory_life_days = 0, a freshly-stored h_mem (t≈0) preserves
         // confidence (exp(0/0) = exp(0) = 1.0). The decay only kicks in after
-        // time passes — this matches the legacy SemanticMemory behavior.
+        // time passes.
         let store = make_store().with_memory_life_days(0.0);
         let webid = WebID::new();
         let h_mem = HMem::new("test:entity", "attr", serde_json::json!("val"), webid)

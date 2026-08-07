@@ -228,42 +228,6 @@ pub fn strip_gutenberg_headers(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{chunk_text, strip_gutenberg_headers};
-    //
-    // Before fix, `centroid[i] += v` was called without checking `i < dim`,
-    // causing an index-out-of-bounds panic when an embedding vector was longer
-    // than the target centroid dimension.
-    #[test]
-    fn centroid_accumulation_skips_out_of_range_dimensions() {
-        let dim = 4usize;
-        let mut centroid = vec![0.0f32; dim];
-
-        // Simulate an embedding with more dimensions than the target centroid.
-        let overlong_vector: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        for (i, v) in overlong_vector.iter().enumerate() {
-            if i < dim {
-                centroid[i] += v;
-            }
-        }
-
-        // No panic; only the first `dim` values are accumulated.
-        assert_eq!(centroid, vec![1.0, 2.0, 3.0, 4.0]);
-    }
-
-    #[test]
-    fn centroid_accumulation_handles_short_embedding() {
-        let dim = 4usize;
-        let mut centroid = vec![0.0f32; dim];
-
-        // Embedding shorter than dim — should partially accumulate with no panic.
-        let short_vector: Vec<f32> = vec![1.0, 2.0];
-        for (i, v) in short_vector.iter().enumerate() {
-            if i < dim {
-                centroid[i] += v;
-            }
-        }
-
-        assert_eq!(centroid, vec![1.0, 2.0, 0.0, 0.0]);
-    }
 
     // ── chunk_text failure-mode tests ──────────────────────────────────────
 
@@ -354,5 +318,27 @@ margin of safety reduces downside risk in uncertain environments.";
             );
         }
     }
-}
 
+    // ── strip_gutenberg_headers ────────────────────────────────────────────
+
+    #[test]
+    fn strip_gutenberg_headers_trims_between_markers() {
+        let text = "Legal boilerplate here.\n\
+                    *** START OF THE PROJECT GUTENBERG EBOOK MOBY DICK ***\n\
+                    Call me Ishmael.\n\
+                    *** END OF THE PROJECT GUTENBERG EBOOK MOBY DICK ***\n\
+                    License terms follow.";
+        assert_eq!(strip_gutenberg_headers(text), "Call me Ishmael.");
+    }
+
+    #[test]
+    fn strip_gutenberg_headers_returns_full_text_without_markers() {
+        // Non-Gutenberg text must pass through unchanged (trimmed) rather than
+        // being silently emptied by a missing-marker offset of 0..0.
+        let text = "  A document with no Gutenberg markers at all.  ";
+        assert_eq!(
+            strip_gutenberg_headers(text),
+            "A document with no Gutenberg markers at all."
+        );
+    }
+}

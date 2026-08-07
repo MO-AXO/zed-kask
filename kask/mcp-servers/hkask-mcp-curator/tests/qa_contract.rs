@@ -460,7 +460,7 @@ mod curator_semantic_search {
 
     #[tokio::test]
     async fn denies_without_semantic() {
-        // REQ: dependency-denial — no SemanticMemory → permission_denied
+        // REQ: dependency-denial — no MemoryStore → permission_denied
         let server = make_server_no_stores();
         let req =
             params::<SemanticSearchRequest>(serde_json::json!({"query": "test", "limit": null}));
