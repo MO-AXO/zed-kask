@@ -416,13 +416,17 @@ fn zero_memory_life_preserves_fresh_episodic_h_mems() {
     );
 }
 
-/// `new_episodic_only` is the no-embedding constructor. It must still support
-/// the full h_mem path — a caller that never embeds should not need to
-/// provision an embedding store.
+/// `try_new_without_embeddings` is the no-embedding constructor. It must still
+/// support the full h_mem path — a caller that recalls by entity/EAV and never
+/// embeds should not need a working embedding store. The curator depends on
+/// this: an `EmbeddingStore` failure must degrade vector similarity only, not
+/// disable curator recall entirely.
 #[test]
-fn episodic_only_store_supports_h_mem_path() {
-    let store =
-        MemoryStore::new_episodic_only(HMemStore::from_driver(make_driver()).expect("hmem init"));
+fn store_without_embeddings_supports_h_mem_path() {
+    let store = MemoryStore::try_new_without_embeddings(
+        HMemStore::from_driver(make_driver()).expect("hmem init"),
+    )
+    .expect("embedding-free store opens");
     let perspective = test_perspective();
 
     let h_mem = HMem::new("event", "happened", serde_json::json!("yes"), perspective)

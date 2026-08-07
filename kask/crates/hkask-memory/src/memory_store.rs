@@ -109,17 +109,24 @@ impl MemoryStore {
         Ok(Self::new(h_mem_store, embedding_store))
     }
 
-    /// Create an episodic-only `MemoryStore` (no embedding store).
+    /// Create an `MemoryStore` with no usable embedding capability.
     ///
-    /// For callers that only need h_mem storage (e.g. the condenser's
-    /// episodic path). The embedding store is a no-op stub.
-    pub fn new_episodic_only(h_mem_store: HMemStore) -> Self {
+    /// For callers that recall by entity/EAV only and never embed (the
+    /// condenser's episodic path; the curator when its `EmbeddingStore`
+    /// could not be opened). Embedding calls on the returned store will
+    /// fail at the storage layer rather than being silently accepted.
+    ///
+    /// Fallible because `EmbeddingStore::from_driver` can fail for a
+    /// driver-shape reason (a `Sqlite` provider whose `sqlite_pool()` is
+    /// `None`) that has nothing to do with the dimension. A caller reaching
+    /// here *because* its own `from_driver` call already failed would panic
+    /// on an `expect`, turning a degraded-memory path into a crash.
+    pub fn try_new_without_embeddings(h_mem_store: HMemStore) -> Result<Self, MemoryStoreError> {
         let embedding_store = EmbeddingStore::from_driver(
             Arc::clone(h_mem_store.driver()),
-            1, // dim=1 — never used; episodic-only store doesn't embed
-        )
-        .expect("embedding store with dim=1 always initializes");
-        Self::new(h_mem_store, embedding_store)
+            1, // dim=1 — never used; this store does not embed
+        )?;
+        Ok(Self::new(h_mem_store, embedding_store))
     }
 
     pub fn with_ledger(mut self, sink: Arc<dyn RegulationSink>) -> Self {

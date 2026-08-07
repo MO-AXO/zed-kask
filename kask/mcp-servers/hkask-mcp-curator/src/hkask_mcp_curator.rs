@@ -769,16 +769,36 @@ fn open_curator_stores(db_path: Option<&str>, passphrase: Option<&str>) -> Curat
     // Memory degrades independently of the escalation/regulation/token stores
     // below — a memory failure must not take down the escalation queue and
     // regulation archive with it.
-    let memory = match (
-        hkask_storage::HMemStore::from_driver(Arc::clone(&driver)),
-        embedding_store,
-    ) {
-        (Ok(s), Some(emb)) => Some(Arc::new(hkask_memory::MemoryStore::new(s, emb))),
-        (Ok(_), None) => {
-            tracing::warn!(target: "hkask.mcp.curator", "Skipping curator memory — EmbeddingStore unavailable");
-            None
-        }
-        (Err(e), _) => {
+    //
+    // An unavailable EmbeddingStore must NOT disable curator memory: every
+    // curator memory tool (`curator_semantic_search`, `curator_memory_recall`,
+    // `curator_consult`) recalls by entity/EAV, never by vector similarity.
+    // Before the store unification the h_mem half survived an embedding
+    // failure because it was a separate handle; falling back to the
+    // embedding-free constructor preserves that degradation boundary instead
+    // of coupling all recall to a capability none of these tools use.
+    let memory = match hkask_storage::HMemStore::from_driver(Arc::clone(&driver)) {
+        Ok(h_mem_store) => match embedding_store {
+            Some(embeddings) => Some(Arc::new(hkask_memory::MemoryStore::new(
+                h_mem_store,
+                embeddings,
+            ))),
+            None => match hkask_memory::MemoryStore::try_new_without_embeddings(h_mem_store) {
+                Ok(store) => {
+                    tracing::warn!(
+                        target: "hkask.mcp.curator",
+                        "EmbeddingStore unavailable — curator memory opened without \
+                         embeddings; entity/EAV recall works, vector similarity does not"
+                    );
+                    Some(Arc::new(store))
+                }
+                Err(e) => {
+                    tracing::warn!(target: "hkask.mcp.curator", error = %e, "Failed to open curator memory without embeddings — curator recall degraded");
+                    None
+                }
+            },
+        },
+        Err(e) => {
             tracing::warn!(target: "hkask.mcp.curator", error = %e, "Failed to create HMemStore — curator recall degraded");
             None
         }

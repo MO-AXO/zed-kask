@@ -56,6 +56,27 @@ fn make_server_with_stores() -> CuratorServer {
     )
 }
 
+/// Build a CuratorServer whose memory store has NO embedding capability —
+/// the shape `open_curator_stores` produces when `EmbeddingStore::from_driver`
+/// fails. Every curator memory tool recalls by entity/EAV, so all of them must
+/// still work.
+fn make_server_with_embedding_free_memory() -> CuratorServer {
+    let memory = Arc::new(
+        hkask_memory::MemoryStore::try_new_without_embeddings(
+            hkask_storage::HMemStore::from_driver(SqliteDriver::in_memory_driver())
+                .expect("hmem store"),
+        )
+        .expect("embedding-free memory store"),
+    );
+    CuratorServer::new(
+        WebID::new(),
+        Arc::new(CuratorDb::for_tests(CuratorStores {
+            memory: Some(memory),
+            ..CuratorStores::empty()
+        })),
+    )
+}
+
 /// Build a CuratorServer with an in-memory EscalationQueue pre-populated
 /// with `count` pending escalations, plus a RegulationArchive. Returns the
 /// server and the added escalation ids.
@@ -234,6 +255,15 @@ fn assert_error_kind(out: &str, expected_kind: &str) {
     assert_eq!(
         kind, expected_kind,
         "expected kind '{expected_kind}', got '{kind}' in: {out}"
+    );
+}
+
+/// Assert the response is NOT a structured McpToolError — the tool succeeded.
+fn assert_no_error(out: &str) {
+    let v: serde_json::Value = serde_json::from_str(out).expect("tool output must be valid JSON");
+    assert!(
+        v.get("error").is_none(),
+        "expected success, got error response: {out}"
     );
 }
 
@@ -474,6 +504,39 @@ mod curator_semantic_search {
         let raw = serde_json::json!({"limit": 10});
         let result: Result<SemanticSearchRequest, _> = serde_json::from_value(raw);
         assert!(result.is_err(), "missing 'query' must fail");
+    }
+
+    /// Degradation-boundary pin: an unavailable `EmbeddingStore` must NOT
+    /// disable curator memory recall. Every curator memory tool recalls by
+    /// entity/EAV, never by vector similarity, so an embedding failure is
+    /// orthogonal to their capability. Before the episodic/semantic store
+    /// unification the h_mem half survived independently; this asserts the
+    /// unified store preserves that boundary instead of coupling all recall
+    /// to a capability none of these tools use.
+    #[tokio::test]
+    async fn recalls_when_embeddings_unavailable() {
+        let server = make_server_with_embedding_free_memory();
+
+        let search = server
+            .curator_semantic_search(params::<SemanticSearchRequest>(
+                serde_json::json!({"query": "anything", "limit": null}),
+            ))
+            .await;
+        assert_no_error(&search);
+
+        let recall = server
+            .curator_memory_recall(params::<MemoryRecallRequest>(
+                serde_json::json!({"entity": "anything", "memory_type": "both"}),
+            ))
+            .await;
+        assert_no_error(&recall);
+
+        let consult = server
+            .curator_consult(params::<CuratorConsultRequest>(
+                serde_json::json!({"query": "anything", "limit": null}),
+            ))
+            .await;
+        assert_no_error(&consult);
     }
 }
 
