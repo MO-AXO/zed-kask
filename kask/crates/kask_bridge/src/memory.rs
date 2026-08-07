@@ -9,7 +9,7 @@
 //! `agent` crate doesn't depend on `kask_bridge`. When the port is not yet
 //! wired (pre-login), the thread's ingest call site no-ops on `None`.
 
-use hkask_memory::{ConsolidationBridge, ConsolidationService, MemoryStore, MemoryStoreError};
+use hkask_memory::{ConsolidationBridge, ConsolidationService, MemoryStore};
 use hkask_storage::{Database, EmbeddingStore, HMem, HMemStore};
 use hkask_types::{MemoryError, MemoryPort, MemorySnippet, TurnRecord, Visibility, WebID};
 use std::future::Future;
@@ -1443,16 +1443,7 @@ impl RealMemoryPort {
         // post-filter instead of pre-filter — avoids the write storm.
         // Touch via the correct store for each candidate's source.
         for c in &candidates {
-            let result: Result<(), Box<dyn std::error::Error>> = match c.source {
-                RecallSource::Episodic => {
-                    if let Some(episodic) = episodic {
-                        episodic.touch_recall(&c.h_mem_id).map_err(Into::into)
-                    } else {
-                        Ok(())
-                    }
-                }
-                RecallSource::Semantic => semantic.touch_recall(&c.h_mem_id).map_err(Into::into),
-            };
+            let result: Result<(), Box<dyn std::error::Error>> = store.touch_recall(&c.h_mem_id).map_err(Into::into);
             if let Err(e) = result {
                 tracing::warn!(
                     target: "reg.memory.decay",
@@ -1492,8 +1483,8 @@ impl RealMemoryPort {
     /// injection was dead code for both the user and curator injectors.
     async fn recall_thread_from<'a>(
         &'a self,
-        episodic: Option<&'a Arc<EpisodicMemory>>,
-        semantic: Option<&'a Arc<SemanticMemory>>,
+        episodic_store: &'a Arc<MemoryStore>,
+        semantic_store: Option<&'a Arc<MemoryStore>>,
         perspective: WebID,
         thread_id: &'a str,
         limit: usize,
@@ -1512,8 +1503,7 @@ impl RealMemoryPort {
 
         // ── 1. Episodic: exact entity match, perspective-scoped ─────
         let episodic_entity = format!("chat:thread:{thread_id}");
-        if let Some(episodic) = episodic
-            && let Ok(h_mems) = episodic.query_for_deduped_untouched(&episodic_entity, perspective)
+        if let Ok(h_mems) = episodic_store.query_for_deduped_untouched(&episodic_entity, perspective)
         {
             for h_mem in h_mems {
                 let text = h_mem.value.as_str().unwrap_or("").to_string();
@@ -1536,10 +1526,10 @@ impl RealMemoryPort {
         // ── 2. Semantic: exact entity match (shared copy in curator DB) ─
         // The `curator:thread:{thread_id}` entity is written to the
         // curator's sovereign DB by both user and curator ingestion paths.
-        // `semantic` here is `curator_semantic` for both callers — see the
-        // `recall_thread` and `recall_thread_curator` wrappers.
+        // `semantic_store` here is the curator store for both callers — see
+        // the `recall_thread` and `recall_thread_curator` wrappers.
         let semantic_entity = format!("curator:thread:{thread_id}");
-        if let Some(semantic) = semantic
+        if let Some(semantic) = semantic_store
             && let Ok(h_mems) = semantic.query_deduped_untouched(&semantic_entity)
         {
             for h_mem in h_mems {
@@ -1573,22 +1563,11 @@ impl RealMemoryPort {
 
         // ── 4. Touch only the injected h_mems ────────────────────────
         for c in &candidates {
-            let result: Result<(), Box<dyn std::error::Error>> = match c.source {
-                RecallSource::Episodic => {
-                    if let Some(episodic) = episodic {
-                        episodic.touch_recall(&c.h_mem_id).map_err(Into::into)
-                    } else {
-                        Ok(())
-                    }
-                }
-                RecallSource::Semantic => {
-                    if let Some(semantic) = semantic {
-                        semantic.touch_recall(&c.h_mem_id).map_err(Into::into)
-                    } else {
-                        Ok(())
-                    }
-                }
+            let touch_store: &Arc<MemoryStore> = match c.source {
+                RecallSource::Episodic => episodic_store,
+                RecallSource::Semantic => semantic_store.unwrap_or(episodic_store),
             };
+            let result: Result<(), Box<dyn std::error::Error>> = touch_store.touch_recall(&c.h_mem_id).map_err(Into::into);
             if let Err(e) = result {
                 tracing::warn!(
                     target: "reg.memory.decay",
