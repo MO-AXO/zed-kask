@@ -45,8 +45,13 @@ const HEAL_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 pub struct CuratorStores {
     pub escalation_queue: Option<Arc<hkask_storage::EscalationQueue>>,
     pub regulation_store: Option<Arc<hkask_storage::RegulationArchive>>,
-    pub episodic: Option<Arc<hkask_memory::EpisodicMemory>>,
-    pub semantic: Option<Arc<hkask_memory::SemanticMemory>>,
+    /// The curator's unified memory. One store holds both the curator's
+    /// episodic step-execution records and its semantic facts — the
+    /// `HMemOntology` blob on each h_mem distinguishes them (P5.4), so no
+    /// second store handle is needed. The `curator_memory_recall`
+    /// `memory_type` parameter stays as a recall-shape selector (perspective-
+    /// scoped vs entity-wide), not a store selector.
+    pub memory: Option<Arc<hkask_memory::MemoryStore>>,
 }
 
 impl CuratorStores {
@@ -54,8 +59,7 @@ impl CuratorStores {
     fn all_none(&self) -> bool {
         self.escalation_queue.is_none()
             && self.regulation_store.is_none()
-            && self.episodic.is_none()
-            && self.semantic.is_none()
+            && self.memory.is_none()
     }
 
     /// Empty store set — used when the DB cannot be opened at all.
@@ -63,8 +67,7 @@ impl CuratorStores {
         Self {
             escalation_queue: None,
             regulation_store: None,
-            episodic: None,
-            semantic: None,
+            memory: None,
         }
     }
 
@@ -82,16 +85,10 @@ impl CuratorStores {
             .ok_or_else(|| McpToolError::permission_denied("RegulationArchive not available"))
     }
 
-    fn episodic(&self) -> Result<&Arc<hkask_memory::EpisodicMemory>, McpToolError> {
-        self.episodic
+    fn memory(&self) -> Result<&Arc<hkask_memory::MemoryStore>, McpToolError> {
+        self.memory
             .as_ref()
-            .ok_or_else(|| McpToolError::permission_denied("EpisodicMemory not available"))
-    }
-
-    fn semantic(&self) -> Result<&Arc<hkask_memory::SemanticMemory>, McpToolError> {
-        self.semantic
-            .as_ref()
-            .ok_or_else(|| McpToolError::permission_denied("SemanticMemory not available"))
+            .ok_or_else(|| McpToolError::permission_denied("MemoryStore not available"))
     }
 }
 
@@ -301,8 +298,7 @@ impl CuratorServer {
                 "stores": {
                     "escalation_queue": stores.escalation_queue.is_some(),
                     "regulation_store": stores.regulation_store.is_some(),
-                    "episodic": stores.episodic.is_some(),
-                    "semantic": stores.semantic.is_some(),
+                    "memory": stores.memory.is_some(),
                 }
             }))
         })
@@ -401,8 +397,8 @@ impl CuratorServer {
     ) -> String {
         execute_tool(self, "curator_semantic_search", async {
             let stores = self.db.get();
-            let semantic = stores.semantic()?;
-            match semantic.query_deduped(&req.query) {
+            let memory = stores.memory()?;
+            match memory.query_deduped(&req.query) {
                 Ok(h_mems) => {
                     let limit = req.limit.unwrap_or(10);
                     let serialized: Vec<serde_json::Value> = h_mems
@@ -418,10 +414,10 @@ impl CuratorServer {
                     Ok(json!({"count": serialized.len(), "total": h_mems.len(), "results": serialized}))
                 }
                 Err(e) => Err(match e {
-                    hkask_memory::SemanticMemoryError::HMem(
+                    hkask_memory::MemoryStoreError::HMem(
                         hkask_storage::HMemError::Infra(ref infra),
                     )
-                    | hkask_memory::SemanticMemoryError::Embedding(
+                    | hkask_memory::MemoryStoreError::Embedding(
                         hkask_storage::EmbeddingError::Infrastructure(ref infra),
                     ) => map_infra_error(infra, "Semantic recall failed"),
                     other => McpToolError::internal(format!("Semantic recall failed: {other}")), // rr0044-ok: fallback arm of per-variant match
@@ -447,7 +443,7 @@ impl CuratorServer {
             let mut result = json!({});
 
             if memory_type == "episodic" || memory_type == "both" {
-                match stores.episodic() {
+                match stores.memory() {
                     Ok(ep) => match ep.query_for_deduped(&req.entity, self.webid) {
                         Ok(h_mems) => {
                             let s: Vec<serde_json::Value> = h_mems
@@ -472,7 +468,7 @@ impl CuratorServer {
                 }
             }
             if memory_type == "semantic" || memory_type == "both" {
-                match stores.semantic() {
+                match stores.memory() {
                     Ok(sem) => match sem.query_deduped(&req.entity) {
                         Ok(h_mems) => {
                             let s: Vec<serde_json::Value> = h_mems
@@ -533,7 +529,7 @@ impl CuratorServer {
             });
 
             // Semantic search — the curator's consolidated knowledge.
-            match stores.semantic() {
+            match stores.memory() {
                 Ok(sem) => match sem.query_deduped(&req.query) {
                     Ok(h_mems) => {
                         let fragments: Vec<serde_json::Value> = h_mems
@@ -563,7 +559,7 @@ impl CuratorServer {
             }
 
             // Episodic search — the curator's turn history.
-            match stores.episodic() {
+            match stores.memory() {
                 Ok(ep) => match ep.query_for_deduped(&req.query, self.webid) {
                     Ok(h_mems) => {
                         let fragments: Vec<serde_json::Value> = h_mems
@@ -770,27 +766,20 @@ fn open_curator_stores(db_path: Option<&str>, passphrase: Option<&str>) -> Curat
         }
     };
 
-    // Memory stores degrade per-store, matching the escalation/regulation/
-    // token stores below — an episodic/semantic failure must not take down
-    // the escalation queue and regulation archive with it.
-    let episodic = match hkask_storage::HMemStore::from_driver(Arc::clone(&driver)) {
-        Ok(s) => Some(Arc::new(hkask_memory::EpisodicMemory::new(s))),
-        Err(e) => {
-            tracing::warn!(target: "hkask.mcp.curator", error = %e, "Failed to create HMemStore (episodic) — episodic recall degraded");
-            None
-        }
-    };
-    let semantic = match (
+    // Memory degrades independently of the escalation/regulation/token stores
+    // below — a memory failure must not take down the escalation queue and
+    // regulation archive with it.
+    let memory = match (
         hkask_storage::HMemStore::from_driver(Arc::clone(&driver)),
         embedding_store,
     ) {
-        (Ok(s), Some(emb)) => Some(Arc::new(hkask_memory::SemanticMemory::new(s, emb))),
+        (Ok(s), Some(emb)) => Some(Arc::new(hkask_memory::MemoryStore::new(s, emb))),
         (Ok(_), None) => {
-            tracing::warn!(target: "hkask.mcp.curator", "Skipping semantic memory — EmbeddingStore unavailable");
+            tracing::warn!(target: "hkask.mcp.curator", "Skipping curator memory — EmbeddingStore unavailable");
             None
         }
         (Err(e), _) => {
-            tracing::warn!(target: "hkask.mcp.curator", error = %e, "Failed to create HMemStore (semantic) — semantic recall degraded");
+            tracing::warn!(target: "hkask.mcp.curator", error = %e, "Failed to create HMemStore — curator recall degraded");
             None
         }
     };
@@ -812,7 +801,6 @@ fn open_curator_stores(db_path: Option<&str>, passphrase: Option<&str>) -> Curat
     CuratorStores {
         escalation_queue,
         regulation_store,
-        episodic,
-        semantic,
+        memory,
     }
 }

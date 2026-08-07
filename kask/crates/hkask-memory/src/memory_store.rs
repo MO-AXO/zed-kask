@@ -347,7 +347,54 @@ impl MemoryStore {
         Ok(decayed)
     }
 
-    // ── Embedding operations ───────────────────────────────────────────────
+    // ── Ontology recall (P5.4 dual-axis anchoring) ───────────────────────
+    //
+    // These are what make the ontology blob load-bearing rather than
+    // decorative: an h_mem's dual-axis anchoring is a query axis, not just
+    // metadata. All four apply decay without touching `recalled_at` — an
+    // ontology sweep inspects many h_mems and should not reset their decay
+    // clocks wholesale (the same write-storm reasoning as
+    // `query_deduped_untouched`).
+
+    /// Recall by Dublin Core type (`dc_type`) — the state-axis type query.
+    pub fn query_by_dc_type(&self, dc_type: &str) -> Result<Vec<HMem>, MemoryStoreError> {
+        Ok(self.decayed(self.h_mem_store.query_by_dc_type(dc_type)?))
+    }
+
+    /// Recall by Dublin Core subject substring — the state-axis topic query.
+    pub fn query_by_dc_subject(&self, subject: &str) -> Result<Vec<HMem>, MemoryStoreError> {
+        Ok(self.decayed(self.h_mem_store.query_by_dc_subject(subject)?))
+    }
+
+    /// Recall every step of a PKO procedure — the process-axis query.
+    pub fn query_by_pko_procedure(&self, procedure: &str) -> Result<Vec<HMem>, MemoryStoreError> {
+        Ok(self.decayed(self.h_mem_store.query_by_pko_procedure(procedure)?))
+    }
+
+    /// Recall h_mems tagged by an open-world ontology namespace (`fibo`,
+    /// `golem`, `omc`, …) — the domain-supplement query.
+    pub fn query_by_ontology_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<HMem>, MemoryStoreError> {
+        Ok(self
+            .decayed(self.h_mem_store.query_by_ontology_namespace(namespace)?))
+    }
+
+    /// Apply the Wozniak-Gorzelanczyk forgetting curve to a recalled batch
+    /// without touching `recalled_at`.
+    fn decayed(&self, h_mems: Vec<HMem>) -> Vec<HMem> {
+        h_mems
+            .into_iter()
+            .map(|mut t| {
+                let days_since = crate::bayesian::days_since(t.recalled_at);
+                t.confidence = t.confidence.memory_decay(days_since, self.memory_life_days);
+                t
+            })
+            .collect()
+    }
+
+    // ── Embedding operations ────────────────────────────────────────
 
     pub fn store_embedding(
         &self,
@@ -745,5 +792,146 @@ mod tests {
         let user2_results = store.query_for_deduped_untouched("shared:entity", user2).unwrap();
         assert_eq!(user2_results.len(), 1);
         assert_eq!(user2_results[0].value, serde_json::json!("v2"));
+    }
+
+    /// Populate a store with three ontology-anchored h_mems: two semantic
+    /// facts (one FIBO-tagged) and one episodic step execution.
+    fn store_with_ontologies() -> (MemoryStore, WebID) {
+        let store = make_store();
+        let user = WebID::new();
+
+        let roic = HMem::new("company:Apple", "roic", serde_json::json!(0.32), user)
+            .with_visibility(Visibility::Shared)
+            .with_ontology(
+                HMemOntology::semantic("bibo:Article", vec!["ROIC".to_string()], "10-K 2025")
+                    .with_ontology_tag("fibo", "return on invested capital"),
+            );
+        store.store(roic).expect("store roic");
+
+        let moat = HMem::new("company:Apple", "moat", serde_json::json!("brand"), user)
+            .with_visibility(Visibility::Shared)
+            .with_ontology(HMemOntology::semantic(
+                "bibo:Document",
+                vec!["competitive advantage".to_string()],
+                "analyst note",
+            ));
+        store.store(moat).expect("store moat");
+
+        let step = HMem::new("chat:thread:abc", "chatted", serde_json::json!("reproduced"), user)
+            .with_perspective(user)
+            .with_visibility(Visibility::Private)
+            .with_ontology(HMemOntology::episodic(
+                "diagnose-bug-123",
+                "reproduce",
+                "session-1",
+            ));
+        store.store(step).expect("store step");
+
+        (store, user)
+    }
+
+    #[test]
+    fn query_by_dc_type_selects_only_that_state_axis_type() {
+        let (store, _) = store_with_ontologies();
+
+        let articles = store.query_by_dc_type("bibo:Article").expect("query");
+        assert_eq!(articles.len(), 1);
+        assert_eq!(articles[0].attribute, "roic");
+
+        let steps = store.query_by_dc_type("pko:StepExecution").expect("query");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].entity, "chat:thread:abc");
+
+        assert!(
+            store
+                .query_by_dc_type("dcterms:Dataset")
+                .expect("query")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn query_by_dc_subject_matches_a_term_inside_the_subject_array() {
+        let (store, _) = store_with_ontologies();
+
+        let roic = store.query_by_dc_subject("ROIC").expect("query");
+        assert_eq!(roic.len(), 1);
+        assert_eq!(roic[0].attribute, "roic");
+
+        // Substring match, not exact: "competitive" hits "competitive advantage".
+        let moat = store.query_by_dc_subject("competitive").expect("query");
+        assert_eq!(moat.len(), 1);
+        assert_eq!(moat[0].attribute, "moat");
+
+        assert!(
+            store
+                .query_by_dc_subject("nonexistent-subject")
+                .expect("query")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn query_by_pko_procedure_selects_only_process_axis_steps() {
+        let (store, _) = store_with_ontologies();
+
+        let steps = store
+            .query_by_pko_procedure("diagnose-bug-123")
+            .expect("query");
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].ontology.as_ref().and_then(|o| o.pko_step.as_deref()),
+            Some("reproduce")
+        );
+
+        // Semantic facts carry no PKO procedure, so they never match.
+        assert!(
+            store
+                .query_by_pko_procedure("bibo:Article")
+                .expect("query")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn query_by_ontology_namespace_reaches_the_open_world_map() {
+        let (store, _) = store_with_ontologies();
+
+        let fibo = store.query_by_ontology_namespace("fibo").expect("query");
+        assert_eq!(fibo.len(), 1);
+        assert_eq!(fibo[0].attribute, "roic");
+        assert_eq!(
+            fibo[0]
+                .ontology
+                .as_ref()
+                .map(|o| o.ontology_concepts("fibo")),
+            Some(&["return on invested capital".to_string()][..])
+        );
+
+        // An unpopulated namespace yields nothing rather than erroring — the
+        // open-world map has no schema constraint on which keys exist.
+        assert!(
+            store
+                .query_by_ontology_namespace("golem")
+                .expect("query")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ontology_queries_skip_h_mems_with_no_ontology_blob() {
+        // A h_mem written before the ontology column existed (or by a caller
+        // that sets none) must not match an ontology query — a NULL blob is
+        // "unanchored", not "matches everything".
+        let store = make_store();
+        let user = WebID::new();
+        let bare = HMem::new("bare:entity", "attr", serde_json::json!("v"), user)
+            .with_visibility(Visibility::Shared);
+        store.store(bare).expect("store bare");
+
+        assert!(store.query_by_dc_type("bibo:Article").expect("query").is_empty());
+        assert!(store.query_by_dc_subject("anything").expect("query").is_empty());
+        assert!(store.query_by_pko_procedure("any").expect("query").is_empty());
+        assert!(store.query_by_ontology_namespace("fibo").expect("query").is_empty());
     }
 }

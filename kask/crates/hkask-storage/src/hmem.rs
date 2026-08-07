@@ -645,6 +645,117 @@ impl HMemStore {
         )
     }
 
+    // ── Ontology query paths (P5.4 dual-axis anchoring) ──────────────────
+    //
+    // The `ontology` column is a JSON blob, so these queries reach into it
+    // with provider-native JSON extraction. SQLite has `json_extract`;
+    // Postgres has no such function over a TEXT column, so the blob is cast
+    // to `jsonb` first. Without this branch the same SQL silently fails on
+    // one of the two providers.
+
+    /// A provider-native scalar extraction of `$.<field>` from `ontology`.
+    fn ontology_scalar(&self, field: &str) -> String {
+        match self.driver.provider() {
+            hkask_types::DbProvider::Postgres => format!("(ontology::jsonb->>'{field}')"),
+            hkask_types::DbProvider::Sqlite => format!("json_extract(ontology, '$.{field}')"),
+        }
+    }
+
+    /// A provider-native text rendering of the JSON sub-document at
+    /// `$.<field>` (used for substring matching over an array field).
+    fn ontology_json_text(&self, field: &str) -> String {
+        match self.driver.provider() {
+            hkask_types::DbProvider::Postgres => format!("(ontology::jsonb->'{field}')::text"),
+            hkask_types::DbProvider::Sqlite => format!("json_extract(ontology, '$.{field}')"),
+        }
+    }
+
+    /// Query h_mems whose Dublin Core type (`$.dc_type`) matches exactly.
+    ///
+    /// The state-axis type query: "give me every `bibo:Article` h_mem".
+    #[must_use = "result must be used"]
+    pub fn query_by_dc_type(&self, dc_type: &str) -> Result<Vec<HMem>, HMemError> {
+        let extract = self.ontology_scalar("dc_type");
+        self.query_rows(
+            &format!(
+                "SELECT {HMEM_COLUMNS} FROM hmems \
+                 WHERE {extract} = ?1 AND valid_to IS NULL \
+                 ORDER BY valid_from DESC"
+            ),
+            &[DbValue::Text(dc_type.to_string())],
+        )
+    }
+
+    /// Query h_mems whose Dublin Core subject list (`$.dc_subject`) contains
+    /// the given term as a substring.
+    ///
+    /// `dc_subject` is an array, so this matches against its JSON rendering.
+    /// The subject must not contain SQL LIKE wildcards (`%`, `_`) — they
+    /// would be interpreted as wildcards.
+    #[must_use = "result must be used"]
+    pub fn query_by_dc_subject(&self, subject: &str) -> Result<Vec<HMem>, HMemError> {
+        let extract = self.ontology_json_text("dc_subject");
+        self.query_rows(
+            &format!(
+                "SELECT {HMEM_COLUMNS} FROM hmems \
+                 WHERE {extract} LIKE ?1 AND valid_to IS NULL \
+                 ORDER BY valid_from DESC"
+            ),
+            &[DbValue::Text(format!("%{subject}%"))],
+        )
+    }
+
+    /// Query h_mems belonging to a PKO procedure (`$.pko_procedure`).
+    ///
+    /// The process-axis query: "give me every step of `diagnose-bug-123`".
+    #[must_use = "result must be used"]
+    pub fn query_by_pko_procedure(&self, procedure: &str) -> Result<Vec<HMem>, HMemError> {
+        let extract = self.ontology_scalar("pko_procedure");
+        self.query_rows(
+            &format!(
+                "SELECT {HMEM_COLUMNS} FROM hmems \
+                 WHERE {extract} = ?1 AND valid_to IS NULL \
+                 ORDER BY valid_from DESC"
+            ),
+            &[DbValue::Text(procedure.to_string())],
+        )
+    }
+
+    /// Query h_mems carrying at least one tag from an open-world ontology
+    /// namespace (`$.ontology_tags.<namespace>`).
+    ///
+    /// This is what makes adding a domain ontology (FIBO, GOLEM, OMC, ESO)
+    /// a data change rather than a schema change: the namespace is a key in
+    /// the blob, and this query reaches it without a migration.
+    ///
+    /// The namespace is bound as a parameter on both providers — it is
+    /// caller-supplied and must not be interpolated into the SQL text.
+    #[must_use = "result must be used"]
+    pub fn query_by_ontology_namespace(&self, namespace: &str) -> Result<Vec<HMem>, HMemError> {
+        let (predicate, params) = match self.driver.provider() {
+            hkask_types::DbProvider::Postgres => (
+                "jsonb_exists(ontology::jsonb->'ontology_tags', ?1)".to_string(),
+                vec![DbValue::Text(namespace.to_string())],
+            ),
+            // SQLite has no parameterizable JSON path, so the path is built
+            // by concatenation inside SQL (`'$.ontology_tags.' || ?1`) rather
+            // than by Rust string interpolation — the namespace stays a bound
+            // parameter and cannot inject SQL.
+            hkask_types::DbProvider::Sqlite => (
+                "json_extract(ontology, '$.ontology_tags.' || ?1) IS NOT NULL".to_string(),
+                vec![DbValue::Text(namespace.to_string())],
+            ),
+        };
+        self.query_rows(
+            &format!(
+                "SELECT {HMEM_COLUMNS} FROM hmems \
+                 WHERE {predicate} AND valid_to IS NULL \
+                 ORDER BY valid_from DESC"
+            ),
+            &params,
+        )
+    }
+
     /// Soft-delete: set valid_to to close a h_mem.
     /// Soft-delete a h_mem by setting valid_to.
     ///
