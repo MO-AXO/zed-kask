@@ -782,9 +782,9 @@ pub fn implied_growth(
             break;
         }
         if intrinsic > current_price {
-            lo = mid;
-        } else {
             hi = mid;
+        } else {
+            lo = mid;
         }
     }
     Some(implied)
@@ -1109,7 +1109,16 @@ impl Default for McRange {
     }
 }
 
+/// The simulation-count bounds enforced by [`monte_carlo_dcf`].
+pub const MC_MIN_SIMULATIONS: usize = 100;
+pub const MC_MAX_SIMULATIONS: usize = 10_000;
+
 /// Run N Monte Carlo simulations with randomized assumptions within +/- range.
+///
+/// `simulations` is clamped to `[MC_MIN_SIMULATIONS, MC_MAX_SIMULATIONS]` here
+/// rather than at the call site, so the non-empty invariant the histogram and
+/// percentile computations rely on holds for every caller of this public
+/// function. `MonteCarloResult::simulations` reports the count actually run.
 pub fn monte_carlo_dcf(
     hist: &HistoricalSnapshot,
     base_assumptions: &ProjectionAssumptions,
@@ -1118,6 +1127,7 @@ pub fn monte_carlo_dcf(
     current_price: f64,
     rng: &mut impl rand::Rng,
 ) -> MonteCarloResult {
+    let simulations = simulations.clamp(MC_MIN_SIMULATIONS, MC_MAX_SIMULATIONS);
     let base = project_model(hist, base_assumptions, current_price);
     let mut values: Vec<f64> = Vec::with_capacity(simulations);
 
@@ -1238,6 +1248,32 @@ mod tests {
             shares_outstanding: 1_000.0,
             tax_rate: 0.21,
         }
+    }
+
+    #[test]
+    fn monte_carlo_dcf_clamps_zero_simulations() {
+        // `simulations = 0` previously panicked on `values[0]` because the
+        // clamp lived at the tool call site, not in this public function.
+        let h = sample_hist();
+        let assumptions = ProjectionAssumptions::from_history(&h);
+        let ranges = McRange::default();
+        let mut rng = rand::rng();
+        let result = monte_carlo_dcf(&h, &assumptions, 0, &ranges, 100.0, &mut rng);
+        assert_eq!(
+            result.simulations, MC_MIN_SIMULATIONS,
+            "zero simulations must clamp up to the floor, not panic"
+        );
+        assert!(result.max_intrinsic >= result.min_intrinsic);
+    }
+
+    #[test]
+    fn monte_carlo_dcf_clamps_excessive_simulations() {
+        let h = sample_hist();
+        let assumptions = ProjectionAssumptions::from_history(&h);
+        let ranges = McRange::default();
+        let mut rng = rand::rng();
+        let result = monte_carlo_dcf(&h, &assumptions, usize::MAX, &ranges, 100.0, &mut rng);
+        assert_eq!(result.simulations, MC_MAX_SIMULATIONS);
     }
 
     #[test]
