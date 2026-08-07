@@ -270,6 +270,32 @@ impl MemoryStore {
         Ok(crate::recall_dedup::dedup_h_mems(filtered))
     }
 
+    /// Query by entity for a specific perspective, with deduplication and
+    /// decay, touching `recalled_at` on every survivor.
+    ///
+    /// The touching variant of [`Self::query_for_deduped_untouched`]. Prefer
+    /// the untouched variant for recall paths that inspect many candidates
+    /// but only act on a few — touching every recalled h_mem turns recall
+    /// into a write storm under concurrent load (one UPDATE per row per call).
+    pub fn query_for_deduped(
+        &self,
+        entity: &str,
+        perspective: WebID,
+    ) -> Result<Vec<HMem>, MemoryStoreError> {
+        let deduped = self.query_for_deduped_untouched(entity, perspective)?;
+        for t in &deduped {
+            if let Err(e) = self.h_mem_store.touch_recall(&t.id) {
+                tracing::warn!(
+                    target: "reg.memory.decay",
+                    triple_id = %t.id,
+                    error = %e,
+                    "Failed to touch_recall h_mem — decay clock not reset"
+                );
+            }
+        }
+        Ok(deduped)
+    }
+
     /// Query by entity prefix for a perspective, without touching
     /// `recalled_at`. Caps rows via SQL LIMIT.
     pub fn query_for_deduped_untouched_by_prefix(
