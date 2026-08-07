@@ -1397,8 +1397,7 @@ mod tests {
         assert_eq!(usage_event.input_tokens, 5);
         assert_eq!(usage_event.output_tokens, 3);
         assert_eq!(
-            usage_event.cost,
-            None,
+            usage_event.cost, None,
             "Copilot Chat must not report USD cost (D20): cost must be None"
         );
     }
