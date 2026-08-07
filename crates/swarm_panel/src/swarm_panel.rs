@@ -663,6 +663,36 @@ impl SwarmPanel {
         cx.notify();
     }
 
+    /// Reset the author form to a fresh create state (clear `editing_id`,
+    /// make the name field editable again, clear the status). Called when the
+    /// operator clicks the Author mode toggle in the header — distinct from
+    /// `load_agent_into_author`, which sets `editing_id` and read-only before
+    /// calling `set_mode`.
+    fn reset_author_form_for_create(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.author.editing_id = None;
+        self.author.status = None;
+        self.author.name.update(cx, |e, _| e.set_read_only(false));
+        // Clear the text fields so the operator starts fresh.
+        self.author.name.update(cx, |e, cx| e.clear(window, cx));
+        self.author.description.update(cx, |e, cx| e.clear(window, cx));
+        self.author.system_prompt.update(cx, |e, cx| e.clear(window, cx));
+        self.author.tags.update(cx, |e, cx| e.clear(window, cx));
+        self.author.valence_arousal.update(cx, |e, cx| e.clear(window, cx));
+        self.author.valence_valence.update(cx, |e, cx| e.clear(window, cx));
+        self.author
+            .valence_primary_affect
+            .update(cx, |e, cx| e.clear(window, cx));
+        self.author
+            .valence_personality_traits
+            .update(cx, |e, cx| e.clear(window, cx));
+        self.author.agent_type = "research".to_string();
+        self.author.visibility = "private".to_string();
+    }
+
     /// Read the current swarm mode from `kask.swarm.mode` settings. Returns
     /// `Abw` when unset (the default). The panel reads the mode here (not
     /// from the MCP server) because the server's mode is derived from the

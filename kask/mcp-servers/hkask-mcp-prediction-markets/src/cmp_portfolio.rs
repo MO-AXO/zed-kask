@@ -1379,14 +1379,15 @@ mod tests {
         let set = construct_cmp_index_set(&oriented_constituents, &config());
         // 3m bucket is available (3 contracts in window [68,112])
         assert!(set.available_buckets.contains(&MaturityBucket::ThreeMonth));
-        // C0.5: the cohort fallback publishes a BucketedSparse index.
+        // C0.5: the cohort fallback publishes BucketedSparse indices.
         assert!(!set.indices.is_empty(), "cohort fallback should publish");
-        let idx = &set.indices[0];
-        assert_eq!(idx.bucket, MaturityBucket::ThreeMonth);
-        assert_eq!(idx.portfolio.method, CmpMethod::BucketedSparse);
+        // The 3m index should be present as a BucketedSparse cohort.
+        let three_m = set.indices.iter().find(|i| i.bucket == MaturityBucket::ThreeMonth)
+            .expect("3m index should publish via cohort fallback");
+        assert_eq!(three_m.portfolio.method, CmpMethod::BucketedSparse);
         // Nearest cohort is 75d (the contracts at 70/72/75 form separate
         // cohorts since they're >1d apart; 75d is closest to 90d).
-        assert!((idx.portfolio.weighted_maturity_days - 75.0).abs() < 1e-9);
-        assert!((idx.portfolio.maturity_error_days - 15.0).abs() < 1e-9);
+        assert!((three_m.portfolio.weighted_maturity_days - 75.0).abs() < 1e-9);
+        assert!((three_m.portfolio.maturity_error_days - 15.0).abs() < 1e-9);
     }
 }
