@@ -299,6 +299,16 @@ fn assert_no_error(out: &str) {
     );
 }
 
+/// Unwrap the `{"content": <value>}` envelope every tool response is wrapped
+/// in. Reading a field off the envelope's top level silently yields `None`
+/// (the `.rules` tool-envelope trap), so tests must unwrap first.
+fn tool_payload(out: &str) -> serde_json::Value {
+    let v: serde_json::Value = serde_json::from_str(out).expect("tool output must be valid JSON");
+    v.get("content")
+        .cloned()
+        .unwrap_or_else(|| panic!("expected 'content' envelope, got: {out}"))
+}
+
 /// Construct a Parameters<T> from a JSON value via deserialization.
 fn params<T: serde::de::DeserializeOwned>(
     json: serde_json::Value,
@@ -598,11 +608,22 @@ mod curator_memory_recall_ontology {
                 })))
                 .await;
             assert_no_error(&out);
-            let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
+            let payload = tool_payload(&out);
             assert_eq!(
-                v.get("count").and_then(|c| c.as_u64()),
+                payload.get("count").and_then(|c| c.as_u64()),
                 Some(1),
                 "axis '{axis}' must recall the anchored h_mem, got: {out}"
+            );
+            assert_eq!(
+                payload.pointer("/h_mems/0/entity").and_then(|e| e.as_str()),
+                Some("company:Apple")
+            );
+            // The recalled h_mem must carry its ontology blob — an ontology
+            // query that drops the anchoring in its output would leave the
+            // caller unable to tell WHY the row matched.
+            assert!(
+                payload.pointer("/h_mems/0/ontology").is_some(),
+                "ontology recall must return the ontology blob, got: {out}"
             );
         }
     }
@@ -621,8 +642,10 @@ mod curator_memory_recall_ontology {
             })))
             .await;
         assert_no_error(&out);
-        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
-        assert_eq!(v.get("count").and_then(|c| c.as_u64()), Some(0));
+        assert_eq!(
+            tool_payload(&out).get("count").and_then(|c| c.as_u64()),
+            Some(0)
+        );
     }
 
     #[tokio::test]
@@ -665,9 +688,10 @@ mod curator_memory_recall_ontology {
             })))
             .await;
         assert_no_error(&out);
-        let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(
-            v.pointer("/semantic/count").and_then(|c| c.as_u64()),
+            tool_payload(&out)
+                .pointer("/semantic/count")
+                .and_then(|c| c.as_u64()),
             Some(1),
             "entity recall must still work: {out}"
         );

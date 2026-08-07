@@ -429,7 +429,9 @@ impl CuratorServer {
         .await
     }
 
-    #[tool(description = "Recall the Curator's episodic and semantic memory about an entity")]
+    #[tool(
+        description = "Recall the Curator's episodic and semantic memory about an entity. Set `ontology_axis` (dc_type | dc_subject | pko_procedure | ontology_namespace) plus `ontology_value` to recall along the dual-axis ontology instead of the entity — e.g. every step of a PKO procedure, or every h_mem tagged by a domain ontology namespace."
+    )]
     pub async fn curator_memory_recall(
         &self,
         Parameters(req): Parameters<MemoryRecallRequest>,
