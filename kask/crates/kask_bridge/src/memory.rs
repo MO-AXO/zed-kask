@@ -600,6 +600,9 @@ pub fn curator_db_path() -> String {
 /// sovereign `pod.db` — the same DB the curator MCP server's `reg_query` and
 /// `curator_algedonic_log` tools read. Returns `None` on any failure; the
 /// caller degrades to `NoopEventSink` with a warn.
+///
+/// Used by `main.rs` to wire the `McpRuntime` and `CyberneticsLoop` event sinks
+/// to durable storage on the curator's pod.db.
 pub fn open_curator_regulation_archive(
     passphrase: &str,
 ) -> Option<Arc<hkask_storage::RegulationArchive>> {
@@ -658,10 +661,11 @@ fn open_regulation_archive(
 /// `curator_escalation_dismiss` tools read. Returns `None` on any failure;
 /// the caller degrades to no escalation-queue persistence with a warn.
 ///
-/// Mirrors `open_curator_regulation_archive` — same DB, same passphrase,
-/// same resolution path. The queue is the primary durable path for alert
-/// review: `CyberneticsLoop` writes escalated alerts here unconditionally so
-/// the Curator/user can review and resolve them.
+/// Mirrors the regulation archive opener (`open_regulation_archive`) —
+/// same DB, same passphrase, same resolution path. The queue is the
+/// primary durable path for alert review: `CyberneticsLoop` writes
+/// escalated alerts here unconditionally so the Curator/user can review and
+/// resolve them.
 pub fn open_curator_escalation_queue(
     passphrase: &str,
 ) -> Option<Arc<hkask_storage::EscalationQueue>> {
@@ -949,8 +953,8 @@ fn open_curator_store(
         let base = MemoryStore::new(h_mem_store, embedding_store);
         // Wire the `reg.memory.encode` span sink on the curator's own DB —
         // mirrors the user-store wiring in `RealMemoryPort::new`. The
-        // curator's regulation archive is the same one
-        // `open_curator_regulation_archive` opens for the curator MCP server.
+        // curator's regulation archive is the same DB the curator MCP
+        // server's `reg_query` and `curator_algedonic_log` tools read.
         match open_regulation_archive(&curator_db_path, passphrase, "curator") {
             Some(archive) => base.with_ledger(archive),
             None => base,
