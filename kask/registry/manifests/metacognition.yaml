@@ -302,11 +302,14 @@ steps:
       prediction: "{{ step_3_result }}"
       result:
         # B5: when a deterministic verdict is present with provenance
-        # "deterministic", use its pass/score as the Brier outcome (a
-        # deterministic oracle, not the LLM's self-assessment). The compute
-        # step tries `occurred` (bool) first, then `actual_delta` (f64), so
-        # passing both is safe — `occurred` wins when present.
-        occurred: "{{ deterministic_verdict.pass | default(omit) }}"
+        # "deterministic", use its pass as the Brier outcome (a deterministic
+        # oracle, not the LLM's self-assessment). The compute step tries
+        # `occurred` (bool) first, then `actual_delta` (f64). When
+        # `deterministic_verdict` is absent, `deterministic_verdict.pass`
+        # renders to null (via | tojson), `as_bool()` returns None, and the
+        # compute step falls back to `actual_delta` (the hypotenuse — the
+        # pre-B5 behavior).
+        occurred: "{{ deterministic_verdict.pass }}"
         actual_delta: "{{ step_7_result.hypotenuse }}"
 
   # ── Improvement Kata Step 9: Check Convergence (Act) ──
