@@ -1377,4 +1377,90 @@ mod tests {
             json!(0.85)
         );
     }
+
+    // ── lisp-scaffold-reasoning manifest form tests ──
+    // Pins the exact form used in kask/registry/manifests/lisp-scaffold-reasoning.yaml
+    // step 2. If the interpreter changes in a way that breaks this form, these
+    // tests fail before the skill is invoked in production.
+
+    fn scaffold_form() -> &'static str {
+        r#"
+        (let ((hyps (assoc "hypotheses" step_1_result)))
+          (if (is_null hyps)
+              (list "no_hypotheses_field")
+              (let ((n (length hyps)))
+                (if (< n 3)
+                    (list "insufficient_count_below_3")
+                    (if (> n 7)
+                        (list "excessive_count_above_7")
+                        (list))))))
+        "#"
+    }
+
+    #[test]
+    fn scaffold_form_valid_count_returns_empty_defects() {
+        let env = json!({
+            "step_1_result": {
+                "hypotheses": [
+                    {"rank": 1, "hypothesis": "a", "prediction": "p", "falsifier": "f", "likelihood": "high"},
+                    {"rank": 2, "hypothesis": "b", "prediction": "p", "falsifier": "f", "likelihood": "medium"},
+                    {"rank": 3, "hypothesis": "c", "prediction": "p", "falsifier": "f", "likelihood": "low"}
+                ],
+                "notes": "ok"
+            }
+        });
+        let result = eval_sandboxed(scaffold_form(), &env).unwrap();
+        assert_eq!(result, json!([]));
+    }
+
+    #[test]
+    fn scaffold_form_too_few_returns_defect() {
+        let env = json!({
+            "step_1_result": {
+                "hypotheses": [
+                    {"rank": 1, "hypothesis": "a", "prediction": "p", "falsifier": "f", "likelihood": "high"}
+                ]
+            }
+        });
+        let result = eval_sandboxed(scaffold_form(), &env).unwrap();
+        assert_eq!(result, json!(["insufficient_count_below_3"]));
+    }
+
+    #[test]
+    fn scaffold_form_too_many_returns_defect() {
+        let env = json!({
+            "step_1_result": {
+                "hypotheses": [
+                    {"rank": 1, "hypothesis": "a", "prediction": "p", "falsifier": "f", "likelihood": "high"},
+                    {"rank": 2, "hypothesis": "b", "prediction": "p", "falsifier": "f", "likelihood": "high"},
+                    {"rank": 3, "hypothesis": "c", "prediction": "p", "falsifier": "f", "likelihood": "high"},
+                    {"rank": 4, "hypothesis": "d", "prediction": "p", "falsifier": "f", "likelihood": "high"},
+                    {"rank": 5, "hypothesis": "e", "prediction": "p", "falsifier": "f", "likelihood": "high"},
+                    {"rank": 6, "hypothesis": "g", "prediction": "p", "falsifier": "f", "likelihood": "high"},
+                    {"rank": 7, "hypothesis": "h", "prediction": "p", "falsifier": "f", "likelihood": "high"},
+                    {"rank": 8, "hypothesis": "i", "prediction": "p", "falsifier": "f", "likelihood": "high"}
+                ]
+            }
+        });
+        let result = eval_sandboxed(scaffold_form(), &env).unwrap();
+        assert_eq!(result, json!(["excessive_count_above_7"]));
+    }
+
+    #[test]
+    fn scaffold_form_missing_hypotheses_field_returns_defect() {
+        let notes = "model returned none.";
+        let env = json!({
+            "step_1_result": {
+                "notes": notes
+            }
+        });
+        let result = eval_sandboxed(scaffold_form(), &env).unwrap();
+        // Expected: a one-element list containing the defect string.
+        let arr = result.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        let defect = arr[0].as_str().unwrap_or("");
+        // The defect string is "no_hypotheses_field". Check via json! macro to
+        // avoid edition-2024 reserved-prefix syntax flagging identifier-before-quote.
+        assert_eq!(defect, json!("no_hypotheses_field"));
+    }
 }
