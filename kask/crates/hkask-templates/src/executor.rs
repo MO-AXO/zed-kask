@@ -222,45 +222,29 @@ impl ManifestExecutor {
     /// Check whether a JSON value references any tainted (Source) context entries.
     ///
     /// This is the FIDES taint propagation check: recursively scans the value
-    /// for `{"$ref": "step_N_result..."}` patterns and checks whether the
-    /// referenced context entry is labeled `Source` (untrusted).
+    /// for `{"$ref": "step_N_result..."}` patterns and inline Jinja
+    /// `{{ step_N_result }}` expressions, and checks whether any referenced
+    /// context entry is labeled `Source` (untrusted).
     ///
     /// Source: Microsoft Research FIDES (arXiv:2505.23643)
     ///
     /// expect: "The system detects untrusted data flowing into tool inputs"
     /// pre:  value is the bound input JSON for a tool invocation
-    /// post: returns true iff any $ref in the value resolves to a Source-labeled entry
+    /// post: returns true iff any $ref or {{ }} reference in the value resolves
+    ///       to a Source-labeled entry
     fn check_untrusted_input(&self, value: &Value) -> bool {
-        match value {
-            Value::Object(map) => {
-                // Check for $ref pattern: {"$ref": "step_1_result.field"}
-                if let Some(Value::String(ref_path)) = map.get("$ref") {
-                    let context_key = ref_path.split('.').next().unwrap_or("");
-                    let labels = self.taint_labels.lock().unwrap_or_else(|e| e.into_inner());
-                    return labels.get(context_key).copied().unwrap_or(ToolTaint::Pure)
-                        == ToolTaint::Source;
-                }
-                // Recurse into object fields.
-                map.values().any(|v| self.check_untrusted_input(v))
-            }
-            Value::Array(arr) => arr.iter().any(|v| self.check_untrusted_input(v)),
-            // Inline Jinja: `{{ step_N_result }}` is the same reference grammar
-            // `propagate_taint_for_binding` recognizes (RR-0026/0027). The gate
-            // must scan the same grammar as the propagation it complements —
-            // otherwise a Source-tainted entry bound into a Sink tool via
-            // inline Jinja bypasses the FIDES Source→Sink block (the gate saw
-            // only `$ref` while propagation already handled inline Jinja).
-            Value::String(_) => {
-                let keys = self.extract_referenced_keys(value);
-                if keys.is_empty() {
-                    return false;
-                }
-                let labels = self.taint_labels.lock().unwrap_or_else(|e| e.into_inner());
-                keys.iter()
-                    .any(|k| labels.get(k).copied().unwrap_or(ToolTaint::Pure) == ToolTaint::Source)
-            }
-            _ => false,
+        // `extract_referenced_keys` walks the entire value tree (Object $ref,
+        // Array recursion, String inline-Jinja) and returns the set of
+        // referenced context keys. This replaces the prior separate recursive
+        // walk that duplicated `collect_referenced_keys`'s logic — one walk
+        // instead of two.
+        let keys = self.extract_referenced_keys(value);
+        if keys.is_empty() {
+            return false;
         }
+        let labels = self.taint_labels.lock().unwrap_or_else(|e| e.into_inner());
+        keys.iter()
+            .any(|k| labels.get(k).copied().unwrap_or(ToolTaint::Pure) == ToolTaint::Source)
     }
 
     /// Propagate taint labels from referenced context entries to a newly bound key.
