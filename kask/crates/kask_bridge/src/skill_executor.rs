@@ -471,6 +471,114 @@ impl agent::SkillManifestExecutor for BridgeManifestExecutor {
 
         Ok(output)
     }
+
+    async fn compose_and_execute_bundle(
+        &self,
+        skill_names: &[String],
+        task: &str,
+        context: HashMap<String, Value>,
+    ) -> Result<agent::BundleExecutionResult, String> {
+        // Phase 1: Run the skill-bundler manifest to compose a BundleManifest.
+        // The bundler cascade is: goal-extract → compose → synthesize → validate
+        // → lisp.eval score → evolve → loop. The composed manifest is at
+        // step_3_result.candidates[0].composite_manifest.
+        let bundler_context = {
+            let mut ctx = context;
+            ctx.insert(
+                "skill_names".to_string(),
+                Value::Array(
+                    skill_names
+                        .iter()
+                        .map(|s| Value::String(s.clone()))
+                        .collect(),
+                ),
+            );
+            ctx.insert(
+                "user_intent".to_string(),
+                Value::String(task.to_string()),
+            );
+            ctx
+        };
+
+        // Run the skill-bundler cascade and get the full context back (not
+        // just the final text) so we can extract the composed manifest and
+        // the composition score structurally.
+        let bundler_result = self
+            .run_manifest_cascade("skill-bundler", bundler_context)
+            .await?;
+
+        // Extract the composed manifest from step_3_result.candidates[0].composite_manifest.
+        // The synthesize step produces a `candidates` array; the first candidate's
+        // `composite_manifest` is the governed BundleManifest.
+        let bundle_manifest_json = bundler_result
+            .get("step_3_result")
+            .and_then(|v| v.get("candidates"))
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("composite_manifest"))
+            .cloned()
+            .ok_or_else(|| {
+                "skill-bundler cascade did not produce a composite_manifest at \
+                 step_3_result.candidates[0].composite_manifest — the synthesize \
+                 step may have failed or produced no candidates"
+                    .to_string()
+            })?;
+
+        // Extract the deterministic composition score from step_5_result
+        // (the lisp.eval step). This is the falsifier anchor — if lisp.eval
+        // were removed, this would be absent and the UI's score display
+        // would degrade to "unavailable".
+        let composition_score = bundler_result
+            .get("step_5_result")
+            .and_then(|v| v.as_f64());
+
+        // Extract the skill names actually placed in the composed manifest
+        // (may differ from the input if the bundler dropped a skill via
+        // dead-letter resolution).
+        let composed_skill_names = bundler_result
+            .get("step_2_result")
+            .and_then(|v| v.get("bundle_manifest"))
+            .and_then(|bm| bm.get("skills"))
+            .and_then(|s| s.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| skill_names.to_vec());
+
+        // Phase 2: Load the composed manifest and execute its cascade.
+        let manifest_json_string = serde_json::to_string(&bundle_manifest_json)
+            .map_err(|e| format!("Failed to serialize composed manifest: {e}"))?;
+        let manifest = load_manifest_from_yaml(&manifest_json_string)
+            .map_err(|e| format!("Failed to load composed manifest: {e}"))?;
+
+        // Validate the composed manifest before execution. A manifest that
+        // fails validation should still proceed (best-available) but the
+        // operator gets a warning signal — the .rules "advertised invariants
+        // need enforcement points" trap.
+        let validation = manifest.validate();
+        if !validation.errors.is_empty() {
+            tracing::warn!(
+                target: "reg.skill.bundle_compose",
+                errors = ?validation.errors,
+                skill_names = ?composed_skill_names,
+                "bundler-validate failed on the composed manifest — proceeding with \
+                 best-available manifest. The composition may have structural issues.",
+            );
+        }
+
+        let execution_context = HashMap::new();
+        let output = self
+            .execute_manifest_direct(&manifest, execution_context)
+            .await?;
+
+        Ok(agent::BundleExecutionResult {
+            bundle_manifest: bundle_manifest_json,
+            output,
+            composition_score,
+            composed_skill_names,
+        })
+    }
 }
 
 /// Deterministically extract the final step's result from the cascade context,
