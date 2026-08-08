@@ -1515,6 +1515,13 @@ mod tests {
         assert!(verified, "balanced mandatory conservation should verify");
 
         // Case 2: mandatory conservation, unbalanced (source_total != sink_total).
+        // Revenue (source) sends 60 to COGS (sink) and 30 to R&D (sink).
+        // source_total = 90, sink_total = 90 — wait, that's balanced.
+        // Make it unbalanced: Revenue sends 60 to COGS and 30 to R&D,
+        // but add an extra edge from Marketing (source) to R&D (sink) with weight 10.
+        // source_total = 100, sink_total = 100 — still balanced.
+        // Actually, to make it unbalanced, we need a source edge that doesn't
+        // end at a sink. Revenue → Internal (not a sink).
         let unbalanced = serde_json::json!({
             "form": form,
             "env": {
@@ -1523,19 +1530,20 @@ mod tests {
                     "nodes": [
                         {"id": "revenue", "label": "Revenue", "role": "source"},
                         {"id": "cogs", "label": "COGS", "role": "sink"},
+                        {"id": "internal", "label": "Internal", "role": "internal"},
                         {"id": "rd", "label": "R&D", "role": "sink"}
                     ]
                 },
                 "step_2_result": {
                     "edges": [
                         {"source": "revenue", "target": "cogs", "weight": 60},
+                        {"source": "revenue", "target": "internal", "weight": 20},
                         {"source": "revenue", "target": "rd", "weight": 30}
                     ]
                 }
             }
         });
         let result = dispatch_compute("lisp.eval", &unbalanced).unwrap();
-        eprintln!("DEBUG unbalanced result: {result}");
         let pairs = result.as_array().expect("result should be a list of pairs");
         let verified = pairs
             .iter()
@@ -1625,7 +1633,7 @@ mod tests {
                                           (check-duplicates (cdr es) (cons (list agent-str true) seen) acc))))))))
                         (define entry-defects (check-entry seq 0 (list)))
                         (define dup-defects (check-duplicates seq (list) (list)))
-                        (append entry-defects dup-defects))))))
+                        (append entry-defects dup-defects)))))
         "#;
 
         // Case 1: valid directive — no defects.

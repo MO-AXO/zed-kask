@@ -1073,6 +1073,27 @@ mod tests {
             }
         }
 
+        async fn compose_and_execute_bundle(
+            &self,
+            skill_names: &[String],
+            task: &str,
+            context: std::collections::HashMap<String, serde_json::Value>,
+        ) -> Result<BundleExecutionResult, String> {
+            // The stub doesn't run a real bundler cascade — it returns a
+            // minimal result so tests that exercise the skill_bundle tool's
+            // wiring (authorization, context injection, output shaping) can
+            // proceed without a live skill-bundler manifest.
+            Ok(BundleExecutionResult {
+                bundle_manifest: serde_json::json!({
+                    "name": "stub-bundle",
+                    "skills": skill_names.iter().map(|s| serde_json::json!({"name": s})).collect::<Vec<_>>(),
+                }),
+                output: self.output.clone(),
+                composition_score: Some(0.0),
+                composed_skill_names: skill_names.to_vec(),
+            })
+        }
+
         fn has_manifest(&self, skill_name: &str) -> bool {
             self.known.contains(skill_name)
         }
