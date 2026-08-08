@@ -1839,8 +1839,14 @@ pub fn compose_market_tree(
 /// probability with its own reliability floor and construction method surfaced
 /// in the provenance. The event ID is `cmp:{family}:{tenor}:{orientation}` —
 /// the index identity, not a decaying contract ID.
+///
+/// `observation_date` is the date the CMP index was built (the "today" of the
+/// index). The event deadline is `observation_date + target_maturity_days` —
+/// the honest deadline for the constant-maturity target, not a fabricated
+/// placeholder.
 pub fn convert_cmp_index(
     index: &hkask_mcp_prediction_markets::cmp_index_builder::ProvenancedCmpIndex,
+    observation_date: chrono::NaiveDate,
 ) -> ScenarioEvent {
     use hkask_mcp_prediction_markets::cmp::CmpMethod;
 
@@ -1861,11 +1867,11 @@ pub fn convert_cmp_index(
         index.index.portfolio.maturity_error_days,
         index.index.portfolio.constituents.len()
     );
-    // The deadline is the observation date + the target maturity. We don't
-    // have the observation date here, so use a far-future placeholder — the
-    // CMP index is a rolling synthetic, not a fixed-deadline contract.
-    let deadline = chrono::NaiveDate::from_ymd_opt(2099, 12, 31)
-        .unwrap_or_else(|| chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap());
+    // The deadline is the observation date + the target maturity — the honest
+    // deadline for the constant-maturity target. The CMP index is a rolling
+    // synthetic, so this deadline advances with each observation.
+    let target_days = index.index.bucket.target_days() as i64;
+    let deadline = observation_date + chrono::Duration::days(target_days);
     let probability = index.index.portfolio.index_probability;
     ScenarioEvent {
         id,
@@ -1898,6 +1904,9 @@ pub fn convert_cmp_index(
 /// the provenance — not a decaying contract. This is the re-pointed composition
 /// path: same tree machinery, CMP-controlled inputs.
 ///
+/// `observation_date` is the date the CMP indices were built. Each event's
+/// deadline is `observation_date + target_maturity_days` — the honest deadline.
+///
 /// CMP indices are independent root events (no caller-authored dependencies
 /// in the initial implementation — the tree is a flat set of CMP priors).
 /// Dependency edges between CMP indices (e.g. "oil price increase → inflation
@@ -1906,13 +1915,17 @@ pub fn convert_cmp_index(
 /// scenario_propagate) consume.
 pub fn compose_cmp_tree(
     indices: &[hkask_mcp_prediction_markets::cmp_index_builder::ProvenancedCmpIndex],
+    observation_date: chrono::NaiveDate,
 ) -> Result<EventTree, ScenarioError> {
     if indices.is_empty() {
         return Err(ScenarioError::EmptyInput(
             "compose_cmp_tree requires at least one CMP index".into(),
         ));
     }
-    let events: Vec<ScenarioEvent> = indices.iter().map(convert_cmp_index).collect();
+    let events: Vec<ScenarioEvent> = indices
+        .iter()
+        .map(|idx| convert_cmp_index(idx, observation_date))
+        .collect();
     // Check for duplicate IDs (same family/tenor/orientation from different venues).
     let mut seen = HashSet::new();
     for event in &events {
@@ -2990,7 +3003,7 @@ mod tests {
                 hkask_mcp_prediction_markets::cmp::CmpMethod::BucketedSparse,
             ),
         ];
-        let tree = compose_cmp_tree(&indices).expect("tree");
+        let tree = compose_cmp_tree(&indices, chrono::NaiveDate::from_ymd_opt(2026, 8, 7).unwrap()).expect("tree");
         assert_eq!(tree.nodes.len(), 2);
         assert_eq!(tree.root_ids.len(), 2);
         // Provenance: the event IDs cite the index, not a contract.
@@ -3037,7 +3050,7 @@ mod tests {
 
     #[test]
     fn compose_cmp_tree_rejects_empty() {
-        let result = compose_cmp_tree(&[]);
+        let result = compose_cmp_tree(&[], chrono::NaiveDate::from_ymd_opt(2026, 8, 7).unwrap());
         assert!(result.is_err());
     }
 
@@ -3062,7 +3075,7 @@ mod tests {
                 hkask_mcp_prediction_markets::cmp::CmpMethod::Interpolated,
             ),
         ];
-        let result = compose_cmp_tree(&indices);
+        let result = compose_cmp_tree(&indices, chrono::NaiveDate::from_ymd_opt(2026, 8, 7).unwrap());
         assert!(result.is_err());
     }
 
@@ -3087,7 +3100,7 @@ mod tests {
                 hkask_mcp_prediction_markets::cmp::CmpMethod::Interpolated,
             ),
         ];
-        let tree = compose_cmp_tree(&indices).expect("tree");
+        let tree = compose_cmp_tree(&indices, chrono::NaiveDate::from_ymd_opt(2026, 8, 7).unwrap()).expect("tree");
         assert_eq!(tree.nodes.len(), 2);
     }
 }
