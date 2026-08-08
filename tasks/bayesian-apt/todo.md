@@ -26,12 +26,12 @@
 
 ## Phase 2 — Risk and coherence (CMP-controlled)
 
-- [ ] **R4** σ_scenario over CMP-driven branches (T8a re-pointed)
-- [ ] **R5** Contract-price coherence test (H3 reframed — tree-implied joints vs market joint prices; NO equity-return betas)
+- [x] **R4** σ_scenario over CMP-driven branches (T8a re-pointed) — **landed 2026-08-07** in `hkask-forecast`: `CmpBranchOutcome` carries optional `cmp_source` provenance. `cmp_scenario_risk_measure` returns `CmpScenarioRiskMeasure` with `cmp_controlled` flag (true only when ALL branches are CMP-controlled). 3 tests pass (all-CMP, mixed, zero-mass).
+- [x] **R5** Contract-price coherence test (H3 reframed — tree-implied joints vs market joint prices; NO equity-return betas) — **landed 2026-08-07** in `hkask-forecast`: `contract_price_coherence(tree_implied, market_price, cost_band)` returns `CoherenceMeasure` with divergence and `coherent` flag. The falsifier: systematically incoherent CMP trees refute H3; coherent CMP trees but incoherent raw-snapshot trees corroborate H3b (CMP is the active ingredient). 4 tests pass (within band, beyond band, invalid probabilities, exact match).
 
 ## Phase 3 — Falsification & validation (all on CMP inputs)
 
-- [ ] **R6** Falsification suite H1–H5 (H3 reframed); falsification log committed
+- [x] **R6** Falsification suite H1–H5 (H3 reframed); falsification log committed — **landed 2026-08-07** in `hkask-forecast/src/falsification.rs`: `h2_duration_test` (H2 duration vs CMP tenors), `h3_coherence_test` (H3 contract-price coherence, cost-banded), `falsification_log` (full H1–H5 log with statuses). H2 and H3 are computable today; H1 and H5 are blocked (need live data); H4 is open (needs backtest). 14 tests pass including `no_equity_return_beta_machinery_anywhere` pin. Falsification log at `tasks/bayesian-apt/falsification-log.md`.
 
 ## Completed machinery (v1, retained, awaiting CMP inputs)
 

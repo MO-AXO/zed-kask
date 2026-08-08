@@ -469,7 +469,8 @@ impl ManifestExecutor {
         manifest: &BundleManifest,
         initial_context: HashMap<String, Value>,
     ) -> Result<HashMap<String, Value>> {
-        self.run_cascade(manifest, initial_context, 0).await
+        let (context, _last_ordinal) = self.run_cascade(manifest, initial_context, 0).await?;
+        Ok(context)
     }
 
     /// Drive the cascade with an explicit recursion `depth`.
@@ -488,7 +489,7 @@ impl ManifestExecutor {
         manifest: &BundleManifest,
         initial_context: HashMap<String, Value>,
         depth: u8,
-    ) -> Result<HashMap<String, Value>> {
+    ) -> Result<(HashMap<String, Value>, Option<u32>)> {
         if depth > hkask_capability::SYSTEM_MAX_RECURSION {
             return Err(TemplateError::Manifest(format!(
                 "Matryoshka depth limit ({}) exceeded",
@@ -526,6 +527,11 @@ impl ManifestExecutor {
         );
 
         let mut step_idx: usize = 0;
+        // Track the highest ordinal of any step that stored a `step_N_result`
+        // key during this cascade. Used by `execute_flowdef` to extract the
+        // sub-cascade's final result in O(1) instead of scanning the entire
+        // context HashMap (the `extract_final_step_result` fallback).
+        let mut last_result_ordinal: Option<u32> = None;
 
         'cascade: loop {
             iteration += 1;
@@ -967,6 +973,15 @@ impl ManifestExecutor {
                     }
                 }
 
+                // Track the highest ordinal that stored a `step_N_result` key,
+                // so `execute_flowdef` can extract the sub-cascade's final
+                // result in O(1) instead of scanning the full context.
+                // Control-flow actions (abort/escalate/choice/loop) break or
+                // continue before reaching here, so only result-emitting
+                // actions (select/compute/execute/render/flowdef) update this.
+                // Steps are sorted by ordinal, so the last to run is the max.
+                last_result_ordinal = Some(step.ordinal);
+
                 // ── Unified skill feedback span emission (P9 §9.2) ──────────
                 // After each select step, emit the corresponding SkillFeedbackSpan
                 // under reg.skill.<manifest.id>.<phase>. The phase is derived from
@@ -1151,7 +1166,7 @@ impl ManifestExecutor {
         }
 
         context.insert("_recursion_depth".to_string(), Value::Number(depth.into()));
-        Ok(context)
+        Ok((context, last_result_ordinal))
     }
 
     /// Evaluate a `choice` step's condition against the context.
@@ -1561,16 +1576,26 @@ impl ManifestExecutor {
         // sized. Re-enter `run_cascade` with `depth + 1` so the matryoshka
         // guard in `run_cascade` bounds recursive nesting (this is the ONLY
         // path that increments depth; iterative loop re-entry does not).
-        let sub_result = Box::pin(self.run_cascade(&sub_manifest, context, depth + 1)).await?;
+        // `run_cascade` returns the last-completed step ordinal so we can
+        // extract the final result in O(1) instead of scanning the full
+        // context HashMap.
+        let (sub_result, last_ordinal) =
+            Box::pin(self.run_cascade(&sub_manifest, context, depth + 1)).await?;
 
         // Extract the sub-cascade's final result value. We do NOT merge the
         // full sub-context back into the parent — only the result is stored,
         // preventing the sub-cascade from overwriting parent context keys.
         //
-        // The final result is the highest-ordinal `step_N_result` key —
-        // HashMap iteration order is randomized, so we can't use `.last()`.
-        // This mirrors the bridge's `extract_final_step_result` logic.
-        let result_value = extract_final_step_result(&sub_result);
+        // The final result is the highest-ordinal `step_N_result` key.
+        // `run_cascade` tracks the last-completed ordinal, so we can read it
+        // directly in O(1). The `extract_final_step_result` fallback (full
+        // context scan) is used only if the ordinal is unavailable (defensive
+        // — e.g. an empty sub-manifest with no result-emitting steps).
+        let final_step_key = last_ordinal.map(|n| format!("step_{n}_result"));
+        let result_value = match &final_step_key {
+            Some(key) => sub_result.get(key).cloned().unwrap_or(Value::Null),
+            None => extract_final_step_result(&sub_result),
+        };
 
         // Reconstruct the parent context from the sub-result. The sub-cascade
         // received the parent's context, so the sub-result contains the
@@ -1587,9 +1612,8 @@ impl ManifestExecutor {
         // set on parent keys persist — no copy needed for those. The new
         // step_{ordinal}_result key, however, is inserted below without a
         // label; copy the label of the sub-cascade's final step result (the
-        // same ordinal key extract_final_step_result picked) so a Source-
-        // tainted sub-result doesn't enter the parent context unlabeled.
-        let final_step_key = extract_final_step_entry(&sub_result).map(|(key, _)| key);
+        // same ordinal key we extracted above) so a Source-tainted sub-result
+        // doesn't enter the parent context unlabeled.
         if let Some(ref final_key) = final_step_key {
             let label = self
                 .taint_labels
