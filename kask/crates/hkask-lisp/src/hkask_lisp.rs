@@ -727,6 +727,20 @@ fn default_builtins() -> Vec<(&'static str, NativeFn)> {
         ("is_null", is_null),
         ("numberp", numberp),
         ("assoc", assoc_fn),
+        // List concatenation. (append l1 l2 ...) joins multiple lists.
+        // Nil arguments are treated as empty lists. Non-list, non-nil args
+        // error. This is the standard Lisp `append` — it does NOT cons the
+        // last arg as a tail (that's `append!` in some dialects); all args
+        // must be lists.
+        ("append", append_fn),
+        // String equality. (string= a b) returns true iff both args are
+        // strings with equal content. Distinct from `=` which is numeric-only.
+        // This is the primary way to compare string values from JSON fields.
+        ("string=", string_eq_fn),
+        // String concatenation. (concat s1 s2 ...) joins multiple strings.
+        // Non-string args error. Use this to build defect labels from field
+        // names (e.g. (concat "missing_" key)).
+        ("concat", concat_fn),
     ]
 }
 
