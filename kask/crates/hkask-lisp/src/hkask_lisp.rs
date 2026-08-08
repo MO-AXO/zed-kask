@@ -1384,7 +1384,7 @@ mod tests {
     // tests fail before the skill is invoked in production.
 
     fn scaffold_form() -> &'static str {
-        r#"
+        r##"
         (let ((hyps (assoc "hypotheses" step_1_result)))
           (if (is_null hyps)
               (list "no_hypotheses_field")
@@ -1394,7 +1394,7 @@ mod tests {
                     (if (> n 7)
                         (list "excessive_count_above_7")
                         (list))))))
-        "#"
+        "##
     }
 
     #[test]
@@ -1459,8 +1459,65 @@ mod tests {
         let arr = result.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         let defect = arr[0].as_str().unwrap_or("");
-        // The defect string is "no_hypotheses_field". Check via json! macro to
-        // avoid edition-2024 reserved-prefix syntax flagging identifier-before-quote.
-        assert_eq!(defect, json!("no_hypotheses_field"));
+        let expected: &str = "no_hypotheses_field";
+        assert_eq!(defect, expected);
+    }
+
+    // ── Step 4 form: convergence score ──
+    // Pins the exact form used in lisp-scaffold-reasoning.yaml step 4.
+    // Score = 1.0 - (defect_count / n). Pure prefix (infix can't handle
+    // nested-paren operands — see expand_infix/is_infix_context).
+
+    fn scaffold_score_form() -> &'static str {
+        r##"
+        (let ((hyps (assoc "hypotheses" current)))
+          (if (is_null hyps)
+              0.0
+              (let ((n (length hyps)))
+                (if (= n 0) 0.0 (- 1.0 (/ defect_count n))))))
+        "##
+    }
+
+    #[test]
+    fn scaffold_score_no_defects_returns_one() {
+        let env = json!({
+            "current": {
+                "hypotheses": [
+                    {"rank": 1, "hypothesis": "a", "prediction": "p", "falsifier": "f", "likelihood": "high"},
+                    {"rank": 2, "hypothesis": "b", "prediction": "p", "falsifier": "f", "likelihood": "medium"},
+                    {"rank": 3, "hypothesis": "c", "prediction": "p", "falsifier": "f", "likelihood": "low"}
+                ]
+            },
+            "defect_count": 0
+        });
+        let result = eval_sandboxed(scaffold_score_form(), &env).unwrap();
+        assert_eq!(result, json!(1.0));
+    }
+
+    #[test]
+    fn scaffold_score_one_defect_of_three_returns_two_thirds() {
+        let env = json!({
+            "current": {
+                "hypotheses": [
+                    {"rank": 1, "hypothesis": "a", "prediction": "p", "falsifier": "f", "likelihood": "high"},
+                    {"rank": 2, "hypothesis": "b", "prediction": "p", "falsifier": "f", "likelihood": "medium"},
+                    {"rank": 3, "hypothesis": "c", "prediction": "p", "falsifier": "f", "likelihood": "low"}
+                ]
+            },
+            "defect_count": 1
+        });
+        let result = eval_sandboxed(scaffold_score_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - (1.0 - 1.0 / 3.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scaffold_score_missing_hypotheses_returns_zero() {
+        let env = json!({
+            "current": {},
+            "defect_count": 5
+        });
+        let result = eval_sandboxed(scaffold_score_form(), &env).unwrap();
+        assert_eq!(result, json!(0.0));
     }
 }

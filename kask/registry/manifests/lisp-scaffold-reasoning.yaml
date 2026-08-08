@@ -119,10 +119,12 @@ steps:
     action: compute
     compute_ref: lisp.eval
     description: >
-      Lisp invariant check. Deterministically evaluates: count (3-7),
-      completeness (every hypothesis has prediction + falsifier), diversity
-      (≥2 distinct likelihoods), mutual exclusivity (no duplicates). Returns
-      a verdict object the LLM refines against. No LLM round-trip.
+      Lisp invariant check. Deterministically evaluates count (3-7 hypotheses)
+      and presence (the hypotheses field exists and is non-empty). Returns a list
+      of defect strings — empty list = passed, non-empty = LLM must refine.
+      Deeper invariants (per-hypothesis field completeness, diversity, mutual
+      exclusivity) would require a recursive lambda helper; kept simple here so
+      the pattern is legible. See the form comment for the extension point.
     gas_cap: 100
     timeout_seconds: 10
     input_mapping:
@@ -187,10 +189,11 @@ steps:
   # set. The score is 1.0 minus the defect rate — 1.0 = no defects, 0.0 = all
   # invariants violated. This feeds the Cauchy criterion in step 5.
   #
-  # This form uses infix notation for the scoring expression (defects / max_defects)
-  # because it's a simple arithmetic combination — the recommended style per
-  # the create-skill/SKILL.md `lisp.eval` constraint. Prefix `let`/`if` for the
-  # structural guard.
+  # Pure prefix notation. The infix expander only handles `atom op atom` (no
+  # nested parens in the operand position — `1.0 - (x / y)` would NOT expand
+  # because `(` is not an infix context). Mixing infix with nested parens
+  # requires explicit prefix: `(- 1.0 (/ defect_count n))`. See the interpreter's
+  # `expand_infix` / `is_infix_context` for the exact rule.
   #
   # The score is computed from step_3_result if step 3 ran (refinement), else
   # from step_1_result (no defects, first iteration passed). The Jinja
@@ -211,7 +214,7 @@ steps:
           (if (is_null hyps)
               0.0
               (let ((n (length hyps)))
-                (if (= n 0) 0.0 (1.0 - (defect_count / n))))))
+                (if (= n 0) 0.0 (- 1.0 (/ defect_count n))))))
       env:
         current: "{{ step_3_result | default(step_1_result) }}"
         defect_count: "{{ step_2_result | length }}"
