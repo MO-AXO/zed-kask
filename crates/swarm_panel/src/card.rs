@@ -78,8 +78,6 @@ impl SwarmPanel {
                                          to view and adjust its details.",
                                     ))
                                     .on_click(cx.listener({
-                                        let edit_name = edit_name.clone();
-                                        let edit_source = edit_source.clone();
                                         move |this, _, window, cx| {
                                             this.load_agent_into_author(
                                                 edit_name.clone(),
