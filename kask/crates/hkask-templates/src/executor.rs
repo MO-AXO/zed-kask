@@ -512,8 +512,9 @@ impl ManifestExecutor {
             )));
         }
         let mut context = initial_context;
-        let mut steps = manifest.steps.clone();
-        steps.sort_by_key(|s| s.ordinal);
+        // Steps are sorted by ordinal at load time (see `load_manifest_from_yaml`).
+        // Borrow directly — no per-cascade clone+sort.
+        let steps = &manifest.steps;
 
         // Unified convergence tracking (extracted to `convergence.rs`).
         // Replaces 5 `let` locals (max_iterations, threshold, field,
@@ -796,7 +797,7 @@ impl ManifestExecutor {
                                 let bound = resolve_mapping_value(
                                     v,
                                     &context,
-                                    self.template_renderer.base_path(),
+                                    &self.template_renderer,
                                 );
                                 // Propagate taint from referenced Source entries
                                 // to the new binding key (ART-3/IR-1 fix).
@@ -820,6 +821,14 @@ impl ManifestExecutor {
                         // impossible (each iteration produces a different
                         // artifact against a different goal, so the metric
                         // bounces instead of stabilizing).
+                        // Acquire the taint-labels lock once for the entire
+                        // snapshot loop — the prior code acquired it twice per
+                        // step (read + write), which is 2N acquisitions for an
+                        // N-step manifest where 1 suffices.
+                        let mut labels = self
+                            .taint_labels
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
                         for step in steps.iter() {
                             let key = format!("step_{}_result", step.ordinal);
                             if let Some(val) = context.get(&key) {
@@ -828,21 +837,13 @@ impl ManifestExecutor {
                                 // also copy the taint label — otherwise a
                                 // Source-tainted artifact silently loses its
                                 // label when referenced as prev_step_N_result.
-                                let label = self
-                                    .taint_labels
-                                    .lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .get(&key)
-                                    .copied();
-                                if let Some(label) = label {
-                                    self.taint_labels
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .insert(prev_key.clone(), label);
+                                if let Some(label) = labels.get(&key).copied() {
+                                    labels.insert(prev_key.clone(), label);
                                 }
                                 context.insert(prev_key, val.clone());
                             }
                         }
+                        drop(labels);
 
                         // Re-enter: reset step index to loop target
                         if let Some(pos) = steps.iter().position(|s| s.ordinal == loop_target) {
@@ -1254,7 +1255,7 @@ impl ManifestExecutor {
             && let Value::Object(map) = mapping
         {
             for (k, v) in map {
-                let bound = resolve_mapping_value(v, &context, self.template_renderer.base_path());
+                let bound = resolve_mapping_value(v, &context, &self.template_renderer);
                 // Propagate taint from referenced Source entries to the new
                 // binding key (ART-3/IR-1 fix — closes FIDES closure break).
                 self.propagate_taint_for_binding(v, k);
@@ -1384,7 +1385,7 @@ impl ManifestExecutor {
             && let Value::Object(map) = mapping
         {
             for (k, v) in map {
-                let bound = resolve_mapping_value(v, &context, self.template_renderer.base_path());
+                let bound = resolve_mapping_value(v, &context, &self.template_renderer);
                 // Propagate taint from referenced Source entries to the new
                 // binding key (RR-0027 — same FIDES closure break as RR-0026).
                 // Pass the *original* mapping value (with $ref / {{ }} markers),
@@ -1432,7 +1433,7 @@ impl ManifestExecutor {
             && let Value::Object(map) = mapping
         {
             for (k, v) in map {
-                let bound = resolve_mapping_value(v, &context, self.template_renderer.base_path());
+                let bound = resolve_mapping_value(v, &context, &self.template_renderer);
                 // Propagate taint from referenced Source entries to the new
                 // binding key (ART-3/IR-1 fix — closes FIDES closure break).
                 self.propagate_taint_for_binding(v, k);
@@ -1558,7 +1559,7 @@ impl ManifestExecutor {
             && let Value::Object(map) = mapping
         {
             for (k, v) in map {
-                let bound = resolve_mapping_value(v, &context, self.template_renderer.base_path());
+                let bound = resolve_mapping_value(v, &context, &self.template_renderer);
                 // Propagate taint from referenced Source entries to the new
                 // binding key (ART-3/IR-1 fix — closes FIDES closure break).
                 self.propagate_taint_for_binding(v, k);
@@ -1673,7 +1674,7 @@ impl ManifestExecutor {
             .input_mapping
             .as_ref()
             .map(|mapping| {
-                resolve_mapping_value(mapping, context, self.template_renderer.base_path())
+                resolve_mapping_value(mapping, context, &self.template_renderer)
             })
             .unwrap_or_else(|| {
                 Value::Object(
@@ -1740,7 +1741,7 @@ impl ManifestExecutor {
                     let mut out = serde_json::Map::new();
                     for (k, v) in map {
                         let bound =
-                            resolve_mapping_value(v, &context, self.template_renderer.base_path());
+                            resolve_mapping_value(v, &context, &self.template_renderer);
                         // Propagate taint from referenced Source entries to the
                         // bound key (the .rules "input_mapping bindings must
                         // propagate taint" trap — RR-0026/RR-0027 fixed this at

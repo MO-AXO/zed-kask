@@ -20,9 +20,9 @@
 
 ## Phase 1 — Re-point machinery at CMP inputs
 
-- [ ] **R1** Composition over CMP (T4a re-pointed; provenance = index, not decaying contract)
-- [ ] **R2** Duration matching vs constant maturity (H2 made testable)
-- [ ] **R3** Tree-weighted valuation over CMP (T7 re-pointed)
+- [x] **R1** Composition over CMP (T4a re-pointed; provenance = index, not decaying contract) — **landed 2026-08-07** in `hkask-mcp-scenarios/src/superforecast.rs`: `compose_cmp_tree` takes `ProvenancedCmpIndex` inputs and builds an `EventTree` via `build_event_tree`. `convert_cmp_index` maps each CMP index to a `ScenarioEvent` with `id=cmp:{family}:{tenor}:{orientation}`, probability = index probability, basis = `cmp_index:{method}`. No domain-bias correction or reliability-tier gating (CMP indices are already controlled). 4 tests pass (flat tree, empty rejection, duplicate rejection, same-family-different-tenor).
+- [x] **R2** Duration matching vs constant maturity (H2 made testable) — **landed 2026-08-07** in `hkask-forecast`: `duration_vs_cmp_tenors(equity_duration_years)` returns `Vec<DurationGap>` comparing the equity duration against the fixed CMP tenors (1m/3m/6m = 30/90/180 days). The gap (years) and ratio (duration/tenor) are the H2/T1 dataset — the maturity-transformation gap is now a controlled quantity. 3 tests pass (typical 10y equity, non-positive rejection, short 1y equity).
+- [x] **R3** Tree-weighted valuation over CMP (T7 re-pointed) — **landed 2026-08-07** in `hkask-mcp-companies/src/superforecast.rs`: `EventTreeProjection` now carries optional `cmp_provenance: Vec<CmpIndexProvenance>`. When present (tree from `compose_cmp_tree`), the `scenario_analysis` weighted output cites the CMP index identities (family, tenor, orientation, venue, method, maturity_error). Backward compatible — raw-contract trees default to empty provenance. 2 tests pass (CMP provenance deserialization, backward-compatible default).
 
 ## Phase 2 — Risk and coherence (CMP-controlled)
 

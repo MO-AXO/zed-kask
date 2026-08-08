@@ -502,6 +502,69 @@ pub fn fuse_volatility(
     }
 }
 
+// ── R2: Duration matching vs constant maturity ─────────────────────────────
+//
+// Compares equity duration (Macaulay years) against the fixed CMP tenors
+// (1m/3m/6m = ~0.083/0.25/0.5 years). The gap is the H2 signal: equity
+// duration is typically 5-15+ years, while CMP tenors are sub-year. This
+// maturity-transformation gap is now a controlled quantity (CMP fixes the
+// tenor) rather than an unmeasurable confound (decaying contract snapshots).
+
+/// The standard CMP tenors in years (1m/3m/6m = 30/90/180 days).
+pub const CMP_TENORS_YEARS: [f64; 3] = [
+    30.0 / 365.25,
+    90.0 / 365.25,
+    180.0 / 365.25,
+];
+
+/// The labels for the standard CMP tenors.
+pub const CMP_TENOR_LABELS: [&str; 3] = ["1m", "3m", "6m"];
+
+/// One entry in the duration-vs-CMP comparison.
+#[derive(Debug, Clone)]
+pub struct DurationGap {
+    /// The CMP tenor label ("1m", "3m", "6m").
+    pub tenor_label: &'static str,
+    /// The CMP tenor in years.
+    pub tenor_years: f64,
+    /// |equity_duration − tenor| in years — the maturity-transformation gap.
+    pub gap_years: f64,
+    /// The ratio equity_duration / tenor — how many CMP tenors fit inside the
+    /// equity duration. A ratio of 20 means the equity claim is 20 CMP-3m
+    /// periods long — the maturity transformation is 20:1.
+    pub ratio: f64,
+}
+
+/// Compare an equity duration against the fixed CMP tenors (R2).
+///
+/// Returns one `DurationGap` per CMP tenor (1m, 3m, 6m). The gap is the
+/// absolute difference between the equity duration and the tenor; the ratio
+/// is how many tenors fit inside the equity duration. This is the H2/T1
+/// dataset: the maturity-transformation gap is now a controlled quantity
+/// (CMP fixes the tenor) rather than an unmeasurable confound.
+///
+/// Returns `None` when `equity_duration_years` is not positive — a duration
+/// over a non-positive stream is not meaningful (mirrors `EquityDuration`'s
+/// None contract). Never a fabricated number.
+#[must_use = "duration gap should be used or the None inspected"]
+pub fn duration_vs_cmp_tenors(equity_duration_years: f64) -> Option<Vec<DurationGap>> {
+    if equity_duration_years <= 0.0 {
+        return None;
+    }
+    Some(
+        CMP_TENORS_YEARS
+            .iter()
+            .zip(CMP_TENOR_LABELS.iter())
+            .map(|(&tenor, &label)| DurationGap {
+                tenor_label: label,
+                tenor_years: tenor,
+                gap_years: (equity_duration_years - tenor).abs(),
+                ratio: equity_duration_years / tenor,
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -799,5 +862,38 @@ mod tests {
         assert_eq!(certainty_tier(0.9), "proximate");
         assert_eq!(certainty_tier(0.5), "probable");
         assert_eq!(certainty_tier(0.1), "possible");
+    }
+
+    // ── R2: duration_vs_cmp_tenors ───────────────────────────────────────
+
+    #[test]
+    fn duration_vs_cmp_tenors_typical_equity() {
+        // A typical equity duration of 10 years vs CMP tenors.
+        let gaps = duration_vs_cmp_tenors(10.0).expect("positive duration");
+        assert_eq!(gaps.len(), 3);
+        // 1m: gap ≈ 9.92 years, ratio ≈ 121.8
+        assert!((gaps[0].gap_years - (10.0 - 30.0 / 365.25)).abs() < 0.01);
+        assert!((gaps[0].ratio - 10.0 / (30.0 / 365.25)).abs() < 0.1);
+        // 3m: gap ≈ 9.75 years, ratio ≈ 40.6
+        assert!((gaps[1].gap_years - (10.0 - 90.0 / 365.25)).abs() < 0.01);
+        assert!((gaps[1].ratio - 10.0 / (90.0 / 365.25)).abs() < 0.1);
+        // 6m: gap ≈ 9.51 years, ratio ≈ 20.3
+        assert!((gaps[2].gap_years - (10.0 - 180.0 / 365.25)).abs() < 0.01);
+        assert!((gaps[2].ratio - 10.0 / (180.0 / 365.25)).abs() < 0.1);
+    }
+
+    #[test]
+    fn duration_vs_cmp_tenors_none_for_non_positive() {
+        assert!(duration_vs_cmp_tenors(0.0).is_none());
+        assert!(duration_vs_cmp_tenors(-1.0).is_none());
+    }
+
+    #[test]
+    fn duration_vs_cmp_tenors_short_duration() {
+        // A short-duration equity (1 year) — the gap is smaller, the ratio is lower.
+        let gaps = duration_vs_cmp_tenors(1.0).expect("positive duration");
+        // 6m: gap ≈ 0.51 years, ratio ≈ 2.03
+        assert!((gaps[2].gap_years - (1.0 - 180.0 / 365.25)).abs() < 0.01);
+        assert!((gaps[2].ratio - 1.0 / (180.0 / 365.25)).abs() < 0.1);
     }
 }
