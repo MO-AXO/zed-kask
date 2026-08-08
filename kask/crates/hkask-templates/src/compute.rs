@@ -1618,7 +1618,7 @@ mod tests {
                                                 (list "credits_exceed_ceiling")
                                                 (list))))
                                       (check-entry (cdr es) (+ idx 1)
-                                        (append acc d1 d2 d3 d4))))))))))
+                                        (append acc d1 d2 d3 d4)))))))
                         (define check-duplicates
                           (lambda (es seen acc)
                             (if (is_null es)
@@ -1629,10 +1629,10 @@ mod tests {
                                       (if (not (is_null (assoc agent-str seen)))
                                           (check-duplicates (cdr es) (cons (list agent-str true) seen)
                                             (cons "duplicate_agent" acc))
-                                          (check-duplicates (cdr es) (cons (list agent-str true) seen) acc)))))))
+                                          (check-duplicates (cdr es) (cons (list agent-str true) seen) acc))))))))
                         (define entry-defects (check-entry seq 0 (list)))
                         (define dup-defects (check-duplicates seq (list) (list)))
-                        (append entry-defects dup-defects)))))
+                        (append entry-defects dup-defects)))))))
         "#;
 
         // Case 1: valid directive — no defects.
