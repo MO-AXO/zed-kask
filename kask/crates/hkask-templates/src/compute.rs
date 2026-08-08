@@ -1535,6 +1535,7 @@ mod tests {
             }
         });
         let result = dispatch_compute("lisp.eval", &unbalanced).unwrap();
+        eprintln!("DEBUG unbalanced result: {result}");
         let pairs = result.as_array().expect("result should be a list of pairs");
         let verified = pairs
             .iter()

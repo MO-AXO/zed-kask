@@ -161,6 +161,167 @@ impl BridgeManifestExecutor {
         }
         None
     }
+
+    /// Run a named skill's manifest cascade and return the full context
+    /// HashMap (not just the final text). Used by `compose_and_execute_bundle`
+    /// to extract structured fields (composed manifest, composition score)
+    /// from intermediate step results.
+    ///
+    /// This is the shared manifest-loading + executor-construction + tokio-spawn
+    /// path, factored out of `execute_skill` so both the single-skill and
+    /// bundle-composition paths use the same wiring (model defaults injection,
+    /// profile enforcement, tokio handle).
+    async fn run_manifest_cascade(
+        &self,
+        skill_name: &str,
+        mut context: HashMap<String, Value>,
+    ) -> Result<HashMap<String, Value>, String> {
+        let manifest_yaml = self.manifest_yaml(skill_name).ok_or_else(|| {
+            format!(
+                "No manifest found for skill '{skill_name}' on disk at {}",
+                self.manifest_path(skill_name).display()
+            )
+        })?;
+
+        let manifest = load_manifest_from_yaml(&manifest_yaml)
+            .map_err(|e| format!("Failed to load manifest '{skill_name}': {e}"))?;
+
+        if !manifest.is_skill() {
+            return Err(format!(
+                "Skill '{skill_name}' has category '{:?}' — only `skill` manifests may execute via the skill tool",
+                manifest.category
+            ));
+        }
+
+        // Inject model defaults (same as execute_skill).
+        self.inject_model_defaults(&mut context);
+
+        let executor = self.build_executor();
+
+        let join_handle = self.tokio_handle.spawn(async move {
+            executor
+                .execute_manifest(&manifest, context)
+                .await
+                .map_err(|e| format!("Manifest execution failed: {e}"))
+        });
+
+        join_handle
+            .await
+            .map_err(|e| format!("Manifest execution task failed: {e}"))?
+    }
+
+    /// Execute an already-loaded `BundleManifest` directly (no name lookup).
+    /// Used by `compose_and_execute_bundle` to run the composed manifest
+    /// produced by the skill-bundler cascade.
+    async fn execute_manifest_direct(
+        &self,
+        manifest: &hkask_templates::BundleManifest,
+        mut context: HashMap<String, Value>,
+    ) -> Result<String, String> {
+        self.inject_model_defaults(&mut context);
+
+        let executor = self.build_executor();
+
+        let join_handle = self.tokio_handle.spawn({
+            let manifest = manifest.clone();
+            async move {
+                executor
+                    .execute_manifest(&manifest, context)
+                    .await
+                    .map_err(|e| format!("Composed manifest execution failed: {e}"))
+            }
+        });
+
+        let result = join_handle
+            .await
+            .map_err(|e| format!("Composed manifest execution task failed: {e}"))??;
+
+        Ok(extract_final_step_result(&result))
+    }
+
+    /// Inject config-driven model defaults into the template context.
+    /// Factored out of `execute_skill` so both paths share the same injection.
+    fn inject_model_defaults(&self, context: &mut HashMap<String, Value>) {
+        if !context.contains_key("embedding_model") {
+            context.insert(
+                "embedding_model".into(),
+                Value::String(hkask_inference::model_constants::embedding_model()),
+            );
+        }
+        if !context.contains_key("classifier_model") {
+            context.insert(
+                "classifier_model".into(),
+                Value::String(hkask_inference::model_constants::classifier_model()),
+            );
+        }
+        if !context.contains_key("ocr_model") {
+            context.insert(
+                "ocr_model".into(),
+                Value::String(hkask_inference::model_constants::ocr_model()),
+            );
+        }
+        if !context.contains_key("default_model") {
+            context.insert(
+                "default_model".into(),
+                Value::String(std::env::var("HKASK_DEFAULT_MODEL").unwrap_or_else(|_| {
+                    hkask_inference::model_constants::DEFAULT_FALLBACK_MODEL.to_string()
+                })),
+            );
+        }
+        if !context.contains_key("qa_model") {
+            context.insert(
+                "qa_model".into(),
+                Value::String(std::env::var("HKASK_QA_MODEL").unwrap_or_else(|_| {
+                    hkask_inference::model_constants::DEFAULT_FALLBACK_MODEL.to_string()
+                })),
+            );
+        }
+        if !context.contains_key("tts_model") {
+            context.insert(
+                "tts_model".into(),
+                Value::String(std::env::var("HKASK_MEDIA_TTS_MODEL").unwrap_or_default()),
+            );
+        }
+        if !context.contains_key("stt_model") {
+            context.insert(
+                "stt_model".into(),
+                Value::String(std::env::var("HKASK_MEDIA_STT_MODEL").unwrap_or_default()),
+            );
+        }
+        if !context.contains_key("vision_model") {
+            context.insert(
+                "vision_model".into(),
+                Value::String(std::env::var("HKASK_MEDIA_VISION_MODEL").unwrap_or_default()),
+            );
+        }
+        if !context.contains_key("image_gen_model") {
+            context.insert(
+                "image_gen_model".into(),
+                Value::String(std::env::var("HKASK_MEDIA_IMAGE_GEN_MODEL").unwrap_or_default()),
+            );
+        }
+    }
+
+    /// Construct a `ManifestExecutor` with the bridge's inference/tools and
+    /// profile resolver. Factored out of `execute_skill` so both paths share
+    /// the same executor wiring.
+    fn build_executor(&self) -> ManifestExecutor {
+        let executor = ManifestExecutor::new(
+            self.inference.clone(),
+            self.tools.clone(),
+            hkask_types::template::LLMParameters::default(),
+        )
+        .with_template_base_path(self.registry_templates_dir.clone());
+
+        if let Some(ref resolver) = self.profile_resolver {
+            let resolver = resolver.clone();
+            executor.with_terminal_check(std::sync::Arc::new(move || {
+                resolver.is_tool_enabled("terminal")
+            }))
+        } else {
+            executor
+        }
+    }
 }
 
 /// Materialise the shipped hKask registry (process manifests + Jinja2/YAML
