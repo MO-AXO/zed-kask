@@ -275,12 +275,6 @@ pub fn falsification_log(
                 result.dropped_count,
                 if result.refuted { "TRIGGERED" } else { "not triggered" },
             );
-                if result.refuted {
-                    "TRIGGERED"
-                } else {
-                    "not triggered"
-                },
-            );
             (status, evidence)
         }
         None => (
