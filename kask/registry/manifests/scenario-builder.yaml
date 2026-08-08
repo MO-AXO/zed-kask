@@ -160,7 +160,7 @@ steps:
           (let ((d (if (numberp div) div 0.0))
                 (c (if (numberp con) con 0.0))
                 (v (if (numberp cov) cov 0.0))
-                (pen (if (string= pflag "true") 0.15 0.0)))
+                (pen (if pflag 0.15 0.0)))
             (let ((mn (if (< d c) (if (< d v) d v) (if (< c v) c v))))
               (let ((gap (- 1.0 mn)))
                 (if (> (+ gap pen) 1.0) 1.0 (+ gap pen))))))

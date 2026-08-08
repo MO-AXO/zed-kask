@@ -1783,4 +1783,401 @@ mod tests {
         let result = eval_sandboxed(scaffold_score_form(), &env).unwrap();
         assert_eq!(result, json!(0.0));
     }
+
+    // ── Convergence-fix form tests ──
+    // Pins the exact forms used in the 7 manifests fixed for the phantom
+    // convergence_metric bug. Each form computes a real structural-validity
+    // score from the prior step's actual output fields.
+
+    fn mcda_robustness_form() -> &'static str {
+        r##"
+        (let ((reversals (assoc "rank_reversals" step_4_result))
+              (critical (assoc "critical_weights" step_4_result)))
+          (let ((r (if (is_null reversals) 0 (length reversals)))
+                (c (if (is_null critical) 0 (length critical))))
+            (let ((raw (+ r c)))
+              (if (> raw 1) 1.0 raw))))
+        "##
+    }
+
+    #[test]
+    fn mcda_robust_decision_scores_zero() {
+        let env = json!({
+            "step_4_result": {
+                "rank_reversals": [],
+                "critical_weights": [],
+                "decision_robustness": "robust"
+            }
+        });
+        let result = eval_sandboxed(mcda_robustness_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mcda_fragile_decision_caps_at_one() {
+        let env = json!({
+            "step_4_result": {
+                "rank_reversals": [{"criterion": "a"}, {"criterion": "b"}],
+                "critical_weights": [{"criterion": "c"}, {"criterion": "d"}]
+            }
+        });
+        let result = eval_sandboxed(mcda_robustness_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mcda_missing_fields_score_zero() {
+        let env = json!({"step_4_result": {}});
+        let result = eval_sandboxed(mcda_robustness_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 0.0).abs() < 1e-9);
+    }
+
+    fn structured_extraction_gap_form() -> &'static str {
+        r##"
+        (let ((cov (assoc "field_coverage" step_3_result))
+              (unresolved (assoc "unresolved_fields" step_3_result)))
+          (let ((ratio (if (is_null cov) 0.0 (let ((r (assoc "coverage_ratio" cov))) (if (numberp r) r 0.0))))
+                (total (if (is_null cov) 1 (let ((t (assoc "total_fields" cov))) (if (numberp t) t 1))))
+                (uc (if (is_null unresolved) 0 (length unresolved))))
+            (let ((penalty (if (> total 0) (/ uc total) 0)))
+              (let ((penalty (if (> penalty 0.5) 0.5 penalty)))
+                (+ (- 1.0 ratio) penalty)))))
+        "##
+    }
+
+    #[test]
+    fn extraction_full_coverage_no_unresolved_scores_zero() {
+        let env = json!({
+            "step_3_result": {
+                "field_coverage": {"total_fields": 4, "populated_fields": 4, "coverage_ratio": 1.0},
+                "unresolved_fields": []
+            }
+        });
+        let result = eval_sandboxed(structured_extraction_gap_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extraction_half_coverage_scores_above_zero() {
+        let env = json!({
+            "step_3_result": {
+                "field_coverage": {"total_fields": 10, "populated_fields": 5, "coverage_ratio": 0.5},
+                "unresolved_fields": ["a", "b"]
+            }
+        });
+        let result = eval_sandboxed(structured_extraction_gap_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        // 1 - 0.5 + min(2/10, 0.5) = 0.5 + 0.2 = 0.7
+        assert!((score - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extraction_missing_coverage_scores_one() {
+        let env = json!({"step_3_result": {}});
+        let result = eval_sandboxed(structured_extraction_gap_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 1.0).abs() < 1e-9);
+    }
+
+    fn scenario_gap_form() -> &'static str {
+        r##"
+        (let ((div (assoc "divergence_score" step_5_result))
+              (con (assoc "consistency_score" step_5_result))
+              (cov (assoc "coverage_score" step_5_result))
+              (pflag (assoc "parametric_variation_flag" step_5_result)))
+          (let ((d (if (numberp div) div 0.0))
+                (c (if (numberp con) con 0.0))
+                (v (if (numberp cov) cov 0.0))
+                (pen (if (string= pflag "true") 0.15 0.0)))
+            (let ((mn (if (< d c) (if (< d v) d v) (if (< c v) c v))))
+              (let ((gap (- 1.0 mn)))
+                (if (> (+ gap pen) 1.0) 1.0 (+ gap pen))))))
+        "##
+    }
+
+    #[test]
+    fn scenario_passing_gate_no_parametric_scores_low() {
+        let env = json!({
+            "step_5_result": {
+                "divergence_score": 0.9,
+                "consistency_score": 0.85,
+                "coverage_score": 0.8,
+                "parametric_variation_flag": false
+            }
+        });
+        let result = eval_sandboxed(scenario_gap_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        // min = 0.8; gap = 0.2; pen = 0; total = 0.2
+        assert!((score - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scenario_parametric_flag_adds_penalty() {
+        let env = json!({
+            "step_5_result": {
+                "divergence_score": 0.9,
+                "consistency_score": 0.85,
+                "coverage_score": 0.8,
+                "parametric_variation_flag": true
+            }
+        });
+        let result = eval_sandboxed(scenario_gap_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        // min = 0.8; gap = 0.2; pen = 0.15; total = 0.35
+        assert!((score - 0.35).abs() < 1e-9);
+    }
+
+    #[test]
+    fn scenario_missing_scores_zero_min_scores_one() {
+        let env = json!({"step_5_result": {}});
+        let result = eval_sandboxed(scenario_gap_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        // all scores default to 0.0; min = 0; gap = 1.0; pen = 0; total = 1.0
+        assert!((score - 1.0).abs() < 1e-9);
+    }
+
+    fn wardley_confidence_gap_form() -> &'static str {
+        r##"
+        (let ((recs (assoc "recommendations" step_5_result)))
+          (if (is_null recs)
+              1.0
+              (let ((n (length recs)))
+                (if (= n 0)
+                    1.0
+                    (begin
+                      (define count-low
+                        (lambda (rs acc)
+                          (if (is_null rs)
+                              acc
+                              (let ((conf (assoc "confidence" (car rs))))
+                                (count-low
+                                  (cdr rs)
+                                  (if (numberp conf)
+                                      (if (< conf 0.5) (+ acc 1) acc)
+                                      (+ acc 1)))))))
+                      (let ((low (count-low recs 0)))
+                        (/ low n)))))))
+        "##
+    }
+
+    #[test]
+    fn wardley_all_high_confidence_scores_zero() {
+        let env = json!({
+            "step_5_result": {
+                "recommendations": [
+                    {"confidence": 0.9},
+                    {"confidence": 0.8},
+                    {"confidence": 0.7}
+                ]
+            }
+        });
+        let result = eval_sandboxed(wardley_confidence_gap_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn wardley_half_low_confidence_scores_half() {
+        let env = json!({
+            "step_5_result": {
+                "recommendations": [
+                    {"confidence": 0.9},
+                    {"confidence": 0.3}
+                ]
+            }
+        });
+        let result = eval_sandboxed(wardley_confidence_gap_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn wardley_missing_recommendations_scores_one() {
+        let env = json!({"step_5_result": {}});
+        let result = eval_sandboxed(wardley_confidence_gap_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 1.0).abs() < 1e-9);
+    }
+
+    fn diataxis_quality_form() -> &'static str {
+        r##"
+        (let ((wt (assoc "weighted_total" step_4_result))
+              (directives (assoc "refinement_directives" step_4_result)))
+          (let ((score (if (numberp wt) wt 1.0))
+                (dc (if (is_null directives) 0 (length directives))))
+            (let ((raw (+ score (* dc 0.05))))
+              (if (> raw 1.0) 1.0 raw))))
+        "##
+    }
+
+    #[test]
+    fn diataxis_perfect_diagram_scores_zero() {
+        let env = json!({
+            "step_4_result": {
+                "weighted_total": 0.0,
+                "refinement_directives": []
+            }
+        });
+        let result = eval_sandboxed(diataxis_quality_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn diataxis_two_directives_adds_penalty() {
+        let env = json!({
+            "step_4_result": {
+                "weighted_total": 0.1,
+                "refinement_directives": ["fix1", "fix2"]
+            }
+        });
+        let result = eval_sandboxed(diataxis_quality_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        // 0.1 + 2 * 0.05 = 0.2
+        assert!((score - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn diataxis_missing_weighted_total_scores_one() {
+        let env = json!({"step_4_result": {}});
+        let result = eval_sandboxed(diataxis_quality_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 1.0).abs() < 1e-9);
+    }
+
+    fn refactor_gap_form() -> &'static str {
+        r##"
+        (if (is_null step_7_result)
+            1.0
+            (let ((depth (assoc "depth_test_results" step_7_result))
+                  (dep-check (assoc "dependency_check" step_7_result))
+                  (p68 (assoc "p6_p7_p8_compliance" step_7_result))
+                  (checklist (assoc "checklist" step_7_result)))
+              (begin
+                (define count-shallow
+                  (lambda (ds acc)
+                    (if (is_null ds)
+                        acc
+                        (let ((verdict (assoc "verdict" (car ds))))
+                          (count-shallow
+                            (cdr ds)
+                            (if (string= verdict "shallow") (+ acc 1) acc))))))
+                (define count-not-done
+                  (lambda (cs acc)
+                    (if (is_null cs)
+                        acc
+                        (let ((st (assoc "status" (car cs))))
+                          (count-not-done
+                            (cdr cs)
+                            (if (string= st "not_done") (+ acc 1) acc))))))
+                (let ((shallow (count-shallow (if (is_null depth) (list) depth) 0))
+                      (dep-v (let ((v (assoc "violations" dep-check))) (if (is_null v) 0 (length v))))
+                      (p68-v (let ((v (assoc "violations" p68))) (if (is_null v) 0 (length v))))
+                      (nd (count-not-done (if (is_null checklist) (list) checklist) 0)))
+                  (let ((raw (+ shallow dep-v p68-v nd)))
+                    (if (> raw 1) 1.0 raw))))))
+        "##
+    }
+
+    #[test]
+    fn refactor_clean_verify_scores_zero() {
+        let env = json!({
+            "step_7_result": {
+                "depth_test_results": [{"verdict": "deep"}],
+                "dependency_check": {"violations": []},
+                "p6_p7_p8_compliance": {"violations": []},
+                "checklist": [{"item": "x", "status": "done"}]
+            }
+        });
+        let result = eval_sandboxed(refactor_gap_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn refactor_shallow_and_violations_score_nonzero() {
+        let env = json!({
+            "step_7_result": {
+                "depth_test_results": [{"verdict": "shallow"}],
+                "dependency_check": {"violations": ["v1"]},
+                "p6_p7_p8_compliance": {"violations": []},
+                "checklist": [{"item": "x", "status": "not_done"}]
+            }
+        });
+        let result = eval_sandboxed(refactor_gap_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        // 1 shallow + 1 dep violation + 0 p68 + 1 not_done = 3, capped at 1.0
+        assert!((score - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn refactor_skipped_verify_scores_one() {
+        // step 7 was skipped (decision != proceed_to_refactor); step_7_result is null.
+        let env = json!({});
+        let result = eval_sandboxed(refactor_gap_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 1.0).abs() < 1e-9);
+    }
+
+    fn graph_audit_findings_form() -> &'static str {
+        r##"
+        (let ((findings (assoc "quality_findings" step_3_result)))
+          (let ((n (if (is_null findings) 0 (length findings))))
+            (let ((raw (/ n 10)))
+              (if (> raw 1.0) 1.0 raw))))
+        "##
+    }
+
+    #[test]
+    fn graph_audit_no_findings_scores_zero() {
+        let env = json!({"step_3_result": {"quality_findings": []}});
+        let result = eval_sandboxed(graph_audit_findings_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn graph_audit_five_findings_scores_half() {
+        let env = json!({"step_3_result": {"quality_findings": ["a", "b", "c", "d", "e"]}});
+        let result = eval_sandboxed(graph_audit_findings_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn graph_audit_missing_findings_scores_zero() {
+        let env = json!({"step_3_result": {}});
+        let result = eval_sandboxed(graph_audit_findings_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 0.0).abs() < 1e-9);
+    }
+
+    fn graph_audit_blockers_form() -> &'static str {
+        r##"
+        (let ((blockers (assoc "blockers" step_15_result)))
+          (let ((n (if (is_null blockers) 0 (length blockers))))
+            (let ((raw (/ n 5)))
+              (if (> raw 1.0) 1.0 raw))))
+        "##
+    }
+
+    #[test]
+    fn graph_audit_no_blockers_scores_zero() {
+        let env = json!({"step_15_result": {"blockers": []}});
+        let result = eval_sandboxed(graph_audit_blockers_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn graph_audit_three_blockers_scores_six_tenths() {
+        let env = json!({"step_15_result": {"blockers": ["b1", "b2", "b3"]}});
+        let result = eval_sandboxed(graph_audit_blockers_form(), &env).unwrap();
+        let score = result.as_f64().expect("score is a float");
+        assert!((score - 0.6).abs() < 1e-9);
+    }
 }
