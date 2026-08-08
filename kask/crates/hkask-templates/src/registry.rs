@@ -770,15 +770,15 @@ mod tests {
             );
         }
         // fault_count is now aggregated by the deterministic compute step
-        // (swarm.converge_accumulate, ordinal 8), not the CHECK LLM template —
-        // pin that the loop threads it from step_8_result, not step_6_result.
+        // (swarm.converge_accumulate, ordinal 7), not the CHECK LLM template —
+        // pin that the loop threads it from step_7_result, not step_6_result.
         let fc_binding = loop_mapping
             .get("fault_count")
             .and_then(|v| v.as_str())
             .expect("loop step binds fault_count");
         assert!(
-            fc_binding.contains("step_8_result.fault_count"),
-            "fault_count must thread from the compute step (step_8_result), not CHECK — got {fc_binding}"
+            fc_binding.contains("step_7_result.fault_count"),
+            "fault_count must thread from the compute step (step_7_result), not CHECK — got {fc_binding}"
         );
 
         // DECIDE (ordinal 3) binds the guards it consumes.
@@ -821,18 +821,20 @@ mod tests {
             "ORIENT input_mapping must bind `delegate_results` for C5 fault attribution"
         );
 
-        // The loop step must bind convergence_signal from the field
-        // the signal compute actually returns (hypotenuse from kata.hypotenuse),
-        // not a nonexistent convergence_metric — a stale binding leaves the
-        // convergence tracker's signal_history at the 1.0 default and
-        // causes premature Cauchy convergence. Pin the corrected binding.
+        // The loop step must bind convergence_signal from a real field the
+        // CHECK step (ordinal 6) actually produces — not a phantom
+        // `hypotenuse` field on the converge_accumulate compute step (which
+        // returns iteration_log/failed_edits/influence_scores/fault_count, not
+        // hypotenuse). A stale binding leaves the convergence tracker's
+        // signal_history at a constant default and causes premature Cauchy
+        // convergence. Pin that the signal reads from step_6_result.
         let conv_signal = loop_mapping
             .get("convergence_signal")
             .and_then(|v| v.as_str())
             .expect("loop step binds convergence_signal");
         assert!(
-            conv_signal.contains("step_7_result.hypotenuse"),
-            "convergence_signal must read step_7_result.hypotenuse (not the nonexistent convergence_metric) — got {conv_signal}"
+            conv_signal.contains("step_6_result"),
+            "convergence_signal must read from the CHECK step (step_6_result), not a phantom field on the compute step — got {conv_signal}"
         );
     }
 
