@@ -1618,7 +1618,7 @@ mod tests {
                                                 (list "credits_exceed_ceiling")
                                                 (list))))
                                       (check-entry (cdr es) (+ idx 1)
-                                        (append acc d1 d2 d3 d4)))))))
+                                        (append acc d1 d2 d3 d4))))))))
                         (define check-duplicates
                           (lambda (es seen acc)
                             (if (is_null es)
