@@ -1632,7 +1632,7 @@ mod tests {
                                           (check-duplicates (cdr es) (cons (list agent-str true) seen) acc))))))))
                         (define entry-defects (check-entry seq 0 (list)))
                         (define dup-defects (check-duplicates seq (list) (list)))
-                        (append entry-defects dup-defects)))))))
+                        (append entry-defects dup-defects))))))
         "#;
 
         // Case 1: valid directive — no defects.
