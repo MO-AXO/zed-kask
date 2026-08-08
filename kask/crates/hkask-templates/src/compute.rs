@@ -1544,6 +1544,63 @@ mod tests {
         assert!(defects[0].as_str().unwrap() == "insufficient_level_coverage_below_3");
     }
 
+    /// Validates the task-breakdown task completeness check form.
+    /// Checks every task has title and acceptance_criteria keys present.
+    #[test]
+    fn dispatch_lisp_eval_task_completeness() {
+        let form = r#"
+          (let ((tasks (assoc "tasks" step_2_result)))
+            (if (is_null tasks)
+                (list "no_tasks_field")
+                (begin
+                  (define check-task
+                    (lambda (ts acc)
+                      (if (is_null ts)
+                          acc
+                          (let ((t (car ts)))
+                            (let ((acc2 (if (is_null (assoc "title" t))
+                                            (cons "missing_title" acc)
+                                            acc)))
+                              (let ((acc3 (if (is_null (assoc "acceptance_criteria" t))
+                                              (cons "missing_acceptance_criteria" acc2)
+                                              acc2)))
+                                (check-task (cdr ts) acc3)))))))
+                  (check-task tasks (list)))))
+        "#;
+        // Case 1: all tasks have both fields. Expect no defects.
+        let valid_input = serde_json::json!({
+            "form": form,
+            "env": {
+                "step_2_result": {
+                    "tasks": [
+                        {"title": "task1", "acceptance_criteria": ["c1"]},
+                        {"title": "task2", "acceptance_criteria": ["c2"]}
+                    ]
+                }
+            }
+        });
+        let result = dispatch_compute("lisp.eval", &valid_input).unwrap();
+        let defects = result.as_array().expect("result should be a list");
+        assert!(defects.is_empty(), "valid tasks should have no defects, got: {defects:?}");
+
+        // Case 2: one task missing acceptance_criteria. Expect 1 defect.
+        let missing_input = serde_json::json!({
+            "form": form,
+            "env": {
+                "step_2_result": {
+                    "tasks": [
+                        {"title": "task1", "acceptance_criteria": ["c1"]},
+                        {"title": "task2"}
+                    ]
+                }
+            }
+        });
+        let result = dispatch_compute("lisp.eval", &missing_input).unwrap();
+        let defects = result.as_array().expect("result should be a list");
+        assert_eq!(defects.len(), 1, "missing AC should give 1 defect, got: {defects:?}");
+        assert!(defects.iter().any(|d| d == "missing_acceptance_criteria"));
+    }
+
     #[test]
     fn dispatch_kata_object_gap_complete() {
         let input = serde_json::json!({
