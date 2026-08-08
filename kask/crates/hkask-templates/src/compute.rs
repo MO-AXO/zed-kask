@@ -1596,7 +1596,6 @@ mod tests {
     #[test]
     fn dispatch_lisp_eval_swarm_steering_preflight() {
         let form = r#"
-          form: >
           (let ((directive step_1_result))
             (if (is_null directive)
                 (list "no_directive_result")
