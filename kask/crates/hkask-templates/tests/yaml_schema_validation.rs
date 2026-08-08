@@ -193,10 +193,7 @@ fn superforecasting_manifest_loads_with_compute_step() {
         compute_steps[3].ordinal, 15,
         "lisp.eval signal compute at ordinal 15"
     );
-    assert_eq!(
-        compute_steps[3].compute_ref.as_deref(),
-        Some("lisp.eval")
-    );
+    assert_eq!(compute_steps[3].compute_ref.as_deref(), Some("lisp.eval"));
     assert_eq!(
         compute_steps[4].ordinal, 16,
         "calibration feedback compute at ordinal 16"
@@ -287,10 +284,7 @@ fn kali_audit_manifest_loads_with_correct_structure() {
     // loop step pushes via convergence_signal:). The former
     // kata.convergence_check compute step was removed.
     assert_eq!(manifest.steps[4].action, "compute");
-    assert_eq!(
-        manifest.steps[4].compute_ref.as_deref(),
-        Some("lisp.eval")
-    );
+    assert_eq!(manifest.steps[4].compute_ref.as_deref(), Some("lisp.eval"));
 
     // Verify step 6 is loop.
     assert_eq!(manifest.steps[5].action, "loop");
