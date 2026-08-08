@@ -1892,7 +1892,7 @@ mod tests {
           (let ((d (if (numberp div) div 0.0))
                 (c (if (numberp con) con 0.0))
                 (v (if (numberp cov) cov 0.0))
-                (pen (if (string= pflag "true") 0.15 0.0)))
+                (pen (if pflag 0.15 0.0)))
             (let ((mn (if (< d c) (if (< d v) d v) (if (< c v) c v))))
               (let ((gap (- 1.0 mn)))
                 (if (> (+ gap pen) 1.0) 1.0 (+ gap pen))))))
@@ -2116,8 +2116,10 @@ mod tests {
 
     #[test]
     fn refactor_skipped_verify_scores_one() {
-        // step 7 was skipped (decision != proceed_to_refactor); step_7_result is null.
-        let env = json!({});
+        // step 7 was skipped (decision != proceed_to_refactor); the Jinja
+        // template renders step_7_result as JSON null, which from_json
+        // converts to LispValue::Nil. The form's nil-guard returns 1.0.
+        let env = json!({"step_7_result": null});
         let result = eval_sandboxed(refactor_gap_form(), &env).unwrap();
         let score = result.as_f64().expect("score is a float");
         assert!((score - 1.0).abs() < 1e-9);
