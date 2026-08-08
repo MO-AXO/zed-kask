@@ -1629,7 +1629,7 @@ mod tests {
                                       (if (not (is_null (assoc agent-str seen)))
                                           (check-duplicates (cdr es) (cons (list agent-str true) seen)
                                             (cons "duplicate_agent" acc))
-                                          (check-duplicates (cdr es) (cons (list agent-str true) seen) acc))))))))
+                                          (check-duplicates (cdr es) (cons (list agent-str true) seen) acc)))))))
                         (define entry-defects (check-entry seq 0 (list)))
                         (define dup-defects (check-duplicates seq (list) (list)))
                         (append entry-defects dup-defects)))))
