@@ -696,26 +696,26 @@ mod tests {
             "step 4 compute_ref must be swarm.filter_proposed_moves (C3/C7 enforcement)"
         );
 
-        // Step 8 is the converge_accumulate compute primitive.
+        // Step 7 is the converge_accumulate compute primitive.
         let accumulate = manifest
             .steps
             .iter()
-            .find(|s| s.ordinal == 8)
-            .expect("swarm-intelligence has a converge_accumulate step (ordinal 8)");
+            .find(|s| s.ordinal == 7)
+            .expect("swarm-intelligence has a converge_accumulate step (ordinal 7)");
         assert_eq!(
             accumulate.action, "compute",
-            "step 8 must be a compute step"
+            "step 7 must be a compute step"
         );
         assert_eq!(
             accumulate.compute_ref.as_deref(),
             Some("swarm.converge_accumulate"),
-            "step 8 compute_ref must be swarm.converge_accumulate (C1/C3/C7)"
+            "step 7 compute_ref must be swarm.converge_accumulate (C1/C3/C7)"
         );
         let acc_mapping = accumulate
             .input_mapping
             .as_ref()
             .and_then(|v| v.as_object())
-            .expect("step 8 has an input_mapping");
+            .expect("step 7 has an input_mapping");
         for key in [
             "iteration_log",
             "failed_edits",
@@ -731,27 +731,27 @@ mod tests {
             );
         }
 
-        // Step 9 is the second_order_monitor compute primitive.
+        // Step 8 is the second_order_monitor compute primitive.
         let monitor = manifest
             .steps
             .iter()
-            .find(|s| s.ordinal == 9)
-            .expect("swarm-intelligence has a second_order_monitor step (ordinal 9)");
+            .find(|s| s.ordinal == 8)
+            .expect("swarm-intelligence has a second_order_monitor step (ordinal 8)");
         assert_eq!(
             monitor.compute_ref.as_deref(),
             Some("swarm.second_order_monitor"),
-            "step 9 compute_ref must be swarm.second_order_monitor (C1)"
+            "step 8 compute_ref must be swarm.second_order_monitor (C1)"
         );
 
-        // The loop step (ordinal 10) threads the accumulators + blame_count
+        // The loop step (ordinal 9) threads the accumulators + blame_count
         // back into context so the next iteration's DECIDE/ORIENT/CHECK/FILTER can
         // read them. A dropped binding silently disables a guard — this pins
         // the threading (the advertised-invariants trap).
         let loop_step = manifest
             .steps
             .iter()
-            .find(|s| s.ordinal == 10)
-            .expect("swarm-intelligence has a loop step (ordinal 10)");
+            .find(|s| s.ordinal == 9)
+            .expect("swarm-intelligence has a loop step (ordinal 9)");
         let loop_mapping = loop_step
             .input_mapping
             .as_ref()
