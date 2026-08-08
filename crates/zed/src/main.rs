@@ -4211,7 +4211,7 @@ mod tests {
         // name forces the compiler to resolve it; renaming or deleting it
         // breaks compilation here. The fn is async so we can't call it
         // without an AsyncApp, but the name reference pins its existence.
-        let _ = std::ptr::addr_of!(kask_server_env);
+        let _ = kask_server_env;
 
         // F2: the kask tokio runtime is built via tokio::runtime::Builder —
         // assert the builder type is accessible (the runtime is built in main()).
