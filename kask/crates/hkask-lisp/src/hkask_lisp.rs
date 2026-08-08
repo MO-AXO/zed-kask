@@ -1540,9 +1540,6 @@ mod tests {
               (list "no_hypotheses_field")
               (let ((n (length hyps)))
                 (begin
-                  (define append2
-                    (lambda (a b)
-                      (if (is_null a) b (cons (car a) (append2 (cdr a) b)))))
                   (define count-defects
                     (if (< n 3)
                         (list "insufficient_count_below_3")
@@ -1553,14 +1550,14 @@ mod tests {
                     (lambda (hs acc)
                       (if (is_null hs)
                           acc
-                          (let ((h (car hs)))
-                            (let ((acc2 (if (is_null (assoc "prediction" h))
-                                            (cons "missing_prediction" acc)
-                                            acc)))
-                              (let ((acc3 (if (is_null (assoc "falsifier" h))
-                                              (cons "missing_falsifier" acc2)
-                                              acc2)))
-                                (check-completeness (cdr hs) acc3)))))))
+                          (let ((h (car hs))
+                                (acc2 (if (is_null (assoc "prediction" h))
+                                          (cons "missing_prediction" acc)
+                                          acc)))
+                            (let ((acc3 (if (is_null (assoc "falsifier" h))
+                                            (cons "missing_falsifier" acc2)
+                                            acc2)))
+                              (check-completeness (cdr hs) acc3))))))
                   (define completeness-defects (check-completeness hyps (list)))
                   (define check-diversity
                     (lambda (hs nh nm nl)
@@ -1569,31 +1566,31 @@ mod tests {
                             (if (< distinct 2)
                                 (list "insufficient_diversity_below_2")
                                 (list)))
-                          (let ((h (car hs)))
-                            (let ((lk (assoc "likelihood" h)))
-                              (let ((is-high (not (is_null (assoc "high" (list (list lk true)))))))
-                                (let ((is-med (not (is_null (assoc "medium" (list (list lk true)))))))
-                                  (let ((is-low (not (is_null (assoc "low" (list (list lk true)))))))
-                                    (check-diversity
-                                      (cdr hs)
-                                      (if is-high (+ nh 1) nh)
-                                      (if is-med (+ nm 1) nm)
-                                      (if is-low (+ nl 1) nl))))))))))
+                          (let ((h (car hs))
+                                (lk (assoc "likelihood" h))
+                                (is-high (string= lk "high"))
+                                (is-med (string= lk "medium"))
+                                (is-low (string= lk "low")))
+                            (check-diversity
+                              (cdr hs)
+                              (if is-high (+ nh 1) nh)
+                              (if is-med (+ nm 1) nm)
+                              (if is-low (+ nl 1) nl))))))
                   (define diversity-defects (check-diversity hyps 0 0 0))
                   (define check-duplicates
                     (lambda (hs seen)
                       (if (is_null hs)
                           (list)
-                          (let ((h (car hs)))
-                            (let ((hyp-text (assoc "hypothesis" h)))
-                              (let ((hyp-str (if (is_null hyp-text) "" hyp-text)))
-                                (if (not (is_null (assoc hyp-str seen)))
-                                    (cons "duplicate_hypothesis" (check-duplicates (cdr hs) seen))
-                                    (check-duplicates (cdr hs) (cons (list hyp-str true) seen)))))))))
+                          (let ((h (car hs))
+                                (hyp-text (assoc "hypothesis" h))
+                                (hyp-str (if (is_null hyp-text) "" hyp-text)))
+                            (if (not (is_null (assoc hyp-str seen)))
+                                (cons "duplicate_hypothesis" (check-duplicates (cdr hs) seen))
+                                (check-duplicates (cdr hs) (cons (list hyp-str true) seen)))))))
                   (define duplicate-defects (check-duplicates hyps (list)))
-                  (append2
-                    (append2 count-defects completeness-defects)
-                    (append2 diversity-defects duplicate-defects))))))
+                  (append
+                    count-defects completeness-defects
+                    diversity-defects duplicate-defects)))))
         "##
     }
 
@@ -1651,17 +1648,11 @@ mod tests {
                 ]
             }
         });
-        match eval_sandboxed(scaffold_form(), &env) {
-            Ok(result) => {
-                let defects = result.as_array().expect("result is a list");
-                assert!(defects.contains(&json!("excessive_count_above_7")));
-            }
-            Err(LispError::DepthLimitExceeded(_)) => {
-                // Known limitation: 8 hypotheses × nested-let depth exceeds 64.
-                // The manifest's max is 7, so this edge case is out of scope.
-            }
-            Err(e) => panic!("unexpected error: {e}"),
-        }
+        let result = eval_sandboxed(scaffold_form(), &env).unwrap();
+        let defects = result.as_array().expect("result is a list");
+        assert!(defects.contains(&json!("excessive_count_above_7")));
+        // 8 hypotheses all with likelihood "high" → diversity defect too.
+        assert!(defects.contains(&json!("insufficient_diversity_below_2")));
     }
 
     #[test]
