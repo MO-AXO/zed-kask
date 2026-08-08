@@ -1016,7 +1016,7 @@ mod tests {
         //     closure env, so recursive helpers accumulate via return values.
         //   - `=` is numeric-only; string equality is done via `assoc` (which uses
         //     LispValue PartialEq, and String vs String is structural).
-        //   - No `append` builtin; a recursive `append2` helper joins two lists.
+        //   - `append` is a builtin that joins N lists (all args must be lists).
         //   - Boolean literals are `true`/`false`/`nil` (not #t/#f).
         let form = r#"
           (let ((hyps (assoc "hypotheses" step_1_result)))
@@ -1200,6 +1200,106 @@ mod tests {
         assert!(
             defects.iter().any(|d| d == "duplicate_hypothesis"),
             "duplicate hypothesis text should flag duplicate_hypothesis, got: {defects:?}"
+        );
+    }
+
+    /// Validates the upstream-rebase verification lisp form's type-coercion
+    /// guard. When the LLM returns booleans as strings ("false" instead of
+    /// JSON false), the `is_truthy` function treats String("false") as true —
+    /// a failed check would pass the verification gate. The form includes a
+    /// `(string= raw "false")` coercion guard that converts string "false"
+    /// to Bool(false) before the `and` gate. This test pins that guard.
+    #[test]
+    fn dispatch_lisp_eval_upstream_rebase_string_false_coercion() {
+        let form = r#"
+          (let ((checks step_4_result))
+            (let ((compiled-raw (assoc "compiled" checks))
+                  (tests-raw (assoc "tests_passed" checks))
+                  (invariant-raw (assoc "invariant_holds" checks))
+                  (marker_count (assoc "marker_count" checks))
+                  (call_site_count (assoc "call_site_count" checks)))
+              (let ((compiled (if (string= compiled-raw "false") false compiled-raw))
+                    (tests_passed (if (string= tests-raw "false") false tests-raw))
+                    (invariant_holds (if (string= invariant-raw "false") false invariant-raw)))
+                (if (and compiled tests_passed invariant_holds
+                         (>= marker_count (* call_site_count 0.5)))
+                    (list (list "verification_passed" true)
+                          (list "marker_density" (/ marker_count call_site_count))
+                          (list "convergence_metric" 1.0))
+                    (list (list "verification_passed" false)
+                          (list "marker_density" (/ marker_count call_site_count))
+                          (list "convergence_metric" 0.0))))))
+        "#;
+
+        // Case 1: all checks pass with JSON booleans — verification_passed = true.
+        let valid_input = serde_json::json!({
+            "form": form,
+            "env": {
+                "step_4_result": {
+                    "compiled": true,
+                    "tests_passed": true,
+                    "invariant_holds": true,
+                    "marker_count": 10,
+                    "call_site_count": 10
+                }
+            }
+        });
+        let result = dispatch_compute("lisp.eval", &valid_input).unwrap();
+        let pairs = result.as_array().expect("result should be a list of pairs");
+        let passed = pairs
+            .iter()
+            .find(|p| {
+                p.as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    == Some("verification_passed")
+            })
+            .and_then(|p| {
+                p.as_array()
+                    .and_then(|a| a.get(1))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false);
+        assert!(passed, "all-true JSON booleans should pass verification");
+
+        // Case 2: compiled = "false" (string) — without the guard, is_truthy
+        // treats String("false") as true and the gate passes. With the guard,
+        // string "false" is coerced to Bool(false) and the gate correctly fails.
+        let string_false_input = serde_json::json!({
+            "form": form,
+            "env": {
+                "step_4_result": {
+                    "compiled": "false",
+                    "tests_passed": true,
+                    "invariant_holds": true,
+                    "marker_count": 10,
+                    "call_site_count": 10
+                }
+            }
+        });
+        let result = dispatch_compute("lisp.eval", &string_false_input).unwrap();
+        let pairs = result.as_array().expect("result should be a list of pairs");
+        let passed = pairs
+            .iter()
+            .find(|p| {
+                p.as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|v| v.as_str())
+                    == Some("verification_passed")
+            })
+            .and_then(|p| {
+                p.as_array()
+                    .and_then(|a| a.get(1))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(true);
+        assert!(
+            !passed,
+            "string \"false\" must be coerced to Bool(false) — verification must fail"
+        );
+        assert!(
+            !passed,
+            "string \"false\" must be coerced to Bool(false) — verification must fail"
         );
     }
 

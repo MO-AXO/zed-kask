@@ -1,5 +1,11 @@
 # Prompt-Enhance Skill Manifest
-# hKask v0.33.5 — Streamlined typed prompt enhancement
+# hKask v0.33.3 — Streamlined typed prompt enhancement
+#
+# Reference model:
+#   Liu, Y.-Y., Zheng, Z., Zhang, F. et al. "A comprehensive taxonomy of
+#   prompt engineering techniques for large language models." Frontiers of
+#   Computer Science 20, 2003601 (2026). DOI: 10.1007/s11704-025-50058-z.
+#   4 aspects: profile & instruction, knowledge, reasoning & planning, reliability.
 #
 # General-purpose prompt enhancement for prompts destined for the zed-kask
 # platform. Typed routing over a 7-type prompt taxonomy (coding, reasoning,
