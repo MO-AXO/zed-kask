@@ -1330,11 +1330,6 @@ mod tests {
         // grill-me edge case (d): with a selected node → body references the
         // node name; with no selection → no node clause. Uses `.get` bounds
         // check, so an out-of-range `selected` is a no-op (no panic).
-        let _guard = GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let _restore = ConversationInjectorGuard;
-
         let widget = cx.update(|cx| cx.new(|cx| GraphWidget::new(body_with_subject(), cx)));
         // No selection: no node clause.
         let body = widget.read_with(cx, |widget, _cx| widget.compose_disagree_body());

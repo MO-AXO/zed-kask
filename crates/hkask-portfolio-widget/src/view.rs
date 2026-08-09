@@ -1626,9 +1626,10 @@ mod tests {
 
     // ── "I disagree" affordance tests (C, D21 widget→agent seam) ──────────────
     //
-    // These mutate the process-global `ConversationInjector` (a separate global
-    // from `TOOL_INVOKER`), so they take `GLOBAL_TEST_LOCK` too and use an RAII
-    // `ConversationInjectorGuard` to reset the global on drop.
+    // These mutate the per-app `ConversationInjector` global (a separate global
+    // from `TOOL_INVOKER`), so they take `GLOBAL_TEST_LOCK` too. The per-app
+    // global drops with each test's `TestAppContext`, so no RAII reset guard is
+    // needed.
 
     /// Records the body of every `inject` call. `Send + Sync` for the
     /// `Arc<dyn ConversationInjector>` global.
@@ -1649,15 +1650,6 @@ mod tests {
                 .unwrap_or_else(|error| error.into_inner())
                 .push(body);
             gpui::Task::ready(Ok(()))
-        }
-    }
-
-    /// RAII guard that restores the conversation-injector global to `None` on
-    /// drop so a test failure cannot leak a mock into sibling tests.
-    struct ConversationInjectorGuard;
-    impl Drop for ConversationInjectorGuard {
-        fn drop(&mut self) {
-            hkask_conversation_injector::set_active_injector(None);
         }
     }
 
@@ -1711,9 +1703,10 @@ mod tests {
         let _guard = GLOBAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let _restore = ConversationInjectorGuard;
         let mock = std::sync::Arc::new(MockConversationInjector::default());
-        hkask_conversation_injector::set_active_injector(Some(mock.clone()));
+        cx.update(|cx| {
+            hkask_conversation_injector::set_active_injector(cx, Some(mock.clone()));
+        });
 
         let body = body_with_returns_and_provenance();
         // Use a throwaway window root so we get a `Window` for `on_disagree_click`
@@ -1747,8 +1740,7 @@ mod tests {
         let _guard = GLOBAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let _restore = ConversationInjectorGuard;
-        hkask_conversation_injector::set_active_injector(None);
+        // Per-app global starts empty — no injector is wired by default.
 
         let body = body_with_returns_and_provenance();
         let (_dummy, cx) = cx.add_window_view(|_window, _cx| DummyView);
@@ -1773,7 +1765,6 @@ mod tests {
         let _guard = GLOBAL_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let _restore = ConversationInjectorGuard;
 
         let empty = PortfolioBlockBody {
             viz: Some("portfolio".into()),
