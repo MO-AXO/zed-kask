@@ -249,3 +249,134 @@ impl AgentTool for SkillBundleTool {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_skills::{SkillSource, parse_skill_frontmatter};
+    use gpui::TestAppContext;
+    use serde_json::json;
+    use settings::{Settings, SettingsStore};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    fn init_test(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
+            settings.tool_permissions.tools.insert(
+                SkillBundleTool::NAME.into(),
+                agent_settings::ToolRules {
+                    default: Some(settings::ToolPermissionMode::Allow),
+                    always_allow: vec![],
+                    always_deny: vec![],
+                    always_confirm: vec![],
+                    invalid_patterns: vec![],
+                },
+            );
+            agent_settings::AgentSettings::override_global(settings, cx);
+        });
+    }
+
+    fn create_test_skill(name: &str) -> Skill {
+        let skill_file_path = format!("/skills/{name}/SKILL.md");
+        let content = format!("---\nname: {name}\ndescription: A test skill\n---\n\n# Body");
+        parse_skill_frontmatter(Path::new(&skill_file_path), &content, SkillSource::Global).unwrap()
+    }
+
+    #[gpui::test]
+    async fn test_skill_bundle_rejects_fewer_than_three_skills(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let skills = Arc::new(vec![create_test_skill("a"), create_test_skill("b")]);
+        let tool = Arc::new(SkillBundleTool::with_manifest_executor_resolver(
+            move |_cx| skills.clone(),
+            || None,
+        ));
+
+        let (mut sender, input) = ToolInput::<SkillBundleToolInput>::test();
+        sender.send_full(json!({
+            "skills": ["a", "b"],
+            "task": "do something"
+        }));
+        let (event_stream, _rx) = ToolCallEventStream::test();
+        let task = cx.update(|cx| tool.run(input, event_stream, cx));
+        let result = task.await;
+
+        let err = match result {
+            Err(SkillBundleToolOutput::Error { error }) => error,
+            other => panic!("expected Error for <3 skills, got: {other:?}"),
+        };
+        assert!(
+            err.contains("at least 3 skills"),
+            "error should mention the 3-skill gate: {err}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_skill_bundle_rejects_missing_skills(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let skills = Arc::new(vec![
+            create_test_skill("a"),
+            create_test_skill("b"),
+            create_test_skill("c"),
+        ]);
+        let tool = Arc::new(SkillBundleTool::with_manifest_executor_resolver(
+            move |_cx| skills.clone(),
+            || None,
+        ));
+
+        let (mut sender, input) = ToolInput::<SkillBundleToolInput>::test();
+        sender.send_full(json!({
+            "skills": ["a", "b", "nonexistent"],
+            "task": "do something"
+        }));
+        let (event_stream, _rx) = ToolCallEventStream::test();
+        let task = cx.update(|cx| tool.run(input, event_stream, cx));
+        let result = task.await;
+
+        let err = match result {
+            Err(SkillBundleToolOutput::Error { error }) => error,
+            other => panic!("expected Error for missing skill, got: {other:?}"),
+        };
+        assert!(
+            err.contains("not found"),
+            "error should mention missing skills: {err}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_skill_bundle_errors_when_executor_not_configured(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let skills = Arc::new(vec![
+            create_test_skill("a"),
+            create_test_skill("b"),
+            create_test_skill("c"),
+        ]);
+        let tool = Arc::new(SkillBundleTool::with_manifest_executor_resolver(
+            move |_cx| skills.clone(),
+            || None, // no executor wired
+        ));
+
+        let (mut sender, input) = ToolInput::<SkillBundleToolInput>::test();
+        sender.send_full(json!({
+            "skills": ["a", "b", "c"],
+            "task": "do something"
+        }));
+        let (event_stream, _rx) = ToolCallEventStream::test();
+        let task = cx.update(|cx| tool.run(input, event_stream, cx));
+        let result = task.await;
+
+        let err = match result {
+            Err(SkillBundleToolOutput::Error { error }) => error,
+            other => panic!("expected Error for no executor, got: {other:?}"),
+        };
+        assert!(
+            err.contains("not configured"),
+            "error should mention executor not configured: {err}"
+        );
+    }
+}
