@@ -157,6 +157,27 @@ impl HMemOntology {
         self
     }
 
+    /// Convert an episodic ontology (PKO-anchored) to a semantic ontology
+    /// (DC+BIBO state-axis anchored). Drops the PKO procedure/step and
+    /// shifts the 5W1H dimension from `How`/`When` to `What`. Retains any
+    /// DC fields and open-world tags from the source ontology so provenance
+    /// and domain annotations survive the promotion.
+    ///
+    /// This is the ontology-blob promotion that replaces the deprecated
+    /// `AccessControl::to_semantic()` perspective-strip. The consolidator
+    /// calls this when promoting an episodic h_mem to a semantic fact.
+    pub fn to_semantic(&self) -> Self {
+        Self {
+            dimensions: vec![Dimension::What.as_str().to_string()],
+            dc_type: self.dc_type.clone(),
+            dc_subject: self.dc_subject.clone(),
+            dc_source: self.dc_source.clone(),
+            pko_procedure: None,
+            pko_step: None,
+            ontology_tags: self.ontology_tags.clone(),
+        }
+    }
+
     /// Does this ontology carry a tag from the given namespace?
     pub fn has_ontology(&self, namespace: &str) -> bool {
         self.ontology_tags.contains_key(namespace)
