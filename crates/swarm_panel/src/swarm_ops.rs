@@ -451,11 +451,7 @@ impl SwarmPanel {
     ///   roster. A synced local card is NOT touched.
     /// On success, resets the author form to create mode and re-fetches the
     /// browse list so the deleted agent disappears.
-    pub(crate) fn delete_edited_agent(
-        &mut self,
-        window: &mut gpui::Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn delete_edited_agent(&mut self, cx: &mut Context<Self>) {
         let Some(agent_name) = self.author.editing_id.clone() else {
             self.author.status = Some("No agent is loaded for deletion.".into());
             cx.notify();
@@ -482,7 +478,6 @@ impl SwarmPanel {
         cx.notify();
         cx.spawn({
             let invoker = invoker.clone();
-            let agent_name = agent_name.clone();
             async move |this, cx| {
                 let result = invoker
                     .invoke_tool(SWARM_SERVER, tool_name, json!({ "agent_name": agent_name }))
@@ -491,8 +486,11 @@ impl SwarmPanel {
                     this.author.busy = false;
                     match result {
                         Ok(_) => {
-                            this.reset_author_form_for_create(window, cx);
-                            this.set_mode(crate::PanelMode::Browse, window, cx);
+                            // Defer the form reset and mode switch to the next
+                            // `render` frame — `Editor::clear` and `set_mode`
+                            // need `&mut Window`, which the spawn closure cannot
+                            // hold. `render` consumes `pending_author_reset`.
+                            this.pending_author_reset = true;
                             this.fetch_all(cx);
                         }
                         Err(err) => {
@@ -507,3 +505,4 @@ impl SwarmPanel {
         })
         .detach();
     }
+}

@@ -511,8 +511,8 @@ impl SwarmPanel {
                                 .color(Color::Warning)
                                 .disabled(self.author.busy)
                                 .tooltip(Tooltip::text(delete_tooltip))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.delete_edited_agent(window, cx);
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.delete_edited_agent(cx);
                                 })),
                         )
                     })
