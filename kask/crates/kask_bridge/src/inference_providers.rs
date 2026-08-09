@@ -432,9 +432,9 @@ pub fn has_data_service_api_key(env_var: &str) -> bool {
 /// - No inference env vars set → silent no-op (the `.env`-not-found warn at
 ///   `main.rs` already covers the "not configured" case; a second warn here
 ///   would be redundant noise).
-/// - Env var present, keychain write succeeds → `log::info!` naming the env
+/// - Env var present, keychain write succeeds → `tracing::info!` naming the env
 ///   var and the credential URL (confirms the mirror ran).
-/// - Env var present, keychain write fails → `log::warn!` naming the env
+/// - Env var present, keychain write fails → `tracing::warn!` naming the env
 ///   var, the error, and the remediation (the main process will use the env
 ///   var, but MCP servers reading from the keychain will not see this key).
 pub fn mirror_env_keys_to_keychain(

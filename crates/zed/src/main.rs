@@ -1611,8 +1611,8 @@ fn main() {
                 //
                 // Per the `.rules` trap "Process-global hooks set at runtime need a
                 // startup-failure signal": silent no-op when no inference env vars are
-                // set (the `.env`-not-found warn already covers that case), `log::info!`
-                // on success, `log::warn!` on failure. Runs in the deferred task because
+                // set (the `.env`-not-found warn already covers that case), `tracing::info!`
+                // on success, `tracing::warn!` on failure. Runs in the deferred task because
                 // it needs the `CredentialsProvider` (app-global, available post-init).
                 let mirror_task = cx.update(|cx| {
                     let credentials_provider = zed_credentials_provider::global(cx);
