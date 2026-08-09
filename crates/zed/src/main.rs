@@ -1600,6 +1600,26 @@ fn main() {
                     );
                 }
 
+                // zed-kask: D8/D12 — F13b: mirror inference-provider env keys to keychain.
+                // Operators who set `FALAI_API_KEY` etc. in `kask/.env` get a working
+                // main process (the env var is read by `EnvVar::new` in the
+                // OpenAI-compatible provider state), but MCP server child processes
+                // (media, corpus) receive their credentials via `mcp_env_with_credentials`,
+                // which reads from the keychain — not the parent process env. Without
+                // this mirror, MCP servers silently fail with "API key not configured"
+                // even though the main process works.
+                //
+                // Per the `.rules` trap "Process-global hooks set at runtime need a
+                // startup-failure signal": silent no-op when no inference env vars are
+                // set (the `.env`-not-found warn already covers that case), `log::info!`
+                // on success, `log::warn!` on failure. Runs in the deferred task because
+                // it needs the `CredentialsProvider` (app-global, available post-init).
+                let mirror_task = cx.update(|cx| {
+                    let credentials_provider = zed_credentials_provider::global(cx);
+                    kask_bridge::mirror_env_keys_to_keychain(&credentials_provider, cx)
+                });
+                mirror_task.detach();
+
                 // D14: Local collab server launch. When `kask.collab.enabled` is
                 // true (the default), zed-kask launches a local `collab serve api`
                 // process so the kask extensions panel can fetch
