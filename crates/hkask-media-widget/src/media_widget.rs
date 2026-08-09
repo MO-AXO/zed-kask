@@ -625,12 +625,15 @@ impl MediaWidget {
     fn on_disagree_click(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let body = self.compose_disagree_body();
         tracing::info!(target: "reg.widget.disagree", "REG");
-        if let Some(injector) = hkask_conversation_injector::shared_injector() {
-            // The production injector pre-fills the editor synchronously and
-            // returns a `Task::ready(Ok(()))`; the returned `Result` is always
-            // `Ok`. Await in a detached task so a hypothetical async impl's
-            // error path is surfaced (not silently dropped — repo `.rules`),
-            // and so `clippy::let_underscore_future` is not triggered.
+        if let Some(injector) = hkask_conversation_injector::shared_injector(cx) {
+            // The production injector pre-fills the active ThreadView's editor
+            // synchronously; it returns `Ok` while that view is alive, or `Err`
+            // if the active conversation has been dropped (the global holds a
+            // weak ref, so a dead thread is never retained and never leaks
+            // across app/test lifetimes). Await in a detached task so the
+            // `Err` path surfaces the composed body as a draft (not silently
+            // dropped — repo `.rules`), and so `clippy::let_underscore_future`
+            // is not triggered.
             let draft = body.clone();
             let task = injector.inject(body, window, cx);
             cx.spawn(async move |this, cx| {
