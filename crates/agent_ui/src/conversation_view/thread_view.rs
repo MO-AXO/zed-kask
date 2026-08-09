@@ -10329,9 +10329,7 @@ impl ThreadView {
         cx.notify();
 
         let task = cx.spawn(async move |_this, _cx| {
-            let result = executor
-                .save_bundle(bundle_manifest)
-                .await;
+            let result = executor.save_bundle(bundle_manifest).await;
             (tool_call_id, result)
         });
 

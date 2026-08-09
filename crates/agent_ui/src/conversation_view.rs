@@ -645,7 +645,7 @@ impl ConversationView {
     fn publish_injector(&self) {
         let injector = self.active_thread().map(|thread_view| {
             Arc::new(ThreadConversationInjector {
-                thread_view: thread_view.clone(),
+                thread_view: thread_view.downgrade(),
             }) as Arc<dyn hkask_conversation_injector::ConversationInjector>
         });
         hkask_conversation_injector::set_active_injector(injector);
@@ -748,18 +748,22 @@ impl ConversationView {
 /// the same effect. Lives in `agent_ui` (the D-seam) because it needs
 /// `ThreadView` + `MessageEditor`, which only `agent_ui` has.
 struct ThreadConversationInjector {
-    thread_view: Entity<ThreadView>,
+    thread_view: WeakEntity<ThreadView>,
 }
 
 impl hkask_conversation_injector::ConversationInjector for ThreadConversationInjector {
     fn inject(&self, body: String, window: &mut Window, cx: &mut App) -> Task<Result<(), String>> {
-        self.thread_view.update(cx, |thread_view, cx| {
+        match self.thread_view.update(cx, |thread_view, cx| {
             thread_view.message_editor.update(cx, |editor, cx| {
                 editor.clear(window, cx);
                 editor.insert_text(&body, window, cx);
             });
-        });
-        Task::ready(Ok(()))
+        }) {
+            Ok(()) => Task::ready(Ok(())),
+            Err(error) => Task::ready(Err(format!(
+                "active conversation no longer exists: {error}"
+            ))),
+        }
     }
 }
 

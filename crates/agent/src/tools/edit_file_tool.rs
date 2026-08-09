@@ -5,7 +5,9 @@ use super::edit_session::{
     EditSession, EditSessionContext, EditSessionMode, EditSessionResult,
     initial_title_from_partial_path, run_session,
 };
-use crate::{AgentTool, Thread, ToolCallEventStream, ToolInput, ToolInputPayload, map_tool_input_error};
+use crate::{
+    AgentTool, Thread, ToolCallEventStream, ToolInput, ToolInputPayload, map_tool_input_error,
+};
 use action_log::ActionLog;
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;

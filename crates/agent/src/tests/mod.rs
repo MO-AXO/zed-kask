@@ -4829,11 +4829,7 @@ async fn test_non_streaming_tool_partial_input_then_retryable_error_flushes_canc
 
     let _events = thread
         .update(cx, |thread, cx| {
-            thread.send(
-                ClientUserMessageId::new(),
-                ["Use the echo tool"],
-                cx,
-            )
+            thread.send(ClientUserMessageId::new(), ["Use the echo tool"], cx)
         })
         .unwrap();
     cx.run_until_parked();
@@ -4848,8 +4844,7 @@ async fn test_non_streaming_tool_partial_input_then_retryable_error_flushes_canc
         is_input_complete: false,
         thought_signature: None,
     };
-    fake_model
-        .send_last_completion_stream_event(LanguageModelCompletionEvent::ToolUse(tool_use.clone()));
+    fake_model.send_last_completion_stream_event(LanguageModelCompletionEvent::ToolUse(tool_use));
     cx.run_until_parked();
 
     // End the stream with a retryable error (internal server error).
