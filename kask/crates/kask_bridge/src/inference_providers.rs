@@ -116,6 +116,13 @@ pub static DATA_SERVICE_CREDENTIALS: &[(&str, &str)] = &[
     ("HKASK_FIRECRAWL_API_KEY", "firecrawl"),
     ("HKASK_BROWSERBASE_API_KEY", "browserbase"),
     ("HKASK_ABW_API_KEY", "hkask_abw_api_key"),
+    // DB encryption passphrase — read by multiple MCP servers (condenser,
+    // curator, corpus, training, kata-kanban, research) via
+    // `ctx.credentials.get("HKASK_DB_PASSPHRASE")` for SQLCipher stores.
+    // Without this, an operator who sets it only in `.env` gets servers
+    // that fall back to in-memory mode (no persistence) under governed
+    // launch.
+    ("HKASK_DB_PASSPHRASE", "hkask_db_passphrase"),
     ("RUNPOD_API_KEY", "runpod"),
     ("RUNPOD_TEMPLATE_ID", "runpod_template_id"),
     ("NEBIUS_PROJECT_ID", "nebius_project_id"),
