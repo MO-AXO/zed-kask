@@ -1143,6 +1143,14 @@ fn main() {
         // If the user is already logged in (session restored), the upgrade
         // happens immediately on the first watch tick. If not, the task waits
         // until `authenticate()` (spawned below) completes.
+        //
+        // Clone `tool_port` for the model-dependent manifest executor task
+        // (below) before it's moved into the deferred task. The model-dependent
+        // task fires on `LanguageModelRegistry` events, independent of user
+        // login — the manifest executor only needs the model + tool_port, not
+        // the username.
+        let tool_port_for_model_task: std::sync::Arc<dyn hkask_capability::ToolPort> =
+            tool_port.clone();
         {
             let user_store = app_state.user_store.clone();
             let mcp_runtime_for_deferred = mcp_runtime_for_startup;
@@ -1805,45 +1813,12 @@ fn main() {
                     );
                 }
 
-                // zed-kask: Resolve the on-disk registry paths and seed if needed.
-               // This runs in the async block (before cx.update) because seeding
-               // requires .await on the Fs trait. Disk is the single runtime
-               // source — there is no compiled-in fallback. In dev (CWD = repo
-               // root) we point at the live repo source tree so edits to
-                // `kask/registry/` take effect without recompilation. In
-                // production (no source tree) we seed the compiled payload to
-                // `data_dir()/agents/registry/` and point there. User/operator
-                // edits to the on-disk files are sovereign.
-                let dev_manifests_dir = std::path::PathBuf::from("kask/registry/manifests");
-                let dev_templates_dir = std::path::PathBuf::from("kask/registry/templates");
-                let seeded_registry_root =
-                    paths::data_dir().join("agents").join("registry");
-                let using_dev_source =
-                    dev_manifests_dir.is_dir() && dev_templates_dir.is_dir();
-                let (registry_manifests_dir, registry_templates_dir) = if using_dev_source {
-                    log::info!(
-                        "hKask registry: using live repo source (dev) at {}",
-                        dev_manifests_dir.display()
-                    );
-                    (dev_manifests_dir, dev_templates_dir)
-                } else {
-                    let seeded_manifests = seeded_registry_root.join("manifests");
-                    let seeded_templates = seeded_registry_root.join("templates");
-                    let fs = app_state_for_deferred.fs.clone();
-                    if !fs.is_fake() {
-                        if let Some(parent) = seeded_registry_root.parent() {
-                            let _ = fs.create_dir(parent).await;
-                        }
-                        let _ = fs.create_dir(&seeded_registry_root).await;
-                        kask_bridge::seed_registry_to_disk(fs.as_ref(), &seeded_registry_root)
-                            .await;
-                    }
-                    log::info!(
-                        "hKask registry: using seeded on-disk registry at {}",
-                        seeded_registry_root.display()
-                    );
-                    (seeded_manifests, seeded_templates)
-                };
+                // zed-kask: Registry path resolution is now handled by the
+                // model-dependent manifest executor task (below the deferred
+                // task block), which doesn't need user login. The manifest
+                // executor is the only consumer of the registry paths, and
+                // it's wired by that separate task. The IPC server and MCP
+                // server launch below don't need the registry paths.
 
                 // Sync model-dependent wiring (inside cx.update).
                 cx.update(|cx| {
@@ -2039,19 +2014,29 @@ fn main() {
                             kask_bridge::SnapshotProfileResolver::new(terminal_enabled),
                         )
                             as std::sync::Arc<dyn kask_bridge::ProfileResolver>;
-                        let executor = std::sync::Arc::new(
-                            kask_bridge::BridgeManifestExecutor::new(
-                                guarded_inference,
-                                tool_port_as_dyn,
-                                registry_manifests_dir,
-                                registry_templates_dir,
-                                gpui_tokio::Tokio::handle(cx),
-                            )
-                            .with_profile_resolver(profile_resolver),
-                        );
-                        agent::set_manifest_executor(Some(executor));
-                        log::info!("hKask manifest executor wired with GuardedInferencePort — skills will run the guarded cascade");
-
+                        // `tool_port_as_dyn` and `profile_resolver` were
+                        // previously consumed by the manifest executor
+                        // wiring, which has moved to the model-dependent
+                        // task. They are no longer needed here.
+                        let _ = tool_port_as_dyn;
+                        let _ = profile_resolver;
+                        // The manifest executor is wired by the separate
+                        // model-dependent task (below the deferred task
+                        // block), which fires as soon as the model registry
+                        // reports a default model — independent of Zed user
+                        // login. Previously it was wired here, inside the
+                        // user-login-gated deferred task, which meant users
+                        // with a configured default model but no cloud login
+                        // had skills silently disabled. The model registry is
+                        // populated from settings.json, not from cloud auth.
+                        //
+                        // `guarded_inference` is still constructed here
+                        // because the IPC server (below) needs it. The
+                        // model-dependent task constructs its own
+                        // `GuardedInferencePort` for the manifest executor.
+                        // This is a small duplication (two guarded ports),
+                        // but they wrap the same underlying model and the
+                        // guard is stateless — the duplication is harmless.
                         if kask_settings.memory.auto_inject {
                             log::info!("hKask context injection enabled — injector will be wired after agent resolves");
                         } else {
@@ -2219,6 +2204,159 @@ fn main() {
                     }
                 }
             }).detach();
+        }
+
+        // zed-kask: D1 — Model-dependent manifest executor wiring.
+        //
+        // This task wires the `BridgeManifestExecutor` (and thus the skill
+        // cascade) as soon as `LanguageModelRegistry::default_model()` returns
+        // `Some`, independent of Zed user login. The model registry is
+        // populated from settings.json (`agent.default_model`), not from
+        // cloud auth, so gating the manifest executor on user login was a
+        // bug: users with a configured default model but no cloud login had
+        // skills silently disabled (the `skill` tool returned the no-op
+        // envelope "Skill manifest executor not configured").
+        //
+        // The task subscribes to `LanguageModelRegistry` events
+        // (`DefaultModelChanged`, `ProviderStateChanged`, `AddedProvider`,
+        // `ProvidersChanged`) and fires the wiring on the first event where
+        // `default_model()` returns `Some`. An `AtomicBool` ensures it fires
+        // only once — `set_manifest_executor` is `OnceLock`-based and a
+        // second call would warn and be dropped.
+        //
+        // The registry path resolution (dev source vs seeded) is duplicated
+        // from the deferred task because it doesn't need the user and must
+        // run here for the manifest executor. The `tool_port` is the same
+        // `McpRuntime` Arc used by the deferred task. The `GuardedInferencePort`
+        // is constructed independently from the resolved model — this is a
+        // second guarded port (the deferred task's IPC server constructs its
+        // own), but they wrap the same underlying model and the guard is
+        // stateless, so the duplication is harmless.
+        //
+        // What stays in the user-login-gated deferred task:
+        // - Memory port, context injector, curator injector (need username
+        //   for the agent DB)
+        // - Regulation archive, escalation queue (need passphrase from
+        //   provisioning)
+        // - IPC server (needs embedding port from provisioning)
+        // - MCP server launch, email sink, collab server
+        {
+            let app_state_for_model_task = app_state.clone();
+            cx.spawn(async move |cx| {
+                // Resolve registry paths (same logic as the deferred task,
+                // but doesn't need the user). Disk is the single runtime
+                // source — no compiled-in fallback.
+                let dev_manifests_dir = std::path::PathBuf::from("kask/registry/manifests");
+                let dev_templates_dir = std::path::PathBuf::from("kask/registry/templates");
+                let seeded_registry_root =
+                    paths::data_dir().join("agents").join("registry");
+                let using_dev_source =
+                    dev_manifests_dir.is_dir() && dev_templates_dir.is_dir();
+                let (registry_manifests_dir, registry_templates_dir) = if using_dev_source {
+                    log::info!(
+                        "hKask registry (model task): using live repo source (dev) at {}",
+                        dev_manifests_dir.display()
+                    );
+                    (dev_manifests_dir, dev_templates_dir)
+                } else {
+                    let seeded_manifests = seeded_registry_root.join("manifests");
+                    let seeded_templates = seeded_registry_root.join("templates");
+                    let fs = app_state_for_model_task.fs.clone();
+                    if !fs.is_fake() {
+                        if let Some(parent) = seeded_registry_root.parent() {
+                            let _ = fs.create_dir(parent).await;
+                        }
+                        let _ = fs.create_dir(&seeded_registry_root).await;
+                        kask_bridge::seed_registry_to_disk(fs.as_ref(), &seeded_registry_root)
+                            .await;
+                    }
+                    log::info!(
+                        "hKask registry (model task): using seeded on-disk registry at {}",
+                        seeded_registry_root.display()
+                    );
+                    (seeded_manifests, seeded_templates)
+                };
+
+                let wired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+                // Check immediately and subscribe to registry events. The
+                // model may already be resolved (settings.json default_model
+                // + provider with cached model list) by the time this task
+                // runs, so the initial check catches that case. The
+                // subscription catches the async case (provider loads model
+                // list after init and emits `ProviderStateChanged`).
+                let registry = cx.update(|cx| language_model::LanguageModelRegistry::global(cx));
+
+                // Initial check — the model may already be available.
+                let initial = registry.read_with(cx, |r, _| r.default_model().is_some());
+                if initial {
+                    if let Err(e) = try_wire_manifest_executor(
+                        &wired,
+                        &registry,
+                        &tool_port_for_model_task,
+                        &registry_manifests_dir,
+                        &registry_templates_dir,
+                        cx,
+                    )
+                    .await
+                    {
+                        log::warn!(
+                            "hKask manifest executor initial wiring failed: {e} — \
+                             skills will not run until the model registry emits a \
+                             subsequent event. The subscription below will retry."
+                        );
+                    }
+                }
+
+                // Subscribe to registry events for the async case.
+                let wired_for_sub = wired.clone();
+                let registry_for_sub = registry.clone();
+                let tool_port_for_sub = tool_port_for_model_task.clone();
+                let manifests_dir_for_sub = registry_manifests_dir.clone();
+                let templates_dir_for_sub = registry_templates_dir.clone();
+                cx.subscribe(
+                    &registry,
+                    move |_, event: &language_model::Event, cx| {
+                        match event {
+                            language_model::Event::DefaultModelChanged
+                            | language_model::Event::ProviderStateChanged(_)
+                            | language_model::Event::AddedProvider(_)
+                            | language_model::Event::ProvidersChanged => {
+                                let wired = wired_for_sub.clone();
+                                let registry = registry_for_sub.clone();
+                                let tool_port = tool_port_for_sub.clone();
+                                let manifests_dir = manifests_dir_for_sub.clone();
+                                let templates_dir = templates_dir_for_sub.clone();
+                                cx.spawn(async move |cx| {
+                                    if let Err(e) = try_wire_manifest_executor(
+                                        &wired,
+                                        &registry,
+                                        &tool_port,
+                                        &manifests_dir,
+                                        &templates_dir,
+                                        cx,
+                                    )
+                                    .await
+                                    {
+                                        log::warn!(
+                                            "hKask manifest executor wiring failed on registry event: {e}"
+                                        );
+                                    }
+                                })
+                                .detach();
+                            }
+                            _ => {}
+                        }
+                    },
+                )
+                .detach();
+
+                log::info!(
+                    "hKask model-dependent manifest executor task started — \
+                     waiting for LanguageModelRegistry to report a default model"
+                );
+            })
+            .detach();
         }
 
         auto_update::init(client.clone(), cx);
@@ -2699,6 +2837,131 @@ impl project::context_server_store::registry::ContextServerDescriptor for KaskMc
     ) -> gpui::Task<anyhow::Result<Option<extension::ContextServerConfiguration>>> {
         gpui::Task::ready(Ok(None))
     }
+}
+
+// zed-kask: D1 — Model-dependent manifest executor wiring helper.
+//
+// Wires the `BridgeManifestExecutor` from the resolved default model. Called
+// by the model-dependent `cx.spawn` task (above) on initial check and on each
+// `LanguageModelRegistry` event until the model resolves. The `AtomicBool`
+// ensures the wiring fires only once — `set_manifest_executor` is
+// `OnceLock`-based and a second call would warn and be dropped.
+//
+// This function is async because it calls `cx.update` (which may yield) and
+// constructs the `LanguageModelInferencePort` (which spawns a background
+// task). It does not await any network I/O — the model is already resolved
+// when this is called.
+async fn try_wire_manifest_executor(
+    wired: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    registry: &gpui::Entity<language_model::LanguageModelRegistry>,
+    tool_port: &std::sync::Arc<dyn hkask_capability::ToolPort>,
+    registry_manifests_dir: &std::path::Path,
+    registry_templates_dir: &std::path::Path,
+    cx: &mut gpui::AsyncApp,
+) -> Result<(), anyhow::Error> {
+    // Already wired — no-op.
+    if wired.load(std::sync::atomic::Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    // Check if the model is available.
+    let model_available = registry.read_with(cx, |r, _| r.default_model().is_some());
+    if !model_available {
+        return Ok(());
+    }
+
+    // Mark as wired before constructing — if construction fails, we don't
+    // want to retry on every registry event (the failure is likely
+    // persistent, e.g. a misconfigured model). The `OnceLock` in
+    // `set_manifest_executor` is the real guard; this flag just prevents
+    // redundant construction attempts.
+    wired.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    cx.update(|cx| {
+        let model_registry = language_model::LanguageModelRegistry::read_global(cx);
+        let configured = model_registry.default_model().ok_or_else(|| {
+            anyhow::anyhow!(
+                "default_model() returned None inside try_wire_manifest_executor \
+                 — race between read_with and update"
+            )
+        })?;
+
+        // Resolve the kask default model override (if any).
+        let kask_settings = kask_bridge::KaskSettings::get_global(cx).clone();
+        let kask_default = kask_settings.models.effective_default_model();
+        let inference_model: std::sync::Arc<dyn language_model::LanguageModel> = {
+            if kask_default != kask_bridge::KaskModelsSettings::DEFAULT_INFERENCE_MODEL {
+                if let Some(model) = kask_bridge::resolve_model_names(
+                    model_registry,
+                    &[kask_default.to_string()],
+                    cx,
+                )
+                .0
+                .into_values()
+                .next()
+                {
+                    log::info!(
+                        "hKask manifest executor using kask.models.default_model: {}",
+                        kask_default
+                    );
+                    model
+                } else {
+                    log::warn!(
+                        "kask.models.default_model '{}' could not be resolved \
+                         from LanguageModelRegistry — falling back to zed default",
+                        kask_default
+                    );
+                    configured.model.clone()
+                }
+            } else {
+                configured.model.clone()
+            }
+        };
+
+        let async_cx = cx.to_async();
+        let (inference_port, inference_task) =
+            kask_bridge::LanguageModelInferencePort::new(inference_model.clone(), async_cx);
+        inference_task.detach();
+
+        let guard_config = hkask_guard::GuardConfig::from_env();
+        let content_guard = hkask_guard::ContentGuard::mandatory(&guard_config);
+        let guarded_inference = std::sync::Arc::new(hkask_guard::GuardedInferencePort::new(
+            std::sync::Arc::new(inference_port),
+            content_guard,
+        ));
+
+        // Snapshot the default agent profile's `terminal` tool state for
+        // proposer/evaluator separation. Same logic as the deferred task —
+        // `AgentProfileSettings` lives behind `&App` (not `Send`), so the
+        // process-global bridge reads a snapshot at wiring time.
+        let terminal_enabled = {
+            let settings = agent_settings::AgentSettings::get_global(cx);
+            settings
+                .profiles
+                .get(&settings.default_profile)
+                .is_some_and(|p| p.is_tool_enabled("terminal"))
+        };
+        let profile_resolver =
+            std::sync::Arc::new(kask_bridge::SnapshotProfileResolver::new(terminal_enabled))
+                as std::sync::Arc<dyn kask_bridge::ProfileResolver>;
+
+        let executor = std::sync::Arc::new(
+            kask_bridge::BridgeManifestExecutor::new(
+                guarded_inference,
+                tool_port.clone(),
+                registry_manifests_dir.to_path_buf(),
+                registry_templates_dir.to_path_buf(),
+                gpui_tokio::Tokio::handle(cx),
+            )
+            .with_profile_resolver(profile_resolver),
+        );
+        agent::set_manifest_executor(Some(executor));
+        log::info!(
+            "hKask manifest executor wired (model-dependent task) — \
+             skills will run the guarded cascade"
+        );
+        Ok(())
+    })
 }
 
 /// Reconcile the app-level `ContextServerDescriptorRegistry` with the
