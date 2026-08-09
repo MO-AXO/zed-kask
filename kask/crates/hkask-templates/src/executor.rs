@@ -45,7 +45,7 @@
 //! `InferencePort` (for select/populate) and `ToolPort` (for execute),
 //! both of which are already dependencies of this crate.
 
-use crate::budget::BudgetTracker;
+use crate::budget::{BudgetTracker, BudgetSnapshot};
 use crate::bundle::BundleManifest;
 use crate::bundle::BundleManifestStep;
 use crate::compute::dispatch_compute;
@@ -493,7 +493,7 @@ impl ManifestExecutor {
         manifest: &BundleManifest,
         initial_context: HashMap<String, Value>,
         depth: u8,
-    ) -> Result<(HashMap<String, Value>, Option<u32>, budget::BudgetSnapshot)> {
+    ) -> Result<(HashMap<String, Value>, Option<u32>, BudgetSnapshot)> {
         if depth > hkask_capability::SYSTEM_MAX_RECURSION {
             return Err(TemplateError::Manifest(format!(
                 "Matryoshka depth limit ({}) exceeded",

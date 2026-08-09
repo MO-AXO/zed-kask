@@ -10367,7 +10367,9 @@ impl ThreadView {
 
     /// Re-invoke the `bundler-evolve` template to refine the composed bundle.
     /// The prior manifest and goal context are read from the tool call's
-    /// `raw_output`. The `goal_delta` defaults to 0.5 (partial goal
+    /// `raw_output` (which carries the serialized `SkillBundleToolOutput`).
+    /// The evolved output is injected as a new assistant message so the
+    /// user can read it. The `goal_delta` defaults to 0.5 (partial goal
     /// achievement) and the `convergence_failure_reason` to a generic
     /// operator-initiated refinement message — a future enhancement could
     /// surface an input for the operator to supply these.
@@ -10386,11 +10388,9 @@ impl ThreadView {
         };
 
         // Read the prior manifest and goal context from the tool call's
-        // raw_output. The goal_context is not carried by `SkillBundleToolOutput`
-        // (it's internal to the bundler cascade), so we pass `Null` and let
-        // the evolve template degrade gracefully — the template's contract
-        // marks `goal_context` as an object but the prompt handles missing
-        // context.
+        // raw_output. `SkillBundleToolOutput::Executed` carries `goal_context`
+        // (step_1_result from the bundler cascade) so the evolve step can
+        // reference the original goal.
         let thread = self.thread.clone();
         let prior_output = thread.read(cx).entries().iter().find_map(|entry| {
             let acp_thread::AgentThreadEntry::ToolCall(tc) = entry else {
@@ -10420,7 +10420,12 @@ impl ThreadView {
             );
             return;
         };
-        let agent::SkillBundleToolOutput::Executed { bundle_manifest, .. } = parsed else {
+        let agent::SkillBundleToolOutput::Executed {
+            bundle_manifest,
+            goal_context,
+            ..
+        } = parsed
+        else {
             self.show_skill_bundle_status(
                 tool_call_id,
                 "Cannot refine an errored bundle.",
@@ -10432,7 +10437,6 @@ impl ThreadView {
         self.refining_skill_bundle_calls.insert(tool_call_id.clone());
         cx.notify();
 
-        let goal_context = serde_json::Value::Null;
         let goal_delta = 0.5;
         let convergence_failure_reason =
             "Operator-initiated refinement from the post-run UI.".to_string();
@@ -10450,16 +10454,29 @@ impl ThreadView {
             (tool_call_id, result)
         });
 
+        let thread_for_inject = self.thread.clone();
         cx.spawn(async move |this, cx| {
             let (tool_call_id, result) = task.await;
             this.update(cx, |this, cx| {
                 this.refining_skill_bundle_calls.remove(&tool_call_id);
                 match result {
-                    Ok(_result) => {
-                        this.resolved_skill_bundle_calls.insert(tool_call_id);
+                    Ok(refine_result) => {
+                        this.resolved_skill_bundle_calls.insert(tool_call_id.clone());
+                        // Inject the evolved output as a new assistant message
+                        // so the user can read the refined result. Without this,
+                        // the refine action produces output that goes nowhere.
+                        let header = "**Refined bundle output** (goal-delta-driven recomposition):\n\n";
+                        let text = format!("{header}{}", refine_result.output);
+                        thread_for_inject.update(cx, |thread, cx| {
+                            thread.push_assistant_content_block(
+                                acp::ContentBlock::Text(acp::TextContent::new(text)),
+                                false,
+                                cx,
+                            );
+                        });
                         this.show_skill_bundle_status(
                             tool_call_id,
-                            "Bundle refined. The evolved output is in the conversation.",
+                            "Bundle refined — evolved output added to conversation.",
                             cx,
                         );
                     }
@@ -10478,16 +10495,31 @@ impl ThreadView {
         .detach();
     }
 
-    /// Show a status message for a skill_bundle action. Currently logs to
-    /// tracing; a future enhancement could surface a toast or inline status.
+    /// Show a status message for a skill_bundle action via a workspace toast.
+    /// Falls back to `tracing::info!` if the workspace is unavailable (e.g.
+    /// the view was dropped between the action dispatch and the completion
+    /// callback).
     fn show_skill_bundle_status(
         &self,
         _tool_call_id: acp::ToolCallId,
-        message: impl Into<String>,
-        _cx: &mut Context<Self>,
+        message: impl Into<SharedString>,
+        cx: &mut Context<Self>,
     ) {
-        let message = message.into();
-        tracing::info!(target: "reg.skill.bundle_ui", message = %message);
+        let message: SharedString = message.into();
+        let Some(workspace) = self.workspace.upgrade() else {
+            tracing::info!(target: "reg.skill.bundle_ui", message = %message);
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            let toast = StatusToast::new(message, cx, |this, _cx| {
+                this.icon(
+                    Icon::new(IconName::Check)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+            });
+            workspace.toggle_status_toast(toast, cx);
+        });
     }
 
     fn render_tool_call_content(
