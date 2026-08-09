@@ -975,4 +975,83 @@ mod tests {
         assert!(out.contains("convergence_metric"));
         assert!(out.contains("0.05"));
     }
+
+    /// The reshape must move header fields under `manifest:` and keep the
+    /// rest as siblings, so `load_manifest_from_yaml` can round-trip a saved
+    /// bundle. Pins the on-disk format for the `Save` action.
+    #[test]
+    fn reshape_composite_to_manifest_file_moves_header_under_manifest_key() {
+        let composite = json!({
+            "id": "my-bundle",
+            "name": "My Bundle",
+            "description": "A test bundle",
+            "version": "1.0.0",
+            "editor": "operator",
+            "visibility": "Public",
+            "steps": [{"ordinal": 1, "action": "know", "description": "step 1"}],
+            "skills": [{"id": "skill-a", "polarity": "proposer", "manifest_ref": "skill-a", "content_hash": "abc"}],
+            "convergence": {"max_iterations": 3, "threshold": 0.1, "field": "score"},
+            "gas": {"cap": 10000}
+        });
+
+        let reshaped = reshape_composite_to_manifest_file(&composite);
+
+        // Header fields are under `manifest:`.
+        let manifest_header = reshaped.get("manifest").expect("manifest key present");
+        assert_eq!(manifest_header.get("id").and_then(|v| v.as_str()), Some("my-bundle"));
+        assert_eq!(manifest_header.get("name").and_then(|v| v.as_str()), Some("My Bundle"));
+        assert_eq!(
+            manifest_header.get("description").and_then(|v| v.as_str()),
+            Some("A test bundle")
+        );
+
+        // Sibling fields are at the top level.
+        assert!(reshaped.get("steps").is_some());
+        assert!(reshaped.get("skills").is_some());
+        assert!(reshaped.get("convergence").is_some());
+        assert!(reshaped.get("gas").is_some());
+    }
+
+    /// The reshape must not leak header fields to the top level (would
+    /// confuse `load_manifest_from_yaml`'s `deny_unknown_fields` on
+    /// `ManifestFile`).
+    #[test]
+    fn reshape_composite_to_manifest_file_does_not_leak_header_to_top_level() {
+        let composite = json!({
+            "id": "leak-test",
+            "name": "Leak Test",
+            "steps": []
+        });
+
+        let reshaped = reshape_composite_to_manifest_file(&composite);
+
+        // `id` and `name` must NOT be at the top level.
+        assert!(reshaped.get("id").is_none(), "id leaked to top level");
+        assert!(reshaped.get("name").is_none(), "name leaked to top level");
+        // They must be under `manifest:`.
+        let header = reshaped.get("manifest").expect("manifest key present");
+        assert_eq!(header.get("id").and_then(|v| v.as_str()), Some("leak-test"));
+    }
+
+    /// The reshape must handle a composite missing optional fields without
+    /// inserting nulls (absent fields stay absent, so the YAML is clean).
+    #[test]
+    fn reshape_composite_to_manifest_file_handles_missing_optional_fields() {
+        let composite = json!({
+            "id": "minimal",
+            "name": "Minimal",
+            "steps": []
+        });
+
+        let reshaped = reshape_composite_to_manifest_file(&composite);
+
+        let header = reshaped.get("manifest").expect("manifest key present");
+        assert_eq!(header.get("id").and_then(|v| v.as_str()), Some("minimal"));
+        // Optional header fields that were absent are not present.
+        assert!(header.get("description").is_none());
+        assert!(header.get("version").is_none());
+        // Optional sibling fields that were absent are not present.
+        assert!(reshaped.get("skills").is_none());
+        assert!(reshaped.get("convergence").is_none());
+    }
 }
