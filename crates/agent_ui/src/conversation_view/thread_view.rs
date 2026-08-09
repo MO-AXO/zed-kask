@@ -10483,9 +10483,10 @@ impl ThreadView {
     fn show_skill_bundle_status(
         &self,
         _tool_call_id: acp::ToolCallId,
-        message: String,
+        message: impl Into<String>,
         _cx: &mut Context<Self>,
     ) {
+        let message = message.into();
         tracing::info!(target: "reg.skill.bundle_ui", message = %message);
     }
 
