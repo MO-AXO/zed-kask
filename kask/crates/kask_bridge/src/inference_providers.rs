@@ -123,6 +123,13 @@ pub static DATA_SERVICE_CREDENTIALS: &[(&str, &str)] = &[
     // that fall back to in-memory mode (no persistence) under governed
     // launch.
     ("HKASK_DB_PASSPHRASE", "hkask_db_passphrase"),
+    // Curator SMTP password — read by the curator server via
+    // `ctx.credentials.get("HKASK_SMTP_PASSWORD")` for outbound email.
+    // Injected unconditionally (the consumer gates on smtp_username being
+    // non-empty); `mcp_env_with_credentials` skips injection when the
+    // keychain entry is absent, so emitting the URL is harmless when email
+    // is not configured.
+    ("HKASK_SMTP_PASSWORD", "hkask_smtp_password"),
     ("RUNPOD_API_KEY", "runpod"),
     ("RUNPOD_TEMPLATE_ID", "runpod_template_id"),
     ("NEBIUS_PROJECT_ID", "nebius_project_id"),
@@ -170,15 +177,11 @@ pub fn credential_urls_for_mcp(settings: &super::KaskSettings) -> Vec<(String, S
         }
     }
 
-    // Curator email — inject the SMTP password from the keychain when the
-    // user has configured outbound email. The non-secret email fields are
-    // injected by `mcp_env()`; only the password needs keychain access.
-    if !settings.curator.email.smtp_username.is_empty() {
-        urls.push((
-            "HKASK_SMTP_PASSWORD".to_string(),
-            format!("{KASK_CREDENTIAL_NAMESPACE}/hkask_smtp_password"),
-        ));
-    }
+    // Note: HKASK_SMTP_PASSWORD is in DATA_SERVICE_CREDENTIALS (unconditional
+    // injection). The consumer (curator server) gates on smtp_username being
+    // non-empty, and `mcp_env_with_credentials` skips injection when the
+    // keychain entry is absent — so emitting the URL unconditionally is
+    // harmless when email is not configured.
 
     urls
 }
