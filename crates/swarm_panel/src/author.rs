@@ -124,6 +124,20 @@ impl SwarmPanel {
         let border = cx.theme().colors().border;
         let is_local = Self::current_swarm_mode(cx) == kask_bridge::SwarmModeConfig::Local;
         let is_editing = self.author.editing_id.is_some();
+        let editing_source = self.author.editing_source.clone();
+        let delete_tooltip = match &editing_source {
+            Some(crate::parse::AgentSource::Cloud) => {
+                "Permanently deletes this ABW agent (irreversible). Removes it \
+                 from your library and every workspace roster. A synced local \
+                 card is NOT touched."
+            }
+            Some(crate::parse::AgentSource::Local) | Some(crate::parse::AgentSource::Synced) => {
+                "Permanently deletes this local agent card. A synced card's \
+                 ABW agent is NOT touched (delete that separately from the \
+                 cloud card's More menu)."
+            }
+            None => "",
+        };
         let create_label = if self.author.busy {
             if is_editing {
                 "Updating…"
@@ -485,6 +499,23 @@ impl SwarmPanel {
                                 this.save_agent(cx);
                             })),
                     )
+                    .when_some(editing_source, |this, source| {
+                        let delete_label = match source {
+                            crate::parse::AgentSource::Cloud => "Delete Agent",
+                            crate::parse::AgentSource::Local
+                            | crate::parse::AgentSource::Synced => "Delete Local Card",
+                        };
+                        this.child(
+                            Button::new("delete-agent", delete_label)
+                                .style(ButtonStyle::Subtle)
+                                .color(Color::Warning)
+                                .disabled(self.author.busy)
+                                .tooltip(Tooltip::text(delete_tooltip))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.delete_edited_agent(window, cx);
+                                })),
+                        )
+                    })
                     .when_some(self.author.status.clone(), |this, status| {
                         this.child(
                             Label::new(status)
