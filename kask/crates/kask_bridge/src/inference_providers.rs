@@ -333,29 +333,6 @@ pub static DATA_SERVICES: &[DataServiceDescriptor] = &[
     },
 ];
 
-/// Compatibility alias: the subset of `DATA_SERVICES` that are secrets
-/// (mirrored to the keychain). Retained for consumers that iterate
-/// credential pairs (e.g. the coverage governance test). Prefer iterating
-/// `DATA_SERVICES` with `is_secret()` filtering in new code.
-pub static DATA_SERVICE_CREDENTIALS: &[(&str, &str)] = &[
-    ("HKASK_EODHD_API_KEY", "eodhd"),
-    ("HKASK_FMP_API_KEY", "fmp"),
-    ("HKASK_EXA_API_KEY", "exa"),
-    ("HKASK_TAVILY_API_KEY", "tavily"),
-    ("HKASK_BRAVE_API_KEY", "brave"),
-    ("HKASK_SERPAPI_API_KEY", "serpapi"),
-    ("HKASK_FIRECRAWL_API_KEY", "firecrawl"),
-    ("HKASK_BROWSERBASE_API_KEY", "browserbase"),
-    ("HKASK_ABW_API_KEY", "hkask_abw_api_key"),
-    ("HKASK_DB_PASSPHRASE", "hkask_db_passphrase"),
-    ("HKASK_SMTP_PASSWORD", "hkask_smtp_password"),
-    ("RUNPOD_API_KEY", "runpod"),
-    ("RUNPOD_S3_ACCESS_KEY", "runpod_s3_access_key"),
-    ("RUNPOD_S3_SECRET", "runpod_s3_secret"),
-    ("HF_TOKEN", "hf_token"),
-    ("HKASK_FRED_API_KEY", "fred"),
-];
-
 /// Build the `(env_var, credential_url)` pairs for all credentials that
 /// should be injected into MCP server child processes.
 ///
@@ -392,7 +369,7 @@ pub fn credential_urls_for_mcp(settings: &super::KaskSettings) -> Vec<(String, S
         }
     }
 
-    // Note: HKASK_SMTP_PASSWORD is in DATA_SERVICE_CREDENTIALS (unconditional
+    // Note: HKASK_SMTP_PASSWORD is in DATA_SERVICES as a Secret (unconditional
     // injection). The consumer (curator server) gates on smtp_username being
     // non-empty, and `mcp_env_with_credentials` skips injection when the
     // keychain entry is absent — so emitting the URL unconditionally is
@@ -1059,7 +1036,7 @@ mod tests {
     }
 
     /// Coverage governance: every env var declared in a built-in MCP server's
-    /// `credentials` allowlist must be in `DATA_SERVICE_CREDENTIALS` or
+    /// `credentials` allowlist must be in `DATA_SERVICES` or
     /// `INFERENCE_PROVIDERS`. Without this, an operator who sets the key only
     /// in `.env` gets a working main process (env var read directly) but the
     /// MCP server silently fails to receive it via `mcp_env_with_credentials`
