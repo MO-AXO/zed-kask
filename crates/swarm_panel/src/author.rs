@@ -23,6 +23,12 @@ pub(crate) struct AuthorForm {
     /// would change the agent id). When `None`, the form is creating a new
     /// agent. The submit button label and the save path branch on this.
     pub(crate) editing_id: Option<String>,
+    /// The source of the agent being edited (`Cloud`, `Local`, or `Synced`).
+    /// `None` when creating a new agent. Determines which delete tool the
+    /// Delete button dispatches to: `swarm_remove_local` for local/synced
+    /// (severs the local card), `swarm_delete_agent` for cloud (irreversible
+    /// ABW delete). Set by `load_agent_into_author`.
+    pub(crate) editing_source: Option<crate::parse::AgentSource>,
     /// Comma-separated tags for catalogue discovery.
     pub(crate) tags: Entity<Editor>,
     /// Visibility level: "public", "private", or "unlisted".
@@ -73,6 +79,7 @@ impl AuthorForm {
             }),
             agent_type: "research".to_string(),
             editing_id: None,
+            editing_source: None,
             tags: cx.new(|cx| {
                 let mut e = Editor::single_line(window, cx);
                 e.set_placeholder_text("tag1, tag2, tag3 (comma-separated)", window, cx);

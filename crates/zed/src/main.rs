@@ -1950,7 +1950,7 @@ fn main() {
                             std::sync::Arc<dyn hkask_types::SkillExecPort>,
                         > = Some(std::sync::Arc::new(AgentSkillExec));
                         match kask_bridge::InferenceIpcServer::start(
-                            guarded_inference.clone(),
+                            guarded_inference,
                             embedding_port_for_ipc.clone(),
                             Some(media_router),
                             tool_port_for_ipc,
@@ -1989,37 +1989,6 @@ fn main() {
                             }
                         }
 
-                        let tool_port_as_dyn: std::sync::Arc<dyn hkask_capability::ToolPort> =
-                            tool_port_for_deferred.clone();
-
-                        // Snapshot the default agent profile's `terminal` tool state
-                        // to wire a `ProfileResolver` for proposer/evaluator
-                        // separation. `AgentProfileSettings` lives behind `&App`
-                        // (not `Send`), so the process-global bridge — which runs
-                        // the cascade on a tokio worker — cannot read profile state
-                        // live from within the sync callback. The snapshot is read
-                        // here, at deferred-task time, and is stale if the user
-                        // switches profiles later. Today no `category: skill`
-                        // manifest declares `profile:`, so the gate has no
-                        // production trigger and the staleness is moot; per-session
-                        // profile enforcement is a future enhancement.
-                        let terminal_enabled = {
-                            let settings = agent_settings::AgentSettings::get_global(cx);
-                            settings
-                                .profiles
-                                .get(&settings.default_profile)
-                                .is_some_and(|p| p.is_tool_enabled("terminal"))
-                        };
-                        let profile_resolver = std::sync::Arc::new(
-                            kask_bridge::SnapshotProfileResolver::new(terminal_enabled),
-                        )
-                            as std::sync::Arc<dyn kask_bridge::ProfileResolver>;
-                        // `tool_port_as_dyn` and `profile_resolver` were
-                        // previously consumed by the manifest executor
-                        // wiring, which has moved to the model-dependent
-                        // task. They are no longer needed here.
-                        let _ = tool_port_as_dyn;
-                        let _ = profile_resolver;
                         // The manifest executor is wired by the separate
                         // model-dependent task (below the deferred task
                         // block), which fires as soon as the model registry
@@ -2043,15 +2012,13 @@ fn main() {
                             log::info!("hKask context injection disabled (kask.memory.auto_inject = false)");
                         }
                     } else {
-                        // Body injection is disabled in zed-kask: with no manifest
-                        // executor wired, the `skill` tool returns the no-op envelope
-                        // ("Skill manifest executor not configured..."). The log
-                        // message must name ALL hooks left unwired by this branch, not
-                        // just the manifest executor — operators reading the log need
-                        // to know the full scope of the startup-failure. This is the
-                        // "Process-global hooks set at runtime need a startup-failure
-                        // signal" trap from .rules: the warn must cover the full
-                        // ensemble of model-dependent hooks, not just one.
+                        // No default model in the registry at this point in
+                        // the deferred task. The manifest executor is wired
+                        // by the separate model-dependent task (not here),
+                        // so it's not listed among the unwired hooks. The
+                        // hooks listed here are the ones the deferred task
+                        // wires inside the `if` branch and does not wire in
+                        // the `else` branch.
                         //
                         // The inference IPC server is still started (with a
                         // `NoModelInferencePort`) so MCP server child processes
@@ -2066,12 +2033,13 @@ fn main() {
                         // The `NoModelInferencePort` returns a clear diagnostic so
                         // the failure mode is visible and actionable.
                         log::warn!(
-                            "No default LanguageModel configured — hKask model-dependent hooks not wired: \
-                             manifest executor (skill invocations return no-op envelope), \
+                            "No default LanguageModel configured at deferred-task time — hKask hooks not wired by this task: \
                              thread condenser (tool results not compressed), \
                              panel tool invoker (panel cannot dispatch tools), \
                              curator session factory (panel cannot run per-tab curator conversations), \
                              regulation status (panel cannot emit regulation spans). \
+                             The manifest executor is wired separately by the model-dependent task \
+                             and will fire if/when the model resolves. \
                              The inference IPC server is started with a no-op port so MCP \
                              servers route through the bridge and get a diagnostic error \
                              instead of falling back to an empty keychain. \
@@ -2097,8 +2065,9 @@ fn main() {
                         // is configured yet, so delegated agents have nothing to
                         // dispatch against. The guarded IPC server (started after
                         // the model resolves) carries the McpRuntime tool port.
-                        // Same for skill execution — no manifest executor is
-                        // wired until the model resolves.
+                        // Same for skill execution — the manifest executor
+                        // is wired by the separate model-dependent task
+                        // when the model resolves, not here.
                         match kask_bridge::InferenceIpcServer::start(
                             no_model_port,
                             None,
@@ -2428,13 +2397,21 @@ fn main() {
         swarm_panel::init(cx);
         zed::watch_user_agents_md(app_state.fs.clone(), cx);
 
-        // D1/D3/D4/D12: Model-dependent kask wiring now runs in the
-        // deferred task (after the Zed user resolves and the
-        // LanguageModelRegistry is populated). See the deferred task above.
-        // zed-kask: D1/D3/D6/D8 — F20: deferred task (model-dependent hooks: manifest_executor, memory_port, thread_condenser, tool_invoker, context_injector, curator_context_injector).
-        // Running it here left OnceLock-based hooks unwired when no model was
-        // configured at startup (the "Process-global hooks set at runtime
-        // need a startup-failure signal" trap from .rules).
+        // D1/D3/D4/D12: Model-dependent kask wiring is split across two tasks:
+        //
+        // 1. The manifest executor (D1) is wired by the model-dependent task
+        //    (above), which fires as soon as `LanguageModelRegistry::
+        //    default_model()` returns `Some` — independent of Zed user login.
+        //    The model registry is populated from settings.json, not cloud auth.
+        //
+        // 2. The remaining model-dependent hooks (IPC server, condenser, panel
+        //    tool invoker) and all user-dependent hooks (memory port, context
+        //    injector, regulation archive) are wired by the deferred task
+        //    (above) after the Zed user resolves.
+        //
+        // zed-kask: D1/D3/D6/D8 — F20: deferred task (user-dependent hooks:
+        // memory_port, thread_condenser, tool_invoker, context_injector,
+        // curator_context_injector) + model-dependent task (manifest_executor).
 
         repl::init(app_state.fs.clone(), cx);
         recent_projects::init(cx);

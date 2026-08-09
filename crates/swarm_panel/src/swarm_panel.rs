@@ -675,6 +675,7 @@ impl SwarmPanel {
     /// calling `set_mode`.
     fn reset_author_form_for_create(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.author.editing_id = None;
+        self.author.editing_source = None;
         self.author.status = None;
         self.author.name.update(cx, |e, _| e.set_read_only(false));
         // Clear the text fields so the operator starts fresh.
