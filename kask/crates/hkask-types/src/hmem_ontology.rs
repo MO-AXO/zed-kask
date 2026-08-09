@@ -163,9 +163,9 @@ impl HMemOntology {
     /// DC fields and open-world tags from the source ontology so provenance
     /// and domain annotations survive the promotion.
     ///
-    /// This is the ontology-blob promotion that replaces the deprecated
-    /// `AccessControl::to_semantic()` perspective-strip. The consolidator
-    /// calls this when promoting an episodic h_mem to a semantic fact.
+    /// The consolidator calls this when promoting an episodic h_mem to a
+    /// semantic fact: the ontology blob is re-tagged from process-axis to
+    /// state-axis anchoring, and visibility is set to Shared separately.
     pub fn to_semantic(&self) -> Self {
         Self {
             dimensions: vec![Dimension::What.as_str().to_string()],
@@ -260,5 +260,21 @@ mod tests {
             .with_dimension(Dimension::What)
             .with_dimension(Dimension::What);
         assert_eq!(ont.dimensions.len(), 1);
+    }
+
+    #[test]
+    fn to_semantic_drops_pko_and_shifts_dimension() {
+        let ont = HMemOntology::episodic("diagnose-bug-123", "reproduce", "session-1")
+            .with_ontology_tag("fibo", "competitive advantage");
+        let semantic = ont.to_semantic();
+        // PKO procedure/step dropped
+        assert!(semantic.pko_procedure.is_none());
+        assert!(semantic.pko_step.is_none());
+        // Dimension shifted from How/When to What
+        assert_eq!(semantic.dimensions, vec!["what".to_string()]);
+        // DC fields and open-world tags retained
+        assert_eq!(semantic.dc_type, "pko:StepExecution");
+        assert_eq!(semantic.dc_source, "session-1");
+        assert_eq!(semantic.ontology_concepts("fibo"), ["competitive advantage"]);
     }
 }
