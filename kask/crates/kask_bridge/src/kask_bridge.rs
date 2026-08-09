@@ -39,7 +39,8 @@ pub use inference::LanguageModelInferencePort;
 pub use inference::NoModelInferencePort;
 pub use inference_ipc_server::InferenceIpcServer;
 pub use inference_providers::{
-    DATA_SERVICE_CREDENTIALS, INFERENCE_PROVIDERS, InferenceProviderDescriptor,
+    DATA_SERVICE_CREDENTIALS, DATA_SERVICES, DataServiceDescriptor, DataServiceKind,
+    INFERENCE_PROVIDERS, InferenceProviderDescriptor,
     credential_urls_for_mcp, delete_data_service_api_key, delete_provider_api_key,
     ensure_openai_compatible_entries, has_provider_api_key,
     mirror_env_keys_to_keychain, provider_credential_url, resolve_embedding_credentials,

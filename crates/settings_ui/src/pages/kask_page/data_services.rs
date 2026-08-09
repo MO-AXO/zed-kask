@@ -19,7 +19,7 @@ pub(crate) fn render_data_services_page(
         .unwrap_or_default();
 
     let mut rows: Vec<AnyElement> = Vec::new();
-    for (key, label, dashboard_url, env_var) in DATA_SERVICES {
+    for (key, label, dashboard_url, env_var) in data_service_descriptors() {
         let enabled = match *key {
             "eodhd" => data_services.eodhd_enabled,
             "fmp" => data_services.fmp_enabled,
