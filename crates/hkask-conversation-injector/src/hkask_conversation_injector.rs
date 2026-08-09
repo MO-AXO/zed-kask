@@ -74,6 +74,5 @@ pub fn set_active_injector(cx: &mut App, injector: Option<Arc<dyn ConversationIn
 /// `.rules` "Process-global hooks set at runtime need a startup-failure
 /// signal").
 pub fn shared_injector(cx: &App) -> Option<Arc<dyn ConversationInjector>> {
-    cx.try_global::<ActiveInjector>()
-        .and_then(|g| g.0.clone())
+    cx.try_global::<ActiveInjector>().and_then(|g| g.0.clone())
 }
