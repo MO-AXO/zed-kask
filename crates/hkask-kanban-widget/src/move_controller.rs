@@ -15,11 +15,9 @@
 //! (`build_move_dispatch_args`) stays in `view.rs` so it remains unit-testable
 //! without the controller's GPUI context.
 
-use gpui::{AnyElement, Context};
+use gpui::Context;
 use gpui_util::ResultExt as _;
 use hkask_tool_invoker::{shared_tool_invoker, BlockProvenance};
-use theme::ActiveTheme;
-use ui::prelude::*;
 
 use crate::block::TaskBody;
 use crate::view::{
@@ -100,14 +98,12 @@ impl KanbanMoveController {
 
     /// The current dispatch error, if any (rendered as a visible hint by the
     /// widget).
-    #[cfg(test)]
     pub(crate) fn dispatch_error(&self) -> Option<&str> {
         self.dispatch_error.as_deref()
     }
 
     /// The pending move, if any (rendered as a Confirm/Cancel banner by the
-    /// widget). Test-only accessor — production code reads the field directly.
-    #[cfg(test)]
+    /// widget).
     pub(crate) fn pending_move(&self) -> Option<&PendingMove> {
         self.pending_move.as_ref()
     }
@@ -121,7 +117,6 @@ impl KanbanMoveController {
     }
 
     /// The task_id currently being moved, if a dispatch is in flight.
-    #[cfg(test)]
     pub(crate) fn dispatch_in_flight(&self) -> Option<&str> {
         self.dispatch_in_flight.as_deref()
     }
@@ -265,132 +260,6 @@ impl KanbanMoveController {
         self.dispatch_in_flight = None;
         self.rollback_optimistic_move(columns, column_meta);
         cx.notify();
-    }
-
-    /// Render the dispatch-status banner: a Confirm/Cancel pair when a move is
-    /// pending, a Cancel button when a dispatch is in flight, or the dispatch
-    /// error when set. Returns `None` when there is no dispatch state to show.
-    pub(crate) fn render_dispatch_status(
-        &self,
-        cx: &mut Context<crate::view::KanbanWidget>,
-    ) -> Option<AnyElement> {
-        if let Some(pending) = &self.pending_move {
-            let border_color = cx.theme().colors().border;
-            Some(
-                h_flex()
-                    .p_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(border_color)
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        Label::new(format!(
-                            "Move '{}' → {}?",
-                            pending.task_title, pending.to_label
-                        ))
-                        .size(LabelSize::XSmall),
-                    )
-                    .child(
-                        div()
-                            .id("kanban-confirm-move")
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.move_controller.confirm_move(
-                                    &mut this.columns,
-                                    &this.column_meta,
-                                    &this.provenance,
-                                    cx,
-                                );
-                            }))
-                            .child(
-                                Label::new("Confirm")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Accent),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("kanban-cancel-move")
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.move_controller.cancel_move(cx);
-                            }))
-                            .child(
-                                Label::new("Cancel")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("kanban-evaluate-move")
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                this.evaluate_move(window, cx);
-                            }))
-                            .child(
-                                Label::new("Evaluate")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Accent),
-                            ),
-                    )
-                    .into_any_element(),
-            )
-        } else if let Some(task_id) = &self.dispatch_in_flight {
-            let border_color = cx.theme().colors().border;
-            Some(
-                h_flex()
-                    .p_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(border_color)
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        Label::new(format!("Moving {task_id} …"))
-                            .size(LabelSize::XSmall)
-                            .color(Color::Accent),
-                    )
-                    .child(
-                        div()
-                            .id("kanban-cancel-dispatch")
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.move_controller.cancel_dispatch(
-                                    &mut this.columns,
-                                    &this.column_meta,
-                                    cx,
-                                );
-                            }))
-                            .child(
-                                Label::new("Cancel")
-                                    .size(LabelSize::XSmall)
-                                    .color(Color::Muted),
-                            ),
-                    )
-                    .into_any_element(),
-            )
-        } else if let Some(error) = &self.dispatch_error {
-            let border_color = cx.theme().colors().border;
-            Some(
-                h_flex()
-                    .p_2()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(border_color)
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        Label::new(error.clone())
-                            .size(LabelSize::XSmall)
-                            .color(Color::Warning),
-                    )
-                    .into_any_element(),
-            )
-        } else {
-            None
-        }
     }
 
     /// Roll back the optimistic move (if any) by restoring the task's original
