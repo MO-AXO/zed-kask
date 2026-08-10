@@ -43,8 +43,8 @@ use crate::inference::LanguageModelEmbeddingPort;
 
 /// A request to spawn a worktree-backed agent thread, sent from the tokio
 /// dispatch task to the GPUI-side task via a channel (same pattern as
-/// `ListModels`). The GPUI-side task calls `SiblingThreadHost::create_sibling_thread`
-/// and returns the result via the oneshot reply channel.
+/// `ListModels`). The GPUI-side task calls the `WorktreeSpawner` and returns
+/// the result via the oneshot reply channel.
 pub type WorktreeSpawnRequest = (
     String, // prompt
     String, // title
@@ -52,6 +52,25 @@ pub type WorktreeSpawnRequest = (
     Option<String>, // base_ref
     oneshot::Sender<Result<WorktreeThreadInfo, String>>,
 );
+
+/// Spawns a worktree-backed agent thread. Implemented by `main.rs` using
+/// `AgentPanelSiblingHost` (which `kask_bridge` can't depend on directly due to
+/// a cyclic dependency via `auto_update` → `kask_bridge`). The impl holds a
+/// `WeakEntity<AgentPanel>` + `AnyWindowHandle` (both `Send + Sync`) and calls
+/// `SiblingThreadHost::create_sibling_thread` inside the GPUI task.
+pub trait WorktreeSpawner: Send + Sync {
+    /// Create a worktree-backed agent thread. Called from the GPUI-side task
+    /// with `&mut AsyncApp`. Returns a `gpui::Task` that resolves to the
+    /// thread info or an error message.
+    fn spawn(
+        &self,
+        prompt: String,
+        title: String,
+        worktree_name: Option<String>,
+        base_ref: Option<String>,
+        cx: &mut gpui::AsyncApp,
+    ) -> gpui::Task<Result<WorktreeThreadInfo, String>>;
+}
 
 /// The zed-side inference IPC server.
 ///
@@ -247,6 +266,7 @@ impl InferenceIpcServer {
         media_router: Option<Arc<hkask_inference::MediaRouter>>,
         tool_port: Option<Arc<dyn hkask_capability::ToolPort>>,
         skill_exec_port: Option<Arc<dyn hkask_types::SkillExecPort>>,
+        worktree_spawner: Option<Arc<dyn WorktreeSpawner>>,
         cx: &gpui::App,
     ) -> Result<Self, std::io::Error> {
         // Generate a unique socket path inside a per-user private directory
