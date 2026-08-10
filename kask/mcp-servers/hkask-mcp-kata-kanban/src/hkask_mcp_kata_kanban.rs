@@ -731,12 +731,14 @@ impl KanbanServer {
 
     // ── Spawn — activate a subagent pod for task execution ─────────────────
 
-    /// Spawn a subagent for task execution. The agent runs in-memory via the
-    /// `LazyLocalSwarmRuntime` (in-process, same working tree as the user —
-    /// no git worktree isolation). The delegation result is recorded on the
-    /// task as a structured `LocalDelegateResult` + verdict. See
-    /// `tasks/kanban-worktree-terminal-model.md` for the worktree isolation
-    /// decision (Option C: status quo, gated on measured need).
+    /// Spawn a subagent for task execution. Tries worktree-isolated spawn
+    /// first (via the `WorktreeSpawnPort` IPC bridge → editor creates a git
+    /// worktree + agent thread). On failure (no IPC socket, no active
+    /// workspace), falls back to in-memory `LazyLocalSwarmRuntime::delegate()`
+    /// (same process, same working tree). The delegation result is recorded
+    /// on the task as a structured `LocalDelegateResult` + verdict. See
+    /// `tasks/kanban-worktree-terminal-model.md` for the design (Option A:
+    /// implemented).
     #[tool(description = "Spawn a subagent for task execution with delegated skills and budgets")]
     pub async fn kanban_task_spawn(
         &self,
