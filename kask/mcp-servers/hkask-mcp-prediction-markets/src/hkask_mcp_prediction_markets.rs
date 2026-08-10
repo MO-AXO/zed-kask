@@ -37,6 +37,7 @@ use worldbank::{
     WbGetIndicatorInfoRequest, WbGetObservationsRequest, WbListCountriesRequest,
     WbListTopicsRequest, WbSearchIndicatorsRequest,
 };
+use eqm::ScoreRationaleRequest;
 
 pub mod base_event;
 pub mod cache;
@@ -44,8 +45,8 @@ pub mod calibration;
 pub mod cmp;
 pub mod cmp_index_builder;
 pub mod cmp_portfolio;
-pub mod dbnomics;
 pub mod economic_object;
+pub mod eqm;
 pub mod fred;
 pub mod matcher;
 pub mod ontology;
@@ -299,6 +300,10 @@ hkask_mcp_server::mcp_server!(
         /// Optional FRED API key for live reference-level fetches. When absent,
         /// `market_cmp_context_suggest` uses curated static defaults.
         pub fred_api_key: Option<String>,
+        /// Inference port for LLM-based EQM (Explanation Quality Marker)
+        /// scoring of forecast rationales. Resolved once in `run()` before
+        /// the sync server-construction closure.
+        pub inference_port: std::sync::Arc<dyn hkask_types::InferencePort>,
     }
 );
 
@@ -2066,6 +2071,12 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CACHE_TTL_SECS: u64 = 60;
 
 pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
+    // Resolve the inference port once, before entering the sync server-
+    // construction closure. `resolve_inference_port` is async (it may connect
+    // to the zed IPC bridge); the closure passed to `run_server` is sync, so
+    // the await must happen here. Used by the EQM scoring tool.
+    let inference_port = hkask_inference::resolve_inference_port().await;
+
     // A malformed numeric env var must warn, not silently fall back — an
     // operator cannot distinguish "not configured" from "configured but
     // broken" otherwise.
@@ -2129,6 +2140,7 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
                 std::sync::Mutex::new(HashSet::new()),
                 portfolio_store,
                 fred_api_key,
+                inference_port.clone(),
             ))
         },
         vec![
