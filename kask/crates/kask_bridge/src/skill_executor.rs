@@ -236,7 +236,8 @@ impl BridgeManifestExecutor {
 
         let executor = self.build_executor(progress);
 
-        let join_handle = self.tokio_handle.spawn({n            let manifest = manifest.clone();
+        let join_handle = self.tokio_handle.spawn({
+            let manifest = manifest.clone();
             async move {
                 executor
                     .execute_manifest(&manifest, context)
@@ -275,7 +276,8 @@ impl BridgeManifestExecutor {
 
         let result = join_handle
             .await
-            .map_err(|e| format!("Composed manifest execution task failed: {e}"))?;
+            .map_err(|e| format!("Composed manifest execution task failed: {e}"))?
+            .map_err(|e| format!("Composed manifest execution failed: {e}"))?;
 
         Ok(extract_final_step_result(&result))
     }
@@ -352,8 +354,7 @@ impl BridgeManifestExecutor {
     /// `reg.guard.runtime_policy` span and Block/RequireHuman enforcement
     /// are dead code — `runtime_policy` stays `None` and untrusted input flows
     /// to Sink tools unchecked (OWASP LLM06, RR-0053).
-    fn build_executor(&self) -> ManifestExecutor {
-        fn build_executor(
+    fn build_executor(
         &self,
         progress: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     ) -> ManifestExecutor {

@@ -618,18 +618,14 @@ impl ManifestExecutor {
                     } else {
                         format!(" — {}", step.description)
                     };
+                    let action = &step.action;
                     if iteration > 1 {
                         progress(&format!(
-                            "Iteration {iteration}, step {}/{total}: {} ({}){desc}",
+                            "Iteration {iteration}, step {}/{total}: {action}{desc}",
                             step_idx + 1,
-                            step.action
                         ));
                     } else {
-                        progress(&format!(
-                            "Step {}/{total}: {} ({}){desc}",
-                            step_idx + 1,
-                            step.action
-                        ));
+                        progress(&format!("Step {}/{total}: {action}{desc}", step_idx + 1,));
                     }
                 }
 
