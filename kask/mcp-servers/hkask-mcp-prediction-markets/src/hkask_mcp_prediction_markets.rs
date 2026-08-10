@@ -1812,7 +1812,8 @@ mod tests {
             std::sync::Mutex::new(HashSet::new()),
             portfolio_store,
             None, // fred_api_key — tests use curated defaults
-            std::sync::Arc::new(StubInferencePort) as std::sync::Arc<dyn hkask_types::InferencePort>,
+            std::sync::Arc::new(StubInferencePort)
+                as std::sync::Arc<dyn hkask_types::InferencePort>,
         )
     }
 

@@ -204,17 +204,16 @@ impl HMemStore {
         // live schema and `ALTER TABLE ... ADD COLUMN` if missing. Existing
         // rows get SQL NULL for `ontology`, which `row_to_h_mem` reads as
         // `None` (unclassified legacy h_mem) — the correct interpretation.
-        let rows = store.driver().query(
-            "SELECT name FROM pragma_table_info('hmems')",
-            &[],
-        )?;
+        let rows = store
+            .driver()
+            .query("SELECT name FROM pragma_table_info('hmems')", &[])?;
         let has_ontology = rows
             .iter()
             .any(|row| row.get_str(0).ok() == Some("ontology"));
         if !has_ontology {
-            store.driver().execute_batch(
-                "ALTER TABLE hmems ADD COLUMN ontology TEXT",
-            )?;
+            store
+                .driver()
+                .execute_batch("ALTER TABLE hmems ADD COLUMN ontology TEXT")?;
         }
         Ok(store)
     }
@@ -1080,9 +1079,13 @@ mod tests {
 
         // A new insert that sets an ontology blob must succeed — the column
         // is now present and the production warning must not recur.
-        let new_h_mem =
-            HMem::new("post-migration", "attr", serde_json::json!("v"), WebID::new())
-                .with_ontology(HMemOntology::default());
+        let new_h_mem = HMem::new(
+            "post-migration",
+            "attr",
+            serde_json::json!("v"),
+            WebID::new(),
+        )
+        .with_ontology(HMemOntology::default());
         store
             .insert(&new_h_mem)
             .expect("insert with ontology after migration");
