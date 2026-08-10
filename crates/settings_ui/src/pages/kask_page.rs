@@ -22,6 +22,7 @@ mod companies;
 mod condenser;
 mod curator;
 mod data_services;
+mod general;
 mod inference_providers;
 pub(crate) use {
     codegraph::render_codegraph_page, collab::render_collab_page, companies::render_companies_page,
@@ -224,6 +225,12 @@ pub(crate) fn kask_string_input(
                     move |settings, _| {
                         let kask = settings.kask.get_or_insert_default();
                         match (struct_name, field_name) {
+                            ("kask", "data_dir") => {
+                                kask.data_dir = Some(parsed.clone());
+                            }
+                            ("research", "rss_db") => {
+                                kask.research.get_or_insert_default().rss_db = Some(parsed.clone());
+                            }
                             ("codegraph", "db_path") => {
                                 kask.codegraph.get_or_insert_default().db_path =
                                     Some(parsed.clone());
@@ -337,6 +344,22 @@ pub(crate) fn raw_kask_settings(cx: &App) -> Option<settings::KaskSettingsConten
 pub(crate) fn kask_page() -> SettingsPage {
     let items: Vec<SettingsPageItem> = vec![
         SettingsPageItem::SectionHeader("Kask"),
+        SettingsPageItem::SubPageLink(SubPageLink {
+            title: "General".into(),
+            r#type: Default::default(),
+            json_path: Some("kask.data_dir"),
+            description: Some(
+                "Configure the kask data directory — the root for all kask \
+                 databases, agent state, and file-based stores. Every MCP server \
+                 receives this path as HKASK_DATA_DIR. When empty, the runtime \
+                 resolves a platform default (~/.local/share/hkask on Linux)."
+                    .into(),
+            ),
+            search_aliases: &["data dir", "data directory", "hkask data", "database path"],
+            in_json: true,
+            files: USER,
+            render: render_general_page,
+        }),
         SettingsPageItem::SubPageLink(SubPageLink {
             title: "Data Services".into(),
             r#type: Default::default(),
