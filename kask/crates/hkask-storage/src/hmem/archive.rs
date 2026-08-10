@@ -201,28 +201,37 @@ impl BackupArchive {
     ) -> Result<MigrationReceipt, ArchiveError> {
         let rows = self.read_triples()?;
         let total = rows.len() as i64;
-        let driver = target.driver();
-        for row in rows {
-            let owner = owner_webid.to_string();
-            driver.execute(
+        // Hold a single pooled connection for the entire import so the target
+        // is either fully imported or unchanged. The prior per-row
+        // `driver.execute()` pattern acquired a separate pool connection per
+        // row (autocommit), so a failure mid-loop left the target half-imported.
+        let pool = target.driver().sqlite_pool().ok_or_else(|| {
+            ArchiveError::Database("restore_into requires a SqliteDriver".to_string())
+        })?;
+        let mut conn = pool.get().map_err(|e| ArchiveError::Database(e.to_string()))?;
+        let tx = conn.transaction().map_err(|e| ArchiveError::Database(e.to_string()))?;
+        let owner = owner_webid.to_string();
+        for row in &rows {
+            tx.execute(
                 "INSERT OR REPLACE INTO hmems (id, entity, attribute, value, valid_from, valid_to, recalled_at, confidence, perspective, visibility, owner_webid, ontology)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                &[
-                    DbValue::Text(row.id),
-                    DbValue::Text(row.entity),
-                    DbValue::Text(row.attribute),
-                    DbValue::Text(row.value),
-                    DbValue::Text(row.valid_from),
-                    row.valid_to.map_or(DbValue::Null, DbValue::Text),
-                    row.recalled_at.map_or(DbValue::Null, DbValue::Text),
-                    DbValue::Real(row.confidence),
-                    row.perspective.map_or(DbValue::Null, DbValue::Text),
-                    DbValue::Text(row.visibility),
-                    DbValue::Text(owner),
-                    row.ontology.map_or(DbValue::Null, DbValue::Text),
+                rusqlite::params![
+                    row.id,
+                    row.entity,
+                    row.attribute,
+                    row.value,
+                    row.valid_from,
+                    row.valid_to,
+                    row.recalled_at,
+                    row.confidence,
+                    row.perspective,
+                    row.visibility,
+                    owner,
+                    row.ontology,
                 ],
-            )?;
+            ).map_err(|e| ArchiveError::Database(e.to_string()))?;
         }
+        tx.commit().map_err(|e| ArchiveError::Database(e.to_string()))?;
         Ok(MigrationReceipt {
             triple_count: total,
         })
