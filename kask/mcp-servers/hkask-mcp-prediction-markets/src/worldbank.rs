@@ -158,7 +158,7 @@ pub async fn search_indicators(
 ) -> Result<Value, WbError> {
     let limit = req.limit.unwrap_or(10).min(100);
 
-    let endpoint = if let Some(topic_id) = req.topic_id {
+    if let Some(topic_id) = req.topic_id {
         // Topic-filtered indicator list.
         let topic_id_str = topic_id.to_string();
         let per_page = limit.to_string();
@@ -220,8 +220,6 @@ pub async fn search_indicators(
     }
 
     // No topic filter — list all indicators and filter client-side.
-    let params_ref: Vec<(&str, &str)> =
-        params.iter().map(|(k, v)| (*k, v.as_str())).collect();
     // Request a larger page to search through.
     let search_params: Vec<(&str, &str)> = vec![("per_page", "1000"), ("format", "json")];
     let body = wb_fetch(http, "indicator", &search_params).await?;
