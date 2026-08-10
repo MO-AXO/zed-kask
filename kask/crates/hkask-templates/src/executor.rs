@@ -223,11 +223,12 @@ impl ManifestExecutor {
         self
     }
 
-    /// Test-only accessor: returns whether a runtime policy is wired.
-    /// Used by the RR-0053 wiring test to verify `build_executor` attaches
-    /// a `DefaultPolicy` — without it, the FIDES Source→Sink block (Layer 4)
-    /// is dead code in production.
-    #[cfg(test)]
+    /// Accessor: returns whether a runtime policy is wired.
+    /// Used by the RR-0053 wiring test (kask_bridge) to verify `build_executor`
+    /// attaches a `DefaultPolicy` — without it, the FIDES Source→Sink block
+    /// (Layer 4) is dead code in production. Not `#[cfg(test)]`-gated because
+    /// the test lives in a downstream crate (kask_bridge), which compiles this
+    /// crate without `--cfg test`.
     pub fn runtime_policy_is_wired(&self) -> bool {
         self.runtime_policy.is_some()
     }
