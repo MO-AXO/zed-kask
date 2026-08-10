@@ -612,7 +612,6 @@ impl ManifestExecutor {
                 // The callback is set by the bridge from `ToolCallEventStream`;
                 // when absent (unit tests), this is a no-op.
                 if let Some(ref progress) = self.progress {
-                    let step_name = step.name.as_deref().unwrap_or("unnamed");
                     let total = steps.len();
                     let desc = if step.description.is_empty() {
                         String::new()
@@ -621,12 +620,13 @@ impl ManifestExecutor {
                     };
                     if iteration > 1 {
                         progress(&format!(
-                            "Iteration {iteration}, step {}/{total}: {step_name} ({}){desc}",
+                            "Iteration {iteration}, step {}/{total}: {} ({}){desc}",
+                            step_idx + 1,
                             step.action
                         ));
                     } else {
                         progress(&format!(
-                            "Step {}/{total}: {step_name} ({}){desc}",
+                            "Step {}/{total}: {} ({}){desc}",
                             step_idx + 1,
                             step.action
                         ));
