@@ -18,7 +18,7 @@ pub(crate) fn render_general_page(
     let data_dir_input = kask_string_input(
         "kask-general-data-dir",
         "Kask Data Directory",
-        &format!("Default: {resolved_default}"),
+        format!("Default: {resolved_default}"),
         data_dir,
         "kask",
         "data_dir",

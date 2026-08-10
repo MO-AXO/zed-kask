@@ -28,11 +28,11 @@ pub(crate) use {
     codegraph::render_codegraph_page, collab::render_collab_page, companies::render_companies_page,
     condenser::render_condenser_page, corpus::render_corpus_page,
     curator::render_curator_email_page, curator::render_curator_page,
-    data_services::render_data_services_page, inference_providers::render_inference_providers_page,
-    mcp_servers::render_mcp_servers_page, media::render_media_page, memory::render_memory_page,
-    models::render_models_page, prediction_markets::render_prediction_markets_page,
-    research::render_research_page, scenarios::render_scenarios_page, swarm::render_swarm_page,
-    training::render_training_page,
+    data_services::render_data_services_page, general::render_general_page,
+    inference_providers::render_inference_providers_page, mcp_servers::render_mcp_servers_page,
+    media::render_media_page, memory::render_memory_page, models::render_models_page,
+    prediction_markets::render_prediction_markets_page, research::render_research_page,
+    scenarios::render_scenarios_page, swarm::render_swarm_page, training::render_training_page,
 };
 mod corpus;
 mod mcp_servers;
@@ -206,7 +206,7 @@ pub(crate) fn delete_credential(
 pub(crate) fn kask_string_input(
     field_id: &'static str,
     label: &'static str,
-    placeholder: &'static str,
+    placeholder: impl Into<SharedString>,
     initial: String,
     struct_name: &'static str,
     field_name: &'static str,
