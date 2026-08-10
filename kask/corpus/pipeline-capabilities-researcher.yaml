@@ -3,7 +3,7 @@
 #
 # Type: PipelineManifest
 # Persona: Business and Economics Researcher — Capability-Performance Gap Analysis
-# Source: 141 files (83 PDF + 49 HTML + 9 other) in corpus/source-library/
+# Source: 138 files (81 PDF + 48 HTML + 9 other) in corpus/source-library/
 # Target: Bloom-balanced QAs for EVA LoRA training via Axolotl
 #
 # Architecture (v9.0 — Inter-Phase Gate System):
@@ -43,6 +43,13 @@
 #   Command prerequisites: python3 for JSONL/set reconciliation and sqlcipher for
 #   encrypted DB inspection. A missing prerequisite makes the measurement
 #   indeterminate and therefore fails closed; install it before the DB-backed gates.
+#
+# Artifact retention policy:
+#   Raw corpus inputs and temporary batch directories are local-only and ignored:
+#   corpus/source-library/, corpus/source-html/, corpus/source-pdf*/, and
+#   corpus/.pipeline-batches/. Processed outputs in corpus/extracted/,
+#   corpus/chunks/, and corpus/qa_pairs/ are intentionally trackable. Memory DBs
+#   remain excluded by the repository-wide **/*.db rule.
 #
 #   Gate placement (11 gates, one between each phase):
 #     Phase 0: extract_text
@@ -122,8 +129,11 @@
 #       was both too low and checked tool response count, not disk artifacts).
 #     - Replaced arbitrary minimum-count verifies with exact source/failure
 #       assertions where static truth exists; dynamic counts are reconciled by gates.
-#     - Updated source count from 106 to 141 (83 PDF + 49 HTML + 9 other).
+#     - Updated the source inventory to the authoritative 138 files
+#       (81 PDF + 48 HTML + 9 other) after removing three deleted-source hard links.
 #     - Documented all tool response fields in header for gate/verify reference.
+#     - Changed Git retention policy: ignore raw/staging corpus inputs, retain
+#       processed extracts, chunks, prompts, QA datasets, and ChatML artifacts.
 #
 #   v8.0 → v7.0 lessons learned (preserved):
 #     - Combined classify-chunks.j2 template caused bugs: wrong model, bypassed
@@ -168,16 +178,16 @@ steps:
   # Phase 0: Raw Files → Extracted Text
   # ═══════════════════════════════════════════════════════════════════════
   - id: extract_text
-    description: "Extract text from 141 source files (83 PDF + 49 HTML + 9 other) from the Researcher library"
+    description: "Extract text from 138 source files (81 PDF + 48 HTML + 9 other) from the Researcher library"
     tool: corpus_convert
     params:
       path: "corpus/source-library"
       output: "corpus/extracted/researcher"
     verify:
       - field: source_documents
-        equals: 141
+        equals: 138
       - field: total_documents
-        equals: 141
+        equals: 138
         # total_documents = newly extracted + safely resumed/skipped outputs.
       - field: failed
         equals: 0
@@ -222,15 +232,15 @@ steps:
                   suspicious.append((source.name, source_size, extract_size))
           print({"sources": len(sources), "extracts": len(extracts), "missing": missing[:20],
                  "orphaned": orphaned[:20], "too_small": too_small[:20], "suspicious": suspicious[:20]})
-          assert len(sources) == 141, f"expected 141 supported sources, found {len(sources)}"
-          assert len(extracts) == 141, f"expected 141 extracts, found {len(extracts)}"
+          assert len(sources) == 138, f"expected 138 supported sources, found {len(sources)}"
+          assert len(extracts) == 138, f"expected 138 extracts, found {len(extracts)}"
           assert not missing, f"missing extracts: {missing}"
           assert not orphaned, f"orphan extracts: {orphaned}"
           assert not too_small, f"extracts <=100 bytes: {too_small}"
           assert not suspicious, f"large-source/tiny-extract pairs: {suspicious}"
           print("GATE_PASS extract_inventory_and_quality")
           PY
-        pass: "exit code 0; exact 141↔141 filename+.txt mapping; every extract >100 bytes; no suspicious size pairs"
+        pass: "exit code 0; exact 138↔138 filename+.txt mapping; every extract >100 bytes; no suspicious size pairs"
         fail: "non-zero exit, missing/orphan file, <=100-byte extract, or large-source/tiny-extract pair"
         remediation: >
           Re-run corpus_convert only for the reported missing or suspicious sources.
@@ -246,16 +256,16 @@ steps:
       - name: extraction_response_reconciles
         artifact: "extract_text tool response"
         response_assertions:
-          source_documents: { equals: 141 }
-          total_documents: { equals: 141 }
+          source_documents: { equals: 138 }
+          total_documents: { equals: 138 }
           failed: { equals: 0 }
           failures: { length_equals: 0 }
         pass: "all response assertions hold and the disk inventory check also passes"
         fail: "the response reports a partial inventory or any failure, even if stale extracts make disk counts look complete"
         remediation: >
           Inspect every failures[] entry and rerun only those paths. If this was a
-          resumed run, `extracted` may be zero and `skipped` may be 141; that is valid
-          only when total_documents is 141, failed is zero, and the disk check passes.
+          resumed run, `extracted` may be zero and `skipped` may be 138; that is valid
+          only when total_documents is 138, failed is zero, and the disk check passes.
     on_failure:
       action: halt
       resume: "repair extraction, then rerun every check in gate_extract_complete"
@@ -278,7 +288,7 @@ steps:
       entity_ref_prefix: "corpus:researcher"
     verify:
       - field: total_documents
-        equals: 141
+        equals: 138
       - field: total_chunks
         gte: 1
         # Exact chunk count is data-dependent; gate_chunk_complete reconciles
@@ -342,7 +352,7 @@ steps:
                  "chunks": len(records), "duplicate_refs": duplicate_refs[:20],
                  "missing_sources": missing_sources[:20], "orphan_sources": orphan_sources[:20],
                  "extracted_words": extracted_words, "chunk_words": chunk_words, "word_ratio": round(ratio, 3)})
-          assert expected_sources and len(expected_sources) == 141
+          assert expected_sources and len(expected_sources) == 138
           assert records, "no chunks"
           assert not duplicate_refs, f"duplicate entity_refs: {duplicate_refs[:20]}"
           assert not missing_sources, f"extracts with no chunks: {missing_sources[:20]}"
@@ -350,7 +360,7 @@ steps:
           assert 0.90 <= ratio <= 1.35, f"chunk/extract word ratio {ratio:.3f} outside overlap-aware range [0.90, 1.35]"
           print("GATE_PASS chunk_integrity_coverage_and_volume")
           PY
-        pass: "exit code 0; valid JSONL; unique refs; exact 141-source coverage; overlap-aware word ratio 0.90..1.35"
+        pass: "exit code 0; valid JSONL; unique refs; exact 138-source coverage; overlap-aware word ratio 0.90..1.35"
         fail: "parse/schema error, duplicate ref, missing/orphan source, or implausible text-volume ratio"
         remediation: >
           Re-run chunk_all against the complete extraction directory. The chunker
