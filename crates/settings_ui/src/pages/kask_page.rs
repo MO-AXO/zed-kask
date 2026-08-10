@@ -119,13 +119,17 @@ pub(crate) fn data_service_descriptors() -> Vec<(&'static str, &'static str, &'s
 // and curator sub-modules)
 // ---------------------------------------------------------------------------
 
-/// Check whether a credential is available — either in the keychain or via env var.
+/// Check whether a credential is available — either via env var or in the
+/// session cache of recently-written keychain URLs.
 ///
-/// The keychain read is async, so we can't block on it here. We check the env var
-/// synchronously (instant) and the session-level cache of recently-written URLs.
+/// The keychain read is async, so we can't block on it here. We check the env
+/// var synchronously (instant) and the session-level cache of recently-written
+/// URLs. For credentials with a single keychain URL (data services, curator
+/// SMTP), pass `&[url]`. For inference providers with two keychain URLs
+/// (api_url + credential_url), pass `&[api_url, credential_url]`.
 pub(crate) fn has_credential(
     _provider: &Arc<dyn CredentialsProvider>,
-    url: &str,
+    urls: &[&str],
     env_var: &str,
 ) -> bool {
     // Env-var check is synchronous and instant.
@@ -133,8 +137,12 @@ pub(crate) fn has_credential(
         return true;
     }
     // Check the session cache for keys written via the settings UI.
-    if was_recently_written(url) {
-        return true;
+    // Inference providers have two keychain URLs (api_url + credential_url);
+    // either one being recently written means the key is configured.
+    for url in urls {
+        if was_recently_written(url) {
+            return true;
+        }
     }
     false
 }

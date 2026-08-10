@@ -83,7 +83,7 @@ fn render_data_service_row(
     _cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
     let credential_url = format!("{KASK_CREDENTIAL_NAMESPACE}/{key}");
-    let has_key = has_credential(&provider, &credential_url, env_var);
+    let has_key = has_credential(&provider, &[&credential_url], env_var);
 
     let toggle_id = format!("kask-{key}-enabled");
     let enable_toggle = SwitchField::new(

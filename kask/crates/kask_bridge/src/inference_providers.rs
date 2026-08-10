@@ -19,7 +19,6 @@ use credentials_provider::CredentialsProvider;
 use gpui::{App, ReadGlobal as _, Task};
 use settings::SettingsStore;
 use settings_content::OpenAiCompatibleSettingsContent;
-use util::ResultExt as _;
 
 /// The URL prefix for kask-namespaced credentials in the keychain.
 /// Must match `kask_bridge::KASK_CREDENTIAL_NAMESPACE`.
@@ -452,65 +451,6 @@ pub fn ensure_openai_compatible_entries(settings: &super::KaskSettings, cx: &mut
     });
 }
 
-/// Read an inference provider's API key from zed's keychain.
-///
-/// The key is stored under the provider's `api_url` (the same URL zed's
-/// OpenAI-compatible provider reads from). This function is used by the
-/// settings UI to display "Configured" / "Not configured" status.
-pub fn provider_credential_url(provider: &InferenceProviderDescriptor) -> String {
-    provider.api_url.to_string()
-}
-
-/// Write an inference provider's API key to zed's keychain under both:
-/// 1. The provider's `api_url` (so zed's OpenAI-compatible provider finds it).
-/// 2. `kask://credentials/<credential_key>` (for MCP server env injection).
-pub fn write_provider_api_key(
-    provider: &InferenceProviderDescriptor,
-    api_key: &str,
-    credentials_provider: &Arc<dyn CredentialsProvider>,
-    cx: &mut App,
-) -> Task<()> {
-    let api_url = provider.api_url.to_string();
-    let credential_url = provider.credential_url();
-    let api_key = api_key.to_string();
-    let credentials_provider = credentials_provider.clone();
-    let provider_clone = credentials_provider.clone();
-    cx.spawn(async move |cx| {
-        // Write under the api_url (for zed's OpenAI-compatible provider).
-        let _ = credentials_provider
-            .write_credentials(&api_url, "Bearer", api_key.as_bytes(), cx)
-            .await
-            .log_err();
-        // Write under the kask credential URL (for MCP env injection).
-        let _ = provider_clone
-            .write_credentials(&credential_url, "kask", api_key.as_bytes(), cx)
-            .await
-            .log_err();
-    })
-}
-
-/// Delete an inference provider's API key from both keychain locations.
-pub fn delete_provider_api_key(
-    provider: &InferenceProviderDescriptor,
-    credentials_provider: &Arc<dyn CredentialsProvider>,
-    cx: &mut App,
-) -> Task<()> {
-    let api_url = provider.api_url.to_string();
-    let credential_url = provider.credential_url();
-    let credentials_provider = credentials_provider.clone();
-    let provider_clone = credentials_provider.clone();
-    cx.spawn(async move |cx| {
-        let _ = credentials_provider
-            .delete_credentials(&api_url, cx)
-            .await
-            .log_err();
-        let _ = provider_clone
-            .delete_credentials(&credential_url, cx)
-            .await
-            .log_err();
-    })
-}
-
 /// Resolve `(api_url, api_key)` for an embedding model string directly from
 /// the `INFERENCE_PROVIDERS` table + env var.
 ///
@@ -563,50 +503,6 @@ fn embedding_provider_descriptor(
         }
     }
     None
-}
-
-/// Check whether an inference provider's API key is available.
-///
-/// Checks the env var synchronously (instant). The keychain read is async
-/// and can't block on the foreground thread, so we optimistically report
-/// false for the keychain and let the user enter the key.
-pub fn has_provider_api_key(provider: &InferenceProviderDescriptor) -> bool {
-    std::env::var(provider.env_var).is_ok()
-}
-
-/// Write a data service API key to zed's keychain under
-/// `kask://credentials/<key>`.
-pub fn write_data_service_api_key(
-    credential_key: &str,
-    api_key: &str,
-    credentials_provider: &Arc<dyn CredentialsProvider>,
-    cx: &mut App,
-) -> Task<()> {
-    let url = format!("{KASK_CREDENTIAL_NAMESPACE}/{credential_key}");
-    let api_key = api_key.to_string();
-    let credentials_provider = credentials_provider.clone();
-    cx.spawn(async move |cx| {
-        let _ = credentials_provider
-            .write_credentials(&url, "kask", api_key.as_bytes(), cx)
-            .await
-            .log_err();
-    })
-}
-
-/// Delete a data service API key from zed's keychain.
-pub fn delete_data_service_api_key(
-    credential_key: &str,
-    credentials_provider: &Arc<dyn CredentialsProvider>,
-    cx: &mut App,
-) -> Task<()> {
-    let url = format!("{KASK_CREDENTIAL_NAMESPACE}/{credential_key}");
-    let credentials_provider = credentials_provider.clone();
-    cx.spawn(async move |cx| {
-        let _ = credentials_provider
-            .delete_credentials(&url, cx)
-            .await
-            .log_err();
-    })
 }
 
 /// A credential to mirror from the process environment into the OS keychain.
@@ -675,11 +571,10 @@ impl MirrorTarget {
 ///
 /// For each provider in `INFERENCE_PROVIDERS` whose env var is set and
 /// non-empty, this writes the key to both keychain locations (the provider's
-/// `api_url` and `kask://credentials/<credential_key>`), identical to
-/// `write_provider_api_key`. For each secret entry in `DATA_SERVICES`
-/// whose env var is set and non-empty, this writes the key only to
-/// `kask://credentials/<credential_key>` (data services have no
-/// OpenAI-compatible `api_url`), identical to `write_data_service_api_key`.
+/// `api_url` and `kask://credentials/<credential_key>`). For each secret entry
+/// in `DATA_SERVICES` whose env var is set and non-empty, this writes the key
+/// only to `kask://credentials/<credential_key>` (data services have no
+/// OpenAI-compatible `api_url`).
 /// `Config` entries in `DATA_SERVICES` are skipped (non-secret, not keychain-backed).
 /// It always writes (overwrites any existing keychain entry with the env
 /// value). The env var takes precedence on the next restart because the
