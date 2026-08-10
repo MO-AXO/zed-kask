@@ -1966,6 +1966,41 @@ impl PredictionMarketsServer {
         )
         .await
     }
+
+    // ═══════════════════ EQM rationale scoring ═══════════════════
+
+    /// Score a forecast rationale against Explanation Quality Markers (EQMs).
+    ///
+    /// Based on Karvetski et al. (2026), Forecasting Research Institute.
+    /// Scores 12 key reasoning patterns on a 0/1/2 scale using an LLM,
+    /// then computes a composite score. EQMs flag weak reasoning more
+    /// reliably than they identify excellent reasoning (asymmetric signal).
+    #[tool(
+        description = "Score a forecast rationale against Explanation Quality Markers (EQMs). Returns composite score, per-marker scores, red flags (warning signs), and green flags (good habits). Based on Karvetski et al. (2026). Cost: ~$0.007 per rationale."
+    )]
+    pub async fn market_score_rationale(
+        &self,
+        Parameters(req): Parameters<ScoreRationaleRequest>,
+    ) -> String {
+        execute_tool_semantic(
+            self,
+            "market_score_rationale",
+            Some(Self::ontology_anchor("market_score_rationale")),
+            async {
+                self.called_tools
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert("market_score_rationale".to_string());
+                let result = eqm::score_rationale(
+                    self.inference_port.as_ref(),
+                    &req,
+                )
+                .await;
+                result.map_err(McpToolError::from)
+            },
+        )
+        .await
+    }
 }
 
 impl PredictionMarketsServer {

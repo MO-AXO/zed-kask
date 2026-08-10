@@ -1149,8 +1149,8 @@ impl From<KaskCodegraphSettingsContent> for KaskCodegraphSettings {
     }
 }
 
-impl From<settings_content::KaskResearchSettingsContent> for KaskResearchSettings {
-    fn from(c: settings_content::KaskResearchSettingsContent) -> Self {
+impl From<KaskResearchSettingsContent> for KaskResearchSettings {
+    fn from(c: KaskResearchSettingsContent) -> Self {
         let default = Self::default();
         Self {
             rss_db: c.rss_db.unwrap_or(default.rss_db),
