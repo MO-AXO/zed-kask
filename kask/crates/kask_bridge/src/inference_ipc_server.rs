@@ -366,7 +366,7 @@ impl InferenceIpcServer {
                     continue;
                 };
                 let task = spawner.spawn(prompt, title, worktree_name, base_ref, cx);
-                let result = task.await.map_err(|e| e.to_string());
+                let result = task.await;
                 let _ = reply.send(result);
             }
         });

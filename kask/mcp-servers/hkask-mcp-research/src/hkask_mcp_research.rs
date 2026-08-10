@@ -846,23 +846,24 @@ impl ResearchServer {
             let folder = req.folder.clone();
             let want_subscribe = req.subscribe.unwrap_or(true);
 
-            // Extract items.
-            let extract_result = crate::research::synthetic::extract(
-                kind,
-                &spec,
-                &source_url,
-                &body,
-                &content_type,
-            );
-
-            let (feed, _entry_count, extract_hash) = match (kind, extract_result) {
-                (crate::research::synthetic::ExtractorKind::DiffHash, _) => {
+            // Extract items. For css/json_path/diff_hash, use the sync extract()
+            // function. For llm_schema and pdf_ocr, use the async pool-based
+            // extractors.
+            let (feed, _entry_count, extract_hash) = match kind {
+                crate::research::synthetic::ExtractorKind::DiffHash => {
                     let (feed, hash) =
                         crate::research::synthetic::build_diff_hash_feed(&body, &source_url, &title);
                     let count = feed.entries.len();
                     (feed, count, Some(hash))
                 }
-                (_, Ok(items)) => {
+                crate::research::synthetic::ExtractorKind::LlmSchema => {
+                    let items = crate::research::synthetic::extract_llm_schema(
+                        self.pool.as_ref(),
+                        &spec,
+                        &source_url,
+                    )
+                    .await
+                    .map_err(McpToolError::from)?;
                     let entries = crate::research::synthetic::items_to_entries(items, &title);
                     let count = entries.len();
                     let mut feed = crate::research::synthetic::build_synthetic_feed(
@@ -873,10 +874,55 @@ impl ResearchServer {
                     feed.entries = entries;
                     (feed, count, None)
                 }
-                (_, Err(e)) => {
-                    return Err(McpToolError::invalid_argument(format!(
-                        "extraction failed: {e}"
-                    )));
+                crate::research::synthetic::ExtractorKind::PdfOcr => {
+                    let items = crate::research::synthetic::extract_pdf_ocr(
+                        self.pool.as_ref(),
+                        &spec,
+                        &source_url,
+                        &body,
+                    )
+                    .await
+                    .map_err(McpToolError::from)?;
+                    if items.is_empty() {
+                        // diff_hash post-processing or empty PDF.
+                        let (feed, hash) = crate::research::synthetic::build_diff_hash_feed(
+                            &body,
+                            &source_url,
+                            &title,
+                        );
+                        let count = feed.entries.len();
+                        (feed, count, Some(hash))
+                    } else {
+                        let entries = crate::research::synthetic::items_to_entries(items, &title);
+                        let count = entries.len();
+                        let mut feed = crate::research::synthetic::build_synthetic_feed(
+                            &source_url,
+                            &title,
+                            &description,
+                        );
+                        feed.entries = entries;
+                        (feed, count, None)
+                    }
+                }
+                _ => {
+                    // css or json_path — sync extraction.
+                    let items = crate::research::synthetic::extract(
+                        kind,
+                        &spec,
+                        &source_url,
+                        &body,
+                        &content_type,
+                    )
+                    .map_err(McpToolError::from)?;
+                    let entries = crate::research::synthetic::items_to_entries(items, &title);
+                    let count = entries.len();
+                    let mut feed = crate::research::synthetic::build_synthetic_feed(
+                        &source_url,
+                        &title,
+                        &description,
+                    );
+                    feed.entries = entries;
+                    (feed, count, None)
                 }
             };
 
@@ -1104,15 +1150,39 @@ impl ResearchServer {
                 Err(e) => Err(map_join_error(e, "db task failed")),
             }
         } else {
-            // css or json_path extraction.
-            let items = crate::research::synthetic::extract(
-                kind,
-                &spec,
-                &synth.source_url,
-                &body,
-                &content_type,
-            )
-            .map_err(McpToolError::from)?;
+            // css, json_path, llm_schema, or pdf_ocr extraction.
+            let items = match kind {
+                crate::research::synthetic::ExtractorKind::LlmSchema => {
+                    crate::research::synthetic::extract_llm_schema(
+                        self.pool.as_ref(),
+                        &spec,
+                        &synth.source_url,
+                    )
+                    .await
+                    .map_err(McpToolError::from)?
+                }
+                crate::research::synthetic::ExtractorKind::PdfOcr => {
+                    crate::research::synthetic::extract_pdf_ocr(
+                        self.pool.as_ref(),
+                        &spec,
+                        &synth.source_url,
+                        &body,
+                    )
+                    .await
+                    .map_err(McpToolError::from)?
+                }
+                _ => {
+                    // css or json_path — sync extraction.
+                    crate::research::synthetic::extract(
+                        kind,
+                        &spec,
+                        &synth.source_url,
+                        &body,
+                        &content_type,
+                    )
+                    .map_err(McpToolError::from)?
+                }
+            };
 
             let entries = crate::research::synthetic::items_to_entries(items, &synth.source_url);
             let feed_id = synth.feed_id;
