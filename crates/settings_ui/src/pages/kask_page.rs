@@ -110,6 +110,7 @@ pub(crate) const BUILT_IN_MCP_SERVERS: &[(&str, &str)] = kask_bridge::BUILT_IN_M
 pub(crate) fn data_service_descriptors() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
     kask_bridge::DATA_SERVICES
         .iter()
+        .filter(|d| d.shows_in_ui())
         .map(|d| (d.credential_key, d.label, d.dashboard_url, d.env_var))
         .collect()
 }
@@ -132,8 +133,11 @@ pub(crate) fn has_credential(
     urls: &[&str],
     env_var: &str,
 ) -> bool {
-    // Env-var check is synchronous and instant.
-    if std::env::var(env_var).is_ok() {
+    // Env-var check is synchronous and instant. Use `!v.is_empty()` (not
+    // `.is_ok()`) to match `mcp_env_with_credentials`'s predicate — an empty
+    // env var (`FOO=`) is not a meaningful value and would cause the runtime
+    // to skip keychain injection, so the UI should not show it as "configured".
+    if std::env::var(env_var).map(|v| !v.is_empty()).unwrap_or(false) {
         return true;
     }
     // Check the session cache for keys written via the settings UI.
