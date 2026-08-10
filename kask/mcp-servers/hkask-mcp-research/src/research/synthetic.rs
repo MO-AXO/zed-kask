@@ -110,6 +110,19 @@ pub enum SyntheticError {
     MissingField(String),
 }
 
+impl From<SyntheticError> for hkask_mcp_server::server::McpToolError {
+    fn from(e: SyntheticError) -> Self {
+        use hkask_mcp_server::server::McpToolError;
+        match e {
+            SyntheticError::UnsupportedKind(_) | SyntheticError::InvalidSpec(_)
+            | SyntheticError::MissingField(_) => McpToolError::invalid_argument(e.to_string()),
+            SyntheticError::ExtractionFailed(_) => {
+                McpToolError::unavailable(e.to_string())
+            }
+        }
+    }
+}
+
 // ── Extraction entry point ─────────────────────────────────────────────────
 
 /// Extract items from a fetched page/API response.

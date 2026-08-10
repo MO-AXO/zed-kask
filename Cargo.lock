@@ -11261,6 +11261,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_neo",
  "settings",
+ "settings_content",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
