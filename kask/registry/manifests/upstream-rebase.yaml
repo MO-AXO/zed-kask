@@ -233,7 +233,7 @@ steps:
         .github/workflows/release.yml .github/workflows/release_nightly.yml .github/workflows/run_bundling.yml;
         rm -rf crates/zed/resources/flatpak crates/zed/resources/snap script/flatpak;
         bash kask/scripts/build/check-zed-isolation.sh
-      cwd: "{{ }}"
+      cwd: "."
       env:
         step_4_result: "{{ step_4_result }}"
         step_5_result: "{{ step_5_result }}"
