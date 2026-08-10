@@ -695,7 +695,7 @@ pub fn dispatch_compute(compute_ref: &str, input: &Value) -> Result<Value> {
                 .arg(command)
                 .current_dir(cwd)
                 .output()
-                .map_err(|e| TemplateError::Manifest(format!("shell.exec: {e}"))?);
+                .map_err(|e| TemplateError::Manifest(format!("shell.exec: {e}")))?;
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let exit_code = output.status.code().unwrap_or(-1);
