@@ -1,5 +1,5 @@
 {
-  description = "Zed is a minimal code editor crafted for speed and collaboration with humans and AI.";
+  description = "zed-kask — fork of the Zed code editor with hKask agent infrastructure";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

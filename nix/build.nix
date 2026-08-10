@@ -352,31 +352,16 @@ craneLib.buildPackage (
           runHook postInstall
         ''
       else
+        # zed-kask: installPhase is build-only (consumed by the devshell, not packaged).
+        # The installable zed-kask binary is produced by kask/scripts/build/install.sh.
+        # This derivation must not produce a binary named "zed", icons named "zed.png",
+        # or .desktop files claiming the upstream Zed app identity.
         ''
           runHook preInstall
 
           mkdir -p $out/bin $out/libexec
           cp $TARGET_DIR/zed $out/libexec/zed-editor
-          cp $TARGET_DIR/cli  $out/bin/zed
-          ln -s $out/bin/zed $out/bin/zeditor  # home-manager expects the CLI binary to be here
-
-
-          install -D "crates/zed/resources/app-icon-nightly@2x.png" \
-            "$out/share/icons/hicolor/1024x1024@2x/apps/zed.png"
-          install -D crates/zed/resources/app-icon-nightly.png \
-            $out/share/icons/hicolor/512x512/apps/zed.png
-
-          # TODO: icons should probably be named "zed-nightly"
-          (
-            export DO_STARTUP_NOTIFY="true"
-            export APP_CLI="zed"
-            export APP_ICON="zed"
-            export APP_NAME="Zed Nightly"
-            export APP_ARGS="%U"
-            mkdir -p "$out/share/applications"
-            ${lib.getExe envsubst} < "crates/zed/resources/zed.desktop.in" > "$out/share/applications/dev.zed.Zed-Nightly.desktop"
-            chmod +x "$out/share/applications/dev.zed.Zed-Nightly.desktop"
-          )
+          cp $TARGET_DIR/cli $out/bin/zed-kask
 
           runHook postInstall
         '';
@@ -387,12 +372,11 @@ craneLib.buildPackage (
     '';
 
     meta = {
-      description = "High-performance, multiplayer code editor from the creators of Atom and Tree-sitter";
-      homepage = "https://zed.dev";
-      changelog = "https://zed.dev/releases/preview";
+      description = "zed-kask — fork of the Zed code editor with hKask agent infrastructure";
+      homepage = "https://github.com/mdz-axo/zed-kask";
       license = lib.licenses.gpl3Only;
-      mainProgram = "zed";
-      platforms = lib.platforms.linux ++ lib.platforms.darwin;
+      mainProgram = "zed-kask";
+      platforms = lib.platforms.linux;
     };
   }
 )
