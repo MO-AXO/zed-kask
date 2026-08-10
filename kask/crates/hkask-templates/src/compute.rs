@@ -690,7 +690,7 @@ pub fn dispatch_compute(compute_ref: &str, input: &Value) -> Result<Value> {
                     TemplateError::Manifest("compute 'shell.exec': missing 'command' string".into())
                 })?;
             let cwd = input.get("cwd").and_then(|v| v.as_str()).unwrap_or(".");
-            let output = std::process::Command::new("sh")
+            let output = smol::process::Command::new("sh")
                 .arg("-c")
                 .arg(command)
                 .current_dir(cwd)

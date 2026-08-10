@@ -9935,6 +9935,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml_neo",
+ "smol",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
