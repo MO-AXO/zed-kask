@@ -274,7 +274,7 @@ mod tests {
             prop_assert!(
                 matches!(verdict, PolicyVerdict::Block(_)),
                 "Sink + untrusted must block for tool '{}', got {:?}",
-                tool_name, verdict
+                tool_name, verdict.clone()
             );
         }
 
@@ -287,10 +287,10 @@ mod tests {
         ) {
             let p = DefaultPolicy::default();
             let verdict = p.check(&tool_name, ToolTaint::Sink, false, 1);
-            prop_assert_eq!(
-                verdict, PolicyVerdict::Allow,
+            prop_assert!(
+                matches!(verdict, PolicyVerdict::Allow),
                 "Sink + trusted must allow for tool '{}', got {:?}",
-                tool_name, verdict
+                tool_name, verdict.clone()
             );
         }
 
@@ -303,10 +303,10 @@ mod tests {
         ) {
             let p = DefaultPolicy::default();
             let verdict = p.check(&tool_name, ToolTaint::Pure, has_untrusted, 1);
-            prop_assert_eq!(
-                verdict, PolicyVerdict::Allow,
+            prop_assert!(
+                matches!(verdict, PolicyVerdict::Allow),
                 "Pure must allow for tool '{}', got {:?}",
-                tool_name, verdict
+                tool_name, verdict.clone()
             );
         }
 
@@ -322,7 +322,7 @@ mod tests {
             prop_assert!(
                 matches!(verdict, PolicyVerdict::Log(_)),
                 "Source must log for tool '{}', got {:?}",
-                tool_name, verdict
+                tool_name, verdict.clone()
             );
         }
     }
