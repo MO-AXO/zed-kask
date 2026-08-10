@@ -354,8 +354,7 @@ craneLib.buildPackage (
       else
         # zed-kask: installPhase is build-only (consumed by the devshell, not packaged).
         # The installable zed-kask binary is produced by kask/scripts/build/install.sh.
-        # This derivation must not produce a binary named "zed", icons named "zed.png",
-        # or .desktop files claiming the upstream Zed app identity.
+        # This derivation must not produce upstream Zed artifacts (binary, icons, .desktop).
         ''
           runHook preInstall
 

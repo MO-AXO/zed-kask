@@ -7,8 +7,8 @@
       system,
       ...
     }:
+    :
     let
-      mkZed = import ../toolchain.nix { inherit inputs; };
     in
     {
     // lib.optionalAttrs (lib.hasSuffix "linux" system) {
