@@ -78,7 +78,6 @@ classDiagram
         +cancel_move(...)
         +dispatch_move(...)
         +cancel_dispatch(...)
-        +render_dispatch_status(cx)
     }
     class KanbanWidget {
         +board_name: String
@@ -91,6 +90,8 @@ classDiagram
         +expanded_descriptions: HashSet~String~
         +detail_open: Option~String~
         +new(body, cx) KanbanWidget
+        +render_dispatch_status(cx)
+        +evaluate_move(window, cx)
     }
     class create_kanban_widget {
         +create_kanban_widget(body, cx) Option~Entity~KanbanWidget~~
@@ -122,17 +123,19 @@ alphabetically (title-cased).
 
 **Move lifecycle (S9):** `KanbanMoveController` owns the dispatch state
 machine (`pending_move`, `dispatch_in_flight`, `dispatch_error`,
-`optimistic_move`). `KanbanWidget` delegates move lifecycle calls to it. The
-controller's `render_dispatch_status` renders the Confirm/Cancel/Evaluate
-banner and calls back into the widget's `evaluate_move` for the Evaluate path.
+`optimistic_move`). `KanbanWidget` delegates move lifecycle calls to it and
+renders the Confirm/Cancel/Evaluate banner via `render_dispatch_status`
+(reading controller state via accessors). The controller is a pure state
+machine — it does not render.
 
-**Card detail (B3):** `detail_open` holds the task id whose detail popover is
-open. The popover renders the full task (description, criteria, comments,
-verification, gas spend log) passively from the block body.
+**Card detail (B3):** `detail_open` holds the task id whose detail panel is
+open. The panel renders the full task (description, criteria, comments,
+verification, gas spend log) passively from the block body. Escape and the
+Close button close it; click-outside is not implemented (inline panel).
 
 <!-- DIAGRAM_ALIGNMENT
 id: DIAG-VIZ-KANBAN
 verified_against: crates/hkask-kanban-widget/src/block.rs; crates/hkask-kanban-widget/src/view.rs; crates/hkask-kanban-widget/src/move_controller.rs
-status: STALE
-note: Fields synced to B3 (TaskBody: comments/verification/gas_spend + CommentBody/VerificationBody/GasEntryBody), S8 (KanbanBlockBody: columns/ColumnBody + KanbanColumn: wip_limit), S9 (KanbanMoveController extracted; KanbanWidget: move_controller/detail_open/column_meta). Method bodies and render-tree relationships not re-verified.
+status: VERIFIED
+note: Fields and class structure verified against block.rs, view.rs, and move_controller.rs after S9 refactor (render_dispatch_status moved back to widget; controller is pure state machine). Method bodies not re-verified.
 -->

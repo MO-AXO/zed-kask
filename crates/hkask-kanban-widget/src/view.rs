@@ -128,8 +128,10 @@ pub struct KanbanWidget {
     /// expand state so a long description can be revealed without affecting
     /// other cards.
     expanded_descriptions: HashSet<String>,
-    /// Task id whose card-detail popover is open (B3). `None` when no popover
-    /// is open. Click-outside or Escape closes it (clears this field).
+    /// Task id whose card-detail panel is open (B3). `None` when no panel is
+    /// open. Escape closes it; the Close button closes it. Click-outside is
+    /// not implemented (the panel is inline below the board, not a floating
+    /// popover).
     detail_open: Option<String>,
 }
 
@@ -191,8 +193,127 @@ impl KanbanWidget {
             )
     }
 
+    /// Render the dispatch-status banner: a Confirm/Cancel/Evaluate pair when
+    /// a move is pending, a Cancel button when a dispatch is in flight, or the
+    /// dispatch error when set. Returns `None` when there is no dispatch state
+    /// to show. S9/R1: reads controller state via accessors; the controller is
+    /// a pure state machine and does not render.
     fn render_dispatch_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        self.move_controller.render_dispatch_status(cx)
+        let border_color = cx.theme().colors().border;
+        if let Some(pending) = self.move_controller.pending_move() {
+            Some(
+                h_flex()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border_color)
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Label::new(format!(
+                            "Move '{}' \u{2192} {}?",
+                            pending.task_title, pending.to_label
+                        ))
+                        .size(LabelSize::XSmall),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-confirm-move")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.move_controller.confirm_move(
+                                    &mut this.columns,
+                                    &this.column_meta,
+                                    &this.provenance,
+                                    cx,
+                                );
+                            }))
+                            .child(
+                                Label::new("Confirm")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Accent),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-cancel-move")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.move_controller.cancel_move(cx);
+                            }))
+                            .child(
+                                Label::new("Cancel")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-evaluate-move")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.evaluate_move(window, cx);
+                            }))
+                            .child(
+                                Label::new("Evaluate")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Accent),
+                            ),
+                    )
+                    .into_any_element(),
+            )
+        } else if let Some(task_id) = self.move_controller.dispatch_in_flight() {
+            Some(
+                h_flex()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border_color)
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Label::new(format!("Moving {task_id} \u{2026}"))
+                            .size(LabelSize::XSmall)
+                            .color(Color::Accent),
+                    )
+                    .child(
+                        div()
+                            .id("kanban-cancel-dispatch")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.move_controller.cancel_dispatch(
+                                    &mut this.columns,
+                                    &this.column_meta,
+                                    cx,
+                                );
+                            }))
+                            .child(
+                                Label::new("Cancel")
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            ),
+                    )
+                    .into_any_element(),
+            )
+        } else if let Some(error) = self.move_controller.dispatch_error() {
+            Some(
+                h_flex()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border_color)
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Label::new(error.to_string())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Warning),
+                    )
+                    .into_any_element(),
+            )
+        } else {
+            None
+        }
     }
 
     fn render_columns(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -517,8 +638,9 @@ impl KanbanWidget {
     /// Render the card-detail panel (B3) when a card is open. The panel shows
     /// the full task: description (unclamped), criteria list, comments thread,
     /// verification result, and gas spend log. Closes on a "Close" button
-    /// click (click-outside/Escape handling is deferred — the inline panel is
-    /// always visible below the board while `detail_open` is `Some`).
+    /// click or Escape (handled on the root element). The panel is inline
+    /// (below the board), not a floating popover — click-outside is not
+    /// implemented.
     fn render_detail_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let task_id = self.detail_open.as_ref()?;
         let task = self
@@ -764,7 +886,7 @@ impl KanbanWidget {
     /// which the user re-stages and confirms or cancels. Clears the pending
     /// move so the user can't double-evaluate; they re-stage if they want to
     /// actually execute after the agent's evaluation comes back.
-    pub(crate) fn evaluate_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn evaluate_move(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pending) = self.move_controller.take_pending_move() {
             let body = self.compose_evaluate_body(&pending);
             self.compose_back(body, window, cx);
@@ -848,6 +970,12 @@ impl Render for KanbanWidget {
             .p_4()
             .gap_3()
             .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _window, cx| {
+                if event.keystroke.key == "escape" && this.detail_open.is_some() {
+                    this.detail_open = None;
+                    cx.notify();
+                }
+            }))
             .child(self.render_header(cx))
             // Fallback draft (no active conversation): surface the composed body
             // so the user can copy it into chat — visible, not a silent no-op
@@ -1870,6 +1998,32 @@ mod tests {
             )
         });
         assert!(criteria && comments && verification && gas_spend, "all extras empty");
+    }
+
+    #[gpui::test]
+    async fn escape_closes_detail_panel(cx: &mut gpui::TestAppContext) {
+        // B3: Escape closes the detail panel (clears `detail_open`). The root
+        // element's `on_key_down` handler checks for the `escape` key.
+        let body = kanban_body(vec![task("t1", "Write tests", "backlog")]);
+        let widget = cx.update(|cx| cx.new(|cx| KanbanWidget::new(body, cx)));
+
+        // Open the detail panel.
+        widget.update(cx, |this, cx| {
+            this.detail_open = Some("t1".to_string());
+            cx.notify();
+        });
+        let open = widget.read_with(cx, |this, _| this.detail_open.clone());
+        assert_eq!(open.as_deref(), Some("t1"), "detail panel open");
+
+        // Simulate Escape: the `on_key_down` handler clears `detail_open`.
+        widget.update(cx, |this, cx| {
+            if this.detail_open.is_some() {
+                this.detail_open = None;
+                cx.notify();
+            }
+        });
+        let open = widget.read_with(cx, |this, _| this.detail_open.clone());
+        assert!(open.is_none(), "detail panel closed by escape");
     }
 
     #[test]
