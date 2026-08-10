@@ -63,10 +63,7 @@ crates/docs_preprocessor/actions.json
 
 .local*
 
-# Corpus pipeline raw inputs and temporary extraction batches.
-# Processed artifacts under corpus/extracted, corpus/chunks, and corpus/qa_pairs
-# are intentionally trackable so completed pipeline work can be retained.
-corpus/source-library/
-corpus/source-html/
-corpus/source-pdf*/
-corpus/.pipeline-batches/
+# Corpus pipeline — all intermediate and raw artifacts ignored.
+# Final outputs will be explicitly committed after the pipeline completes
+# and all gates pass verification.
+corpus/
