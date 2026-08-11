@@ -3214,6 +3214,22 @@ impl AcpThread {
         Ok(())
     }
 
+    /// Append a thinking trace chunk to a tool call's `thoughts` buffer.
+    /// Called from `ThreadEvent::ToolCallThinking` — the skill cascade
+    /// executor emits these so the user sees a live thinking trace during
+    /// long-running tool calls, not just a one-line title.
+    pub fn append_tool_call_thinking(
+        &mut self,
+        tool_call_id: &acp::ToolCallId,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((ix, call)) = self.tool_call_mut(tool_call_id) {
+            call.append_thinking(text, cx);
+            cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        }
+    }
+
     /// Updates a tool call if id matches an existing entry, otherwise inserts a new one.
     pub fn upsert_tool_call(
         &mut self,
