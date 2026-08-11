@@ -971,6 +971,25 @@ mod tests {
     }
 
     #[test]
+    fn fred_descriptor_shows_in_data_services_ui() {
+        // FRED must appear as a row in the Data Services settings screen so an
+        // operator can see/enter the key. `shows_in_ui()` gates on `ui_toggle`,
+        // so FRED carries `ui_toggle: Some("fred")` (mirroring `hf_token` and
+        // the other always-on-when-key-present services). Regressing to `None`
+        // silently hides FRED from the UI with no compile error — this test
+        // makes that a test-time failure.
+        let fred = DATA_SERVICES
+            .iter()
+            .find(|d| d.credential_key == "fred")
+            .expect("FRED descriptor present in DATA_SERVICES");
+        assert!(
+            fred.shows_in_ui(),
+            "FRED must show in the Data Services UI (ui_toggle = Some(\"fred\")); \
+             `None` hides it silently"
+        );
+    }
+
+    #[test]
     fn collect_env_keys_for_mirror_collects_data_service_keys() {
         let _guard = ENV_LOCK.lock().unwrap();
         // SAFETY: test-only env mutation, serialized by ENV_LOCK. Data

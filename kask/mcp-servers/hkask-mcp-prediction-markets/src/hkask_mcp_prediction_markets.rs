@@ -1904,4 +1904,44 @@ mod tests {
         assert!(symbols.contains(&"KXFED-DEC25-YES".to_string()));
         assert!(symbols.contains(&"KXFED-JAN26-YES".to_string()));
     }
+
+    #[test]
+    fn economic_data_tools_are_registered_in_router() {
+        // Pins `mod economic_data_tools;` in the lib root. The 15 economic-data
+        // and EQM tools were silently missing from the server when that module
+        // was an unwired orphan — `cargo check` passes on a submodule that no
+        // `mod` declaration references (the file is simply never compiled), so
+        // removing the `mod` line drops these tools with no compile error. This
+        // test makes the regression a test-time failure by asserting the tools
+        // are present in the combined router.
+        let names: Vec<String> = PredictionMarketsServer::combined_router()
+            .into_iter()
+            .map(|route| route.name().to_string())
+            .collect();
+        for expected in [
+            "fred_search_series",
+            "fred_get_observations",
+            "fred_get_series_info",
+            "fred_list_categories",
+            "fred_get_release",
+            "wb_search_indicators",
+            "wb_get_observations",
+            "wb_list_country",
+            "wb_list_topics",
+            "wb_get_indicator_info",
+            "dbnomics_search",
+            "dbnomics_list_providers",
+            "dbnomics_get_dataset",
+            "dbnomics_get_series",
+            "market_score_rationale",
+        ] {
+            assert!(
+                names.iter().any(|n| n.as_str() == expected),
+                "economic-data/EQM tool `{expected}` is not registered in the \
+                 server router — `mod economic_data_tools;` may be missing from \
+                 the lib root (an unwired orphan compiles no tools but cargo \
+                 check still passes)"
+            );
+        }
+    }
 }
