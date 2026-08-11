@@ -22,7 +22,7 @@ pub(crate) fn render_media_page(
     let tts_input = kask_string_input(
         "kask-media-tts-model",
         "TTS Model",
-        "fal.ai/Qwen3-TTS",
+        models::TTS_DEFAULT,
         tts_model,
         "media",
         "tts_model",
@@ -30,7 +30,7 @@ pub(crate) fn render_media_page(
     let stt_input = kask_string_input(
         "kask-media-stt-model",
         "STT Model",
-        "fal.ai/wizper",
+        models::STT_DEFAULT,
         stt_model,
         "media",
         "stt_model",
@@ -46,7 +46,7 @@ pub(crate) fn render_media_page(
     let image_gen_input = kask_string_input(
         "kask-media-image-gen-model",
         "Image Generation Model",
-        "fal.ai/flux-2",
+        models::IMAGE_GEN_DEFAULT,
         image_gen_model,
         "media",
         "image_gen_model",
@@ -80,7 +80,7 @@ pub(crate) fn render_media_page(
                 .gap_1()
                 .child(Label::new("TTS Model"))
                 .child(
-                    Label::new("Text-to-speech model override. Leave empty for default (FA/qwen-3-tts).")
+                    Label::new("Text-to-speech model override. Leave empty for default.")
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 )
@@ -92,7 +92,7 @@ pub(crate) fn render_media_page(
                 .gap_1()
                 .child(Label::new("STT Model"))
                 .child(
-                    Label::new("Speech-to-text model override. Leave empty for default (FA/wizper).")
+                    Label::new("Speech-to-text model override. Leave empty for default.")
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 )
@@ -116,7 +116,7 @@ pub(crate) fn render_media_page(
                 .gap_1()
                 .child(Label::new("Image Generation Model"))
                 .child(
-                    Label::new("Image generation model override. Leave empty for default (FA/flux-2).")
+                    Label::new("Image generation model override. Leave empty for default.")
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 )
