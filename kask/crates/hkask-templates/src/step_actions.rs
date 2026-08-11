@@ -560,12 +560,10 @@ impl StepMachine {
     /// not completion order.
     pub(crate) async fn execute_parallel(
         &mut self,
-        mapping: Option<serde_json::Value>,
-        step_id: crate::step_graph::StepId,
-        step_ordinal: u32,
+        node: &crate::step_graph::StepNode,
         infra: &Infra,
     ) -> Result<Effect> {
-        let mapping = mapping.ok_or_else(|| {
+        let mapping = node.input_mapping.as_deref().cloned().ok_or_else(|| {
             TemplateError::Manifest(format!(
                 "Step {step_ordinal} (action 'parallel') has no input_mapping — the branch \
                  list lives under input_mapping.branches.",
@@ -589,7 +587,6 @@ impl StepMachine {
             .get("join")
             .and_then(|v| v.as_str())
             .unwrap_or("list");
-        let step_ordinal = node.ordinal;
 
         // Shared gas (enforced during the wave); per-branch rJoule (settled after).
         let shared_gas = self.budget.gas_atomic();
@@ -699,7 +696,7 @@ impl StepMachine {
         self.budget.charge_rjoule(sum_rjoule);
 
         Ok(Effect::Stored {
-            step_id: node.id,
+            step_id,
             value: joined,
             taint: ToolTaint::Pure,
         })
