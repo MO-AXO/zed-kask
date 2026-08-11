@@ -349,14 +349,16 @@ pub static DATA_SERVICES: &[DataServiceDescriptor] = &[
     // MCP server via `ctx.credentials.get("HKASK_FRED_API_KEY")` for live
     // reference-level fetches. Optional (curated static fallback when absent),
     // but an operator who sets it in `.env` expects it to reach the server.
-    // Not shown in the Data Services UI (no toggle; set via `.env`).
+    // Shown in the Data Services UI as an always-on row (no enable toggle —
+    // enabled when the key is present, mirroring `hf_token`/`serpapi`); also
+    // autoloaded from `.env` into the keychain by `mirror_env_keys_to_keychain`.
     DataServiceDescriptor {
         env_var: "HKASK_FRED_API_KEY",
         credential_key: "fred",
         label: "FRED API Key",
         dashboard_url: "https://fred.stlouisfed.org/docs/api/api_key.html",
         kind: DataServiceKind::Secret,
-        ui_toggle: None,
+        ui_toggle: Some("fred"),
     },
 ];
 

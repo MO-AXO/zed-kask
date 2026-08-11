@@ -30,6 +30,7 @@ pub mod cmp;
 pub mod cmp_index_builder;
 pub mod cmp_portfolio;
 pub mod economic_data;
+mod economic_data_tools;
 pub mod economic_object;
 pub mod eqm;
 pub mod matcher;
