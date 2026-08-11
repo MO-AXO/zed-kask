@@ -18,10 +18,6 @@
 //!  10. Shares outstanding         key_metrics.weightedAverageShsOut or profile
 //!  11. Tax rate                   incomeTaxExpense / incomeBeforeTax
 
-use crate::fibo::{
-    CAPITAL_EXPENDITURE, DEPRECIATION_AND_AMORTIZATION, DISCOUNT_RATE, GROSS_PROFIT_MARGIN,
-    NET_WORKING_CAPITAL, REVENUE_GROWTH_RATE,
-};
 use crate::types::ProjectionAssumptionOverrides;
 use serde::{Deserialize, Serialize};
 
@@ -735,15 +731,15 @@ pub fn implied_growth(
 
 // ── Equity duration — extracted to `financial_model/equity_duration.rs`
 mod equity_duration;
-pub use equity_duration::{EquityDuration, equity_duration};
+pub use equity_duration::equity_duration;
 
 // ── Gap decomposition — extracted to `financial_model/gap_decomposition.rs`
 mod gap_decomposition;
-pub use gap_decomposition::{GapDecomposition, decompose_gap};
+pub use gap_decomposition::decompose_gap;
 
 // ── Sensitivity analysis — extracted to `financial_model/sensitivity.rs`
 mod sensitivity;
-pub use sensitivity::{SensitivityResult, sensitivity_analysis};
+pub use sensitivity::sensitivity_analysis;
 
 // ── Monte Carlo DCF — extracted to `financial_model/monte_carlo.rs`
 mod monte_carlo;
