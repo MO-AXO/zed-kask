@@ -14,6 +14,7 @@
 //! from reading files outside the base path (CWE-22).
 
 use crate::ports::{Result, TemplateError};
+use crate::step_context::StepContext;
 use hkask_types::NotFound;
 use minijinja::UndefinedBehavior;
 use serde_json::Value;
@@ -156,11 +157,7 @@ impl TemplateRenderer {
     /// replaces any prior "step" registration). This avoids rebuilding the
     /// Environment, re-registering filters, and re-setting the loader on every
     /// render.
-    pub fn render(
-        &self,
-        template_content: &str,
-        context: &HashMap<String, Value>,
-    ) -> Result<String> {
+    pub fn render(&self, template_content: &str, context: &StepContext) -> Result<String> {
         let mut env = self.env.lock().unwrap_or_else(|e| e.into_inner());
 
         // Register the per-render template under the synthetic name "step".
@@ -185,9 +182,9 @@ impl TemplateRenderer {
     /// This is the fast path for templates that only use `{{variable}}` placeholders
     /// — no `{% %}` logic. Used for `template_ref` and `mcp` field resolution
     /// before loading.
-    pub fn render_inline(template: &str, context: &HashMap<String, Value>) -> String {
+    pub fn render_inline(template: &str, context: &StepContext) -> String {
         let mut result = template.to_string();
-        for (key, value) in context {
+        for (key, value) in context.entries() {
             let placeholder = format!("{{{{{}}}}}", key);
             let replacement = match value {
                 Value::String(s) => s.clone(),
@@ -276,7 +273,7 @@ fn build_environment(base_path: &Path) -> minijinja::Environment<'static> {
 /// `template_base_path`.
 pub fn render_minijinja(
     template: &str,
-    context: &HashMap<String, Value>,
+    context: &StepContext,
     template_base_path: &Path,
 ) -> Result<String> {
     let renderer = TemplateRenderer::new(template_base_path.to_path_buf());
@@ -296,7 +293,7 @@ mod tests {
         std::fs::write(tmp.join("legit.j2"), "hello").unwrap();
 
         let malicious_template = r#"{% include "../../../etc/passwd" %}"#;
-        let ctx = HashMap::new();
+        let ctx = StepContext::new(HashMap::new());
         let result = render_minijinja(malicious_template, &ctx, &tmp);
         assert!(
             result.is_err(),
@@ -312,7 +309,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let malicious_template = r#"{% include "..\\..\\etc\\passwd" %}"#;
-        let ctx = HashMap::new();
+        let ctx = StepContext::new(HashMap::new());
         let result = render_minijinja(malicious_template, &ctx, &tmp);
         assert!(
             result.is_err(),
@@ -329,7 +326,7 @@ mod tests {
         std::fs::write(tmp.join("fragment.j2"), "world").unwrap();
 
         let template = r#"hello {% include "fragment.j2" %}"#;
-        let ctx = HashMap::new();
+        let ctx = StepContext::new(HashMap::new());
         let result = render_minijinja(template, &ctx, &tmp);
         assert!(
             result.is_ok(),
@@ -368,23 +365,25 @@ mod tests {
 
     #[test]
     fn render_inline_substitutes_string_values() {
-        let mut ctx = HashMap::new();
-        ctx.insert("name".to_string(), Value::String("world".to_string()));
+        let mut inputs = HashMap::new();
+        inputs.insert("name".to_string(), Value::String("world".to_string()));
+        let ctx = StepContext::new(inputs);
         let out = TemplateRenderer::render_inline("hello {{name}}", &ctx);
         assert_eq!(out, "hello world");
     }
 
     #[test]
     fn render_inline_substitutes_non_string_values() {
-        let mut ctx = HashMap::new();
-        ctx.insert("count".to_string(), serde_json::json!(42));
+        let mut inputs = HashMap::new();
+        inputs.insert("count".to_string(), serde_json::json!(42));
+        let ctx = StepContext::new(inputs);
         let out = TemplateRenderer::render_inline("count={{count}}", &ctx);
         assert_eq!(out, "count=42");
     }
 
     #[test]
     fn render_inline_leaves_unknown_keys_intact() {
-        let ctx = HashMap::new();
+        let ctx = StepContext::new(HashMap::new());
         let out = TemplateRenderer::render_inline("hello {{missing}}", &ctx);
         assert_eq!(out, "hello {{missing}}");
     }
