@@ -285,7 +285,11 @@ verified with `cargo check` and the affected test suites. Status per finding:
 | 12 | resolved | the `&body[..500]` byte-slice sat in `vision_infer`, which was deleted as dead surface (its only callers were the deleted vision methods); `sanitize_error_body` remains the canonical char-boundary-safe truncation helper |
 | 13 | fixed | `consolidation_candidate_count` now `tracing::warn!`s on `Err` |
 | 14 | fixed | `find_existing_by_eav` propagates DB error with `warn!` (no silent duplicate h_mem seed) |
-| 15–25 | fixed | dead memory surface deleted (`compute_centroid`, `CentroidResult`, `MethodSignals`, `DeclaredMethod`/`MethodThresholds`, `tag_entities`, `tag_count`, `extract_keywords`/`keyword_overlap_score` + stale doc, etc.); `MemoryStoreError::NoEmbeddingsForCentroid` variant removed and its two downstream match arms (`hkask-mcp-server validation.rs`, `hkask-mcp-condenser`) updated |
+| 15,16 | **INVALID (restored)** | `compute_centroid`/`CentroidResult` are used by `hkask-mcp-corpus/src/corpus/embed/service.rs`; the deletion's grep scope missed `kask/mcp-servers/`. Restored. |
+| 17,18,19 | fixed | `MemoryConsolidator::consolidation_candidate_count`/`semantic_low_confidence_count`/`semantic_h_mem_count` deleted — verified no `kask/mcp-servers/` callers |
+| 20–23 | **INVALID (restored)** | `compute_method_signals`, `MethodSignals`, `DeclaredMethod`/`MethodThresholds`/`DeclaredMethod::matches`, `tag_entities` are used by `hkask-mcp-corpus` (`corpus/embed/service.rs`, `passage.rs`, `discover/llm.rs`, `config.rs`, `types.rs`). The audit's claim that corpus "disclaims use" was true only of `corpus/tagging/ops.rs`, not the embed/discover services. `salience.rs` restored to original; all 186 `hkask-mcp-corpus` tests pass. |
+| 24,25 | restored (dead pub fns retained) | `EntityTags::tag_count`, `extract_keywords`, `keyword_overlap_score` have no `kask/mcp-servers/` callers and appear genuinely dead, but were restored with `salience.rs` to avoid further scope risk; their stale doc comments (claiming `MemoryService::recall_episodic`/`memory_recall` callers) remain — a separate doc-cleanup. |
+| NoEmbeddingsForCentroid | restored | the cascade removal of this `MemoryStoreError` variant (and its two downstream match arms) was wrong — `compute_centroid` constructs it; restored along with #15. |
 | 26 | not fixed | Hypothesis-tier (perf, needs benchmark) — left untouched |
 | 27,28 | fixed | `persona_to_anchor` + `CondenserEngine::classify` (advertised `condenser_classify` MCP tool that doesn't exist) deleted |
 | 29 | not fixed | Hypothesis-tier — left untouched |
@@ -338,3 +342,25 @@ erroneous edit to `provider.rs` (removing the same live variants) and reported
 its `cargo check` as clean; this was caught only by an independent
 `cargo check -p hkask-mcp-server --tests`. Lesson: sub-agent "check clean"
 claims were independently re-verified.
+
+## 9. Process finding — dead-surface grep scope must include `kask/mcp-servers/`
+
+Two invalid deletion clusters (#15/#16 and #20–#23) shared one root cause: the
+should-fix sub-agent's caller-grep was scoped to `kask/crates/` + `crates/`, which
+**excludes `kask/mcp-servers/`** — the 13 MCP server crates that are the primary
+consumers of the `hkask-memory` and `hkask-inference` public APIs. `hkask-mcp-corpus`
+alone uses `compute_centroid`, `CentroidResult`, `NoEmbeddingsForCentroid`,
+`compute_method_signals`, `tag_entities`, `MethodSignals`, `DeclaredMethod`, and
+`MethodThresholds`. The audit's own grill-me lens missed this for the same reason
+(its dead-surface verification grepped the same two trees).
+
+**Correct grep scope for kask dead-surface claims:** `kask/crates/`, `crates/`,
+AND `kask/mcp-servers/` (plus `kask/docs/` and `tasks/` for doc references). A
+`pub` item with zero callers in `kask/crates/`+`crates/` but a caller in
+`kask/mcp-servers/` is live, not dead. This is a candidate `.rules` addition
+(proposed, not edited inline): *"Dead-surface grep scope must include
+`kask/mcp-servers/` — the MCP server crates are the primary consumers of the
+`hkask-*` public APIs and are outside the `kask/crates/`+`crates/` trees."*
+
+The provider.rs break (§8) was a separate concurrent-editor issue, not this scope
+gap.
