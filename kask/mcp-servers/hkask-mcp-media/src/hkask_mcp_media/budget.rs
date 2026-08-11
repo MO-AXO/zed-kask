@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use hkask_mcp_server::server::McpToolError;
+
 /// Parse a `f64` from an env var, falling back to `default` on absence,
 /// parse failure, or a non-finite/negative value. Used for budget config
 /// resolved once at startup (not per call) so the gate is deterministic and
@@ -155,7 +156,7 @@ fn estimate_rjoule(
 /// `HKASK_MEDIA_RJOULE_ALERT_THRESHOLD`. This is the enforcement point for the
 /// rJoule gate; `MediaServer::charge_budget` is a thin delegate so the gate can
 /// be tested without constructing a full server.
-async fn charge_budget_gate(
+pub(super) async fn charge_budget_gate(
     budget: &MediaBudget,
     tool: &str,
     params: &hkask_types::MediaGenerateParams,
@@ -215,7 +216,6 @@ async fn charge_budget_gate(
     Ok(())
 }
 
-
 /// Construct the rJoule budget configuration from env vars, resolved once at
 /// startup so the gate is deterministic.
 ///
@@ -227,7 +227,7 @@ async fn charge_budget_gate(
 /// upstream at `McpRuntime::invoke` + `CyberneticsLoop`, and the media server
 /// never charges gas itself, so a gas cap here would be dead config (the
 /// "Advertised invariants need enforcement points" trap).
-fn build_media_budget() -> MediaBudget {
+pub(super) fn build_media_budget() -> MediaBudget {
     let unit_costs = UnitCosts::from_env();
     let alert_threshold = env_f64("HKASK_MEDIA_RJOULE_ALERT_THRESHOLD", 0.8).clamp(0.0, 1.0);
     match std::env::var("HKASK_MEDIA_RJOULE_CAP") {
@@ -269,7 +269,6 @@ fn build_media_budget() -> MediaBudget {
         },
     }
 }
-
 
 #[cfg(test)]
 mod estimate_rjoule_tests {
@@ -422,7 +421,6 @@ mod estimate_rjoule_tests {
         assert!((est - 0.30).abs() < 1e-9);
     }
 }
-
 
 #[cfg(test)]
 mod charge_budget_gate_tests {
