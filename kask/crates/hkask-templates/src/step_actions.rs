@@ -9,10 +9,10 @@
 
 use crate::ports::{Result, TemplateError};
 use crate::step_context::{ContextLookup, StepContext};
-use crate::step_graph::{ExitKind, StepId, StepGraph};
+use crate::step_graph::{ExitKind, StepId};
 use crate::step_machine::{CascadeOutcome, Infra, StepMachine};
-use futures_util::stream;
 use futures_util::StreamExt;
+use futures_util::stream;
 use hkask_capability::ToolPort;
 use hkask_capability::tool_taint::ToolTaint;
 use hkask_types::ChatToolDefinition;
@@ -611,23 +611,18 @@ impl StepMachine {
                         step_ordinal, branch_id,
                     ))
                 })?;
-                let template_ref =
-                    crate::template_renderer::TemplateRenderer::render_inline(
-                        &template_ref,
-                        &context_template,
-                    );
+                let template_ref = crate::template_renderer::TemplateRenderer::render_inline(
+                    &template_ref,
+                    &context_template,
+                );
                 let manifest_yaml = if let Ok(content) = infra
                     .template_renderer
                     .load_from_disk(&template_ref, step_ordinal)
                 {
                     content
-                } else if let Some(content) =
-                    crate::template_yaml_file(&template_ref)
-                {
+                } else if let Some(content) = crate::template_yaml_file(&template_ref) {
                     content.to_string()
-                } else if let Some(content) =
-                    crate::template_file(&template_ref)
-                {
+                } else if let Some(content) = crate::template_file(&template_ref) {
                     content.to_string()
                 } else {
                     return Err(TemplateError::NotFound(hkask_types::NotFound {
@@ -639,10 +634,7 @@ impl StepMachine {
                         ),
                     }));
                 };
-                let sub_manifest =
-                    crate::manifest_loader::load_manifest_from_yaml(
-                        &manifest_yaml,
-                    )
+                let sub_manifest = crate::manifest_loader::load_manifest_from_yaml(&manifest_yaml)
                     .map_err(|e| {
                         TemplateError::Manifest(format!(
                             "Step {} parallel branch {}: failed to parse \
@@ -650,16 +642,13 @@ impl StepMachine {
                             step_ordinal, branch_id, template_ref, e,
                         ))
                     })?;
-                let sub_budget =
-                    crate::budget::BudgetTracker::from_remaining_shared(
-                        Arc::clone(&shared_gas),
-                        gas_cap,
-                        rjoule_remaining,
-                    );
+                let sub_budget = crate::budget::BudgetTracker::from_remaining_shared(
+                    Arc::clone(&shared_gas),
+                    gas_cap,
+                    rjoule_remaining,
+                );
                 let sub_convergence =
-                    crate::convergence::ConvergenceTracker::new(
-                        &sub_manifest.convergence,
-                    );
+                    crate::convergence::ConvergenceTracker::new(&sub_manifest.convergence);
                 let sub_graph = crate::step_graph::StepGraph::new(
                     &sub_manifest.steps,
                     sub_manifest.convergence.max_iterations,
@@ -671,24 +660,20 @@ impl StepMachine {
                     sub_convergence,
                 );
                 let outcome = sub_machine.run(infra).await?;
-                Ok::<(usize, CascadeOutcome), TemplateError>((
-                    branch_id,
-                    outcome,
-                ))
+                Ok::<(usize, CascadeOutcome), TemplateError>((branch_id, outcome))
             }
         });
 
         // Bounded concurrency: poll up to `concurrency_cap` branch futures at
         // once. `buffer_unordered` yields in completion order; we sort by
         // `branch_id` below for a deterministic join.
-        let outcomes: Vec<(usize, CascadeOutcome)> =
-            stream::iter(branch_futs)
-                .buffer_unordered(concurrency_cap)
-                .collect::<Vec<Result<(usize, CascadeOutcome), TemplateError>>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>, _>()
-                .map_err(|e| e)?;
+        let outcomes: Vec<(usize, CascadeOutcome)> = stream::iter(branch_futs)
+            .buffer_unordered(concurrency_cap)
+            .collect::<Vec<Result<(usize, CascadeOutcome)>>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .map_err(|e| e)?;
         let mut ordered = outcomes;
         ordered.sort_by_key(|(id, _)| *id);
 
