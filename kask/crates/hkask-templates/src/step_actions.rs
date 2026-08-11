@@ -599,10 +599,13 @@ impl StepMachine {
 
         let branch_futs = branches.iter().enumerate().map(|(branch_id, spec)| {
             let shared_gas = Arc::clone(&shared_gas);
+            let infra = infra.clone();
+            let context = context_template.clone();
             let template_ref = spec
                 .get("template_ref")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            async move {
             // Each branch gets its own clone — `async move` captures by value,
             // and `.map`'s `FnMut` closure must be callable once per branch.
             let context_template = context_template.clone();

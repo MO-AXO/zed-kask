@@ -7,8 +7,6 @@
 //! et al. (arXiv:2410.21228).
 
 use super::{ValidationFinding, ValidationSeverity};
-
-use crate::huggingface::CompletionManifest;
 pub fn validate_runtime_metrics(
     manifest: &crate::huggingface::CompletionManifest,
 ) -> Vec<ValidationFinding> {
@@ -128,4 +126,3 @@ pub fn validate_runtime_metrics(
 
     findings
 }
-
