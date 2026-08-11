@@ -83,7 +83,10 @@ hkask_mcp_server::mcp_server!(
 
 impl PredictionMarketsServer {
     fn combined_router() -> ToolRouter<Self> {
-        Self::prediction_markets_router()
+        // Merge the core tools with the economic-data/EQM tools extracted into
+        // `economic_data_tools.rs` (its own `#[tool_router]` block). A missing
+        // merge silently drops those 15 tools from the MCP tool list.
+        Self::prediction_markets_router() + Self::economic_data_tools_router()
     }
 
     /// Registry-convention ontology anchor (mirrors scenarios server).
@@ -1907,13 +1910,15 @@ mod tests {
 
     #[test]
     fn economic_data_tools_are_registered_in_router() {
-        // Pins `mod economic_data_tools;` in the lib root. The 15 economic-data
-        // and EQM tools were silently missing from the server when that module
-        // was an unwired orphan — `cargo check` passes on a submodule that no
-        // `mod` declaration references (the file is simply never compiled), so
-        // removing the `mod` line drops these tools with no compile error. This
-        // test makes the regression a test-time failure by asserting the tools
-        // are present in the combined router.
+        // Pins the economic-data/EQM tools reachability end-to-end: the `mod
+        // economic_data_tools;` declaration in the lib root AND the
+        // `#[tool_router]` on that module's impl block AND the merge in
+        // `combined_router()`. Any one missing silently drops these 15 tools
+        // from the MCP tool list — `cargo check` passes on an unwired orphan
+        // (the file is simply never compiled), and a `#[tool]` impl block
+        // without `#[tool_router]` compiles but registers nothing. This test
+        // makes the regression a test-time failure by asserting the tools are
+        // present in the combined router.
         let names: Vec<String> = PredictionMarketsServer::combined_router()
             .into_iter()
             .map(|route| route.name().to_string())
@@ -1926,7 +1931,7 @@ mod tests {
             "fred_get_release",
             "wb_search_indicators",
             "wb_get_observations",
-            "wb_list_country",
+            "wb_list_countries",
             "wb_list_topics",
             "wb_get_indicator_info",
             "dbnomics_search",
