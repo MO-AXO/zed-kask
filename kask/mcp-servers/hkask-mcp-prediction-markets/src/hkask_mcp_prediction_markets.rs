@@ -1943,9 +1943,11 @@ mod tests {
             assert!(
                 names.iter().any(|n| n.as_str() == expected),
                 "economic-data/EQM tool `{expected}` is not registered in the \
-                 server router — `mod economic_data_tools;` may be missing from \
-                 the lib root (an unwired orphan compiles no tools but cargo \
-                 check still passes)"
+                 server router — check three wiring points: (1) `mod \
+                 economic_data_tools;` in the lib root, (2) `#[tool_router]` on \
+                 the impl block in `economic_data_tools.rs`, (3) the merge in \
+                 `combined_router()`. An unwired orphan or a `#[tool]` impl \
+                 block without `#[tool_router]` compiles but registers nothing."
             );
         }
     }
