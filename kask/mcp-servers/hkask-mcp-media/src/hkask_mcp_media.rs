@@ -10,17 +10,17 @@
 //! - Voice: voice_design, generate_speech
 //! - Audio: transcribe, transcribe_bundle, audio_capture, record_and_transcribe
 
+mod budget;
 mod error;
 mod gallery;
 pub mod media_block;
 pub mod omc;
 mod templates;
 pub mod video;
-mod budget;
 
-pub use error::{MediaError, map_gallery_store_error, map_image_open_error, map_media_error};
 pub use budget::{MediaBudget, UnitCosts};
 use budget::{build_media_budget, charge_budget_gate};
+pub use error::{MediaError, map_gallery_store_error, map_image_open_error, map_media_error};
 
 // Bridge crates: shared ontological vocabulary (P5.4 dual-axis framework)
 

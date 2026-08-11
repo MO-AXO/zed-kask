@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use super::{HistoricalSnapshot, ProjectionAssumptions, ProjectedModel, project_model};
+use super::{HistoricalSnapshot, ProjectedModel, ProjectionAssumptions, project_model};
 
 /// Result of decomposing a forecast-vs-actual return gap.
 #[derive(Debug, Clone, Serialize)]
