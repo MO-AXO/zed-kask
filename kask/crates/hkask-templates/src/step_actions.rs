@@ -8,7 +8,7 @@
 //! `InferencePort`). Everything else is deterministic.
 
 use crate::ports::{Result, TemplateError};
-use crate::step_graph::{ENTRY, ExitKind, StepId};
+use crate::step_graph::{ExitKind, StepId};
 use crate::step_machine::{Infra, StepMachine};
 use hkask_capability::ToolPort;
 use hkask_capability::tool_taint::ToolTaint;

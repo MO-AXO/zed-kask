@@ -145,6 +145,13 @@ pub struct BundleManifest {
     pub enforce_inputs: Option<bool>,
     #[serde(default)]
     pub principles: Option<serde_json::Value>,
+    /// Maximum number of steps to execute concurrently within a single PDCA
+    /// iteration. Steps with no data dependency on each other (determined by
+    /// `input_mapping` references to `step_N_result` keys) are run in parallel
+    /// via `FuturesUnordered`. Default 32, max 128. Set to 1 for strictly
+    /// serial execution (back-compat).
+    #[serde(default = "default_concurrency")]
+    pub concurrency: u32,
 }
 
 impl BundleManifest {

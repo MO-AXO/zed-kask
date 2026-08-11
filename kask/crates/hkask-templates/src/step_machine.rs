@@ -196,7 +196,6 @@ impl StepMachine {
                     self.finalize(kind, reason);
                     break kind;
                 }
-                PassResult::Error(e) => return Err(e),
             }
         };
 
