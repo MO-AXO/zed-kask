@@ -14,9 +14,8 @@
 
 use hkask_inference::scoring::{ProviderScore, ScoreWeights};
 use hkask_inference::{MediaOp, RouterModelEntry};
-use hkask_test_harness::{OracleVerdict, arb_json_value, oracle_invariant, oracle_reference};
+use hkask_test_harness::{OracleVerdict, oracle_invariant, oracle_reference};
 use proptest::prelude::*;
-use serde_json::Value;
 use std::str::FromStr;
 
 // ── MediaOp parse/serialize round-trip ────────────────────────────────────

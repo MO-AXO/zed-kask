@@ -101,15 +101,6 @@ fn score_provider(id: &str, op: MediaOp) -> ProviderScore {
             latency: 0.75,
             continuity: 0.90,
         },
-        ("atlascloud", _) => ProviderScore {
-            task_fit: 0.75,
-            quality: 0.75,
-            control: 0.60,
-            reliability: 0.70,
-            cost: 0.65,
-            latency: 0.60,
-            continuity: 0.65,
-        },
         _ => ProviderScore::default(),
     }
 }
@@ -230,11 +221,11 @@ mod tests {
         let router = router_with_both();
         let (chosen, scores) = select_scored(
             &router.registry,
-            MediaOp::RemoveBackground,
+            MediaOp::GenerateSpeech,
             &MediaGenerateParams::default(),
         )
         .expect("candidates exist");
-        // Both providers support RemoveBackground → both appear in scores.
+        // GenerateSpeech is served by both DeepInfra and AtlasCloud → both appear in scores.
         assert_eq!(scores.len(), 2, "both candidates scored");
         // The chosen provider's score must be the maximum.
         let max = scores
