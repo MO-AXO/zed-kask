@@ -243,7 +243,7 @@ pub fn marginalize(parent_marginals: &[f64], conditionals: &[f64]) -> f64 {
 #[must_use = "tree-combined probability should be used as the stage-4 prior"]
 pub fn combine_tree_probabilities(
     nodes: &[TreeNode],
-    topological_order: &[str],
+    topological_order: &[&str],
     outcome_id: &str,
 ) -> Result<f64, ForecastError> {
     if topological_order.is_empty() {
@@ -1350,33 +1350,54 @@ mod tests {
 
     #[test]
     fn tree_correlated_parents_via_conditionals_not_independence() {
-        // The whole point of the tree: when a and b are positively correlated,
-        // the conditional table encodes the correlation. Here a and b share a
-        // common cause modeled as a parent c, so the tree is two-level and the
-        // joint is exact (not the independence product). c=0.5; given c, a and
-        // b are independent with P(a|c)=0.9, P(a|¬c)=0.1; same for b. The
-        // outcome is the AND-gate over a and b.
+        // The whole point of the tree: when a and b share a common cause c,
+        // they are correlated. `marginalize` assumes its parents are
+        // independent (it multiplies parent marginals), so a node that depends
+        // directly on a and b recovers only the independence heuristic
+        // P(a∧b) = P(a)·P(b) = 0.25 — the correlation is lost because the joint
+        // P(a,b) is not carried up the tree, only the marginals.
         //
-        // P(a) = 0.5·0.9 + 0.5·0.1 = 0.5; same for b.
-        // Under the independence heuristic P(a∧b) = 0.25.
-        // Exact: P(a∧b) = P(c)·P(a,b|c) + P(¬c)·P(a∧b|¬c)
-        //       = 0.5·0.9² + 0.5·0.1² = 0.405 + 0.005 = 0.41.
-        // The tree recovers 0.41, not the heuristic's 0.25.
-        let nodes = vec![
+        // The correct decomposition makes the common cause c the parent, with
+        // the conditional table encoding the AND of the conditionally-
+        // independent children: P(and|¬c) = P(a|¬c)·P(b|¬c) = 0.01;
+        // P(and|c) = 0.9·0.9 = 0.81. P(and) = 0.5·0.01 + 0.5·0.81 = 0.41.
+        //
+        // This is the "tree of branching events" the methodology prescribes:
+        // the branching happens at the common cause, children are conditionally
+        // independent given it, and the AND marginalizes exactly through it.
+        let common_cause = vec![
+            root("c", 0.5),
+            dependent("a", vec![dep(&["c"], &[0.1, 0.9])]),
+            dependent("b", vec![dep(&["c"], &[0.1, 0.9])]),
+            dependent("and_gate", vec![dep(&["c"], &[0.01, 0.81])]),
+        ];
+        let p_correct =
+            combine_tree_probabilities(&common_cause, &["c", "a", "b", "and_gate"], "and_gate")
+                .unwrap();
+        assert!(
+            (p_correct - 0.41).abs() < 1e-9,
+            "correct tree = 0.41, got {p_correct}"
+        );
+
+        // Contrast: the naive tree (and_gate depends on the correlated a, b)
+        // recovers only the independence heuristic 0.25 — the correlation is
+        // lost because `marginalize` assumes parent independence. This is the
+        // failure mode the tree-form decomposition exists to prevent.
+        let naive = vec![
             root("c", 0.5),
             dependent("a", vec![dep(&["c"], &[0.1, 0.9])]),
             dependent("b", vec![dep(&["c"], &[0.1, 0.9])]),
             dependent("and_gate", vec![dep(&["a", "b"], &[0.0, 0.0, 0.0, 1.0])]),
         ];
-        let p =
-            combine_tree_probabilities(&nodes, &["c", "a", "b", "and_gate"], "and_gate").unwrap();
+        let p_naive =
+            combine_tree_probabilities(&naive, &["c", "a", "b", "and_gate"], "and_gate").unwrap();
         assert!(
-            (p - 0.41).abs() < 1e-9,
-            "exact correlated AND = 0.41, got {p}"
+            (p_naive - 0.25).abs() < 1e-9,
+            "naive tree = independence heuristic 0.25, got {p_naive}"
         );
         assert!(
-            (p - 0.25).abs() > 0.01,
-            "must differ from independence heuristic 0.25"
+            (p_correct - p_naive).abs() > 0.01,
+            "correct and naive must differ"
         );
     }
 
