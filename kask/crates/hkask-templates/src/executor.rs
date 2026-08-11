@@ -2102,7 +2102,7 @@ fn extract_final_step_entry(context: &HashMap<String, Value>) -> Option<(String,
 ///
 /// Returns `Cow::Borrowed` when no stripping is needed (the common path),
 /// `Cow::Owned` when tags were removed — avoiding a clone on clean output.
-fn normalize_model_output(value: &Value) -> Cow<'_, Value> {
+pub(crate) fn normalize_model_output(value: &Value) -> Cow<'_, Value> {
     let Value::String(s) = value else {
         return Cow::Borrowed(value);
     };
@@ -2134,7 +2134,7 @@ fn normalize_model_output(value: &Value) -> Cow<'_, Value> {
 ///
 /// Attempts to extract JSON from the response text, handling cases where
 /// the model wraps the JSON in markdown code fences.
-fn parse_json_response(text: &str, step_ordinal: u32) -> Result<Value> {
+pub(crate) fn parse_json_response(text: &str, step_ordinal: u32) -> Result<Value> {
     if let Ok(v) = serde_json::from_str(text) {
         return Ok(v);
     }
