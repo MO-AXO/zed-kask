@@ -32,7 +32,6 @@
 //! rsLoRA (arXiv:2312.03732), DoRA (arXiv:2402.09353), PiSSA (arXiv:2404.02948),
 //! Razin et al. (arXiv:2410.21228), PEFT v0.19.0, TRL v1.8.0.
 
-use crate::dataset::DatasetFormat;
 use crate::providers::types::{
     LoraParams, QuantizationParams, TrainingHarnessId, TrainingParams, TrlTrainer,
 };
@@ -537,8 +536,7 @@ pub fn has_refusals(findings: &[ValidationFinding]) -> bool {
 
 // ── Dataset-format validation (G-D0) — extracted to `lora_validation/dataset_format.rs`
 mod dataset_format;
-pub use dataset_format::{validate_dataset_format, DatasetFormatResult, DatasetFormatVerdict};
-
+pub use dataset_format::{DatasetFormatResult, DatasetFormatVerdict, validate_dataset_format};
 
 /// G-R1: Runtime alert gate — validates runtime metrics for training instability.
 ///

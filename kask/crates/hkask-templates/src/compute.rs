@@ -1067,6 +1067,55 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_combine_tree_probabilities_and_gate() {
+        // AND-gate over two independent roots: P(a)=0.8, P(b)=0.5 → P(a∧b)=0.4.
+        let input = serde_json::json!({
+            "nodes": [
+                {"id": "a", "marginal_probability": 0.8},
+                {"id": "b", "marginal_probability": 0.5},
+                {"id": "outcome", "depends_on": [{"parent_ids": ["a", "b"], "conditionals": [0.0, 0.0, 0.0, 1.0]}]}
+            ],
+            "topological_order": ["a", "b", "outcome"],
+            "outcome_id": "outcome"
+        });
+        let result = dispatch_compute("combine_tree_probabilities", &input).unwrap();
+        let combined = result
+            .get("tree_combined_probability")
+            .and_then(|v| v.as_f64())
+            .unwrap();
+        assert!(
+            (combined - 0.4).abs() < 1e-9,
+            "AND-gate = 0.4, got {combined}"
+        );
+    }
+
+    #[test]
+    fn dispatch_combine_tree_probabilities_missing_nodes_errors() {
+        let input = serde_json::json!({
+            "topological_order": ["a"],
+            "outcome_id": "a"
+        });
+        let err = dispatch_compute("combine_tree_probabilities", &input).unwrap_err();
+        assert!(err.to_string().contains("missing 'nodes' array"));
+    }
+
+    #[test]
+    fn dispatch_combine_tree_probabilities_bad_tree_errors() {
+        // Wrong conditional length (3 entries for 2 parents, expected 4).
+        let input = serde_json::json!({
+            "nodes": [
+                {"id": "a", "marginal_probability": 0.5},
+                {"id": "b", "marginal_probability": 0.5},
+                {"id": "outcome", "depends_on": [{"parent_ids": ["a", "b"], "conditionals": [0.1, 0.2, 0.3]}]}
+            ],
+            "topological_order": ["a", "b", "outcome"],
+            "outcome_id": "outcome"
+        });
+        let err = dispatch_compute("combine_tree_probabilities", &input).unwrap_err();
+        assert!(err.to_string().contains("combine_tree_probabilities"));
+    }
+
+    #[test]
     fn dispatch_apply_calibration_adjustment() {
         let input = serde_json::json!({ "prior": 0.9, "overconfidence_bias": 0.3 });
         let result = dispatch_compute("apply_calibration_adjustment", &input).unwrap();
