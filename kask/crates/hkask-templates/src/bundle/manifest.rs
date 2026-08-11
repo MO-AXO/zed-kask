@@ -18,6 +18,16 @@ use super::config::{
 use hkask_types::SkillPolarity;
 use hkask_types::Visibility;
 
+/// Default concurrency for step execution within a PDCA iteration.
+const DEFAULT_CONCURRENCY: u32 = 32;
+
+pub(crate) fn default_concurrency() -> u32 {
+    DEFAULT_CONCURRENCY
+}
+
+/// Maximum allowed concurrency (safety cap).
+pub const MAX_CONCURRENCY: u32 = 128;
+
 /// A skill reference within a bundle
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]

@@ -117,6 +117,47 @@ fn extract_feedback_phase(template_ref: &str) -> Option<&'static str> {
     }
 }
 
+/// Structured cascade events for real-time UI feedback. These provide
+/// richer information than the `Fn(&str)` progress/title callbacks —
+/// iteration counts, convergence signals, step completions, and streaming
+/// chunks — so the UI can render a detailed execution trace.
+#[derive(Debug, Clone)]
+pub enum CascadeEvent {
+    /// A new PDCA iteration started.
+    IterationStart { iteration: u32, max_iterations: u32 },
+    /// A step started executing.
+    StepStart {
+        ordinal: u32,
+        action: String,
+        description: String,
+        step_index: usize,
+        total_steps: usize,
+    },
+    /// A streaming reasoning chunk from the LLM (thinking trace).
+    StepStream { ordinal: u32, chunk: String },
+    /// A step completed with a summary of its result.
+    StepComplete {
+        ordinal: u32,
+        result_summary: String,
+    },
+    /// A concurrent wave of steps started.
+    WaveStart {
+        step_count: usize,
+        ordinals: Vec<u32>,
+    },
+    /// Convergence check update — the signal value and distance to threshold.
+    ConvergenceUpdate {
+        signal: f64,
+        threshold: f64,
+        distance: f64,
+        iteration: u32,
+    },
+    /// The cascade converged.
+    Converged { iterations: u32, final_signal: f64 },
+    /// The cascade was aborted (error or escalation).
+    Aborted { reason: String },
+}
+
 /// Manifest executor — drives the select → populate → execute cascade.
 ///
 /// Created once per session (or per manifest invocation) and wired into the
@@ -177,6 +218,16 @@ pub struct ManifestExecutor {
     /// so the step label appears in the tool call header. When `None`, no
     /// title update is emitted.
     title: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+
+    /// Optional structured event callback for rich UI feedback.
+    ///
+    /// When set, the executor emits `CascadeEvent`s for iteration starts,
+    /// step starts/completions, streaming chunks, convergence updates, and
+    /// convergence/abort. This is the structured-progress channel — the
+    /// `progress` callback carries raw reasoning text, `title` carries the
+    /// step label, and `events` carries structured metadata. When `None`
+    /// (unit tests), no structured events are emitted.
+    events: Option<Arc<dyn Fn(CascadeEvent) + Send + Sync>>,
 }
 
 impl ManifestExecutor {
@@ -204,6 +255,7 @@ impl ManifestExecutor {
             terminal_check: None,
             progress: None,
             title: None,
+            events: None,
         }
     }
 
@@ -241,6 +293,102 @@ impl ManifestExecutor {
     pub fn with_title(mut self, title: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
         self.title = Some(title);
         self
+    }
+
+    /// Wire a structured event callback for rich UI feedback. The executor
+    /// emits `CascadeEvent`s for iteration starts, step starts/completions,
+    /// streaming chunks, convergence updates, and convergence/abort.
+    #[must_use]
+    pub fn with_events(mut self, events: Arc<dyn Fn(CascadeEvent) + Send + Sync>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    /// Create a shallow clone of the executor for concurrent step execution.
+    /// The `Arc` ports (inference, tools) are shared — no duplication. The
+    /// `taint_labels` mutex is shared. The `progress` and `title` callbacks
+    /// are shared. Only the `TemplateRenderer` is cloned (it's cheap — just
+    /// a path + cached minijinja environment). This is used by the concurrent
+    /// wave executor to run independent steps in parallel.
+    fn clone_for_concurrent(&self) -> ManifestExecutor {
+        ManifestExecutor {
+            inference: self.inference.clone(),
+            tools: self.tools.clone(),
+            default_params: self.default_params.clone(),
+            template_renderer: self.template_renderer.clone(),
+            runtime_policy: self.runtime_policy.clone(),
+            taint_labels: self.taint_labels.clone(),
+            terminal_check: self.terminal_check.clone(),
+            progress: self.progress.clone(),
+            title: self.title.clone(),
+            events: self.events.clone(),
+        }
+    }
+
+    /// Execute a single data step (select/populate/compute/execute/render/
+    /// flowdef) with a cloned context. Used by the concurrent wave executor —
+    /// each step in a wave gets its own context clone, runs independently,
+    /// and returns the result. The caller merges the result key back into
+    /// the shared context.
+    ///
+    /// Returns `(context, gas_used, rjoule_cost)` so the caller can charge
+    /// the budget after the step completes.
+    async fn execute_single_data_step(
+        &self,
+        step: &BundleManifestStep,
+        mut context: HashMap<String, Value>,
+        budget_snap: BudgetSnapshot,
+    ) -> Result<(HashMap<String, Value>, u32, Option<f64>)> {
+        // Create a per-task budget tracker from the snapshot so concurrent
+        // steps don't share mutable state. The caller merges consumption back.
+        let gas_cap_remaining = (budget_snap.gas_cap.saturating_sub(budget_snap.gas_used)) as u32;
+        let rjoule_cap_remaining = budget_snap.rjoule_cap - budget_snap.rjoule_used;
+        let mut task_budget =
+            BudgetTracker::from_remaining(gas_cap_remaining, rjoule_cap_remaining);
+        let rjoule_cost: Option<f64>;
+        match step.action.as_str() {
+            "select" => {
+                context = self.execute_select(step, context, &mut task_budget).await?;
+                rjoule_cost = task_budget.last_rjoule_cost();
+            }
+            "populate" => {
+                context = self.execute_populate(step, context).await?;
+                rjoule_cost = None;
+            }
+            "compute" => {
+                context = self.execute_compute(step, context).await?;
+                rjoule_cost = None;
+            }
+            "execute" | "feedback" | "validate" | "retrieve" => {
+                self.execute_tool_invoke(step, &mut context).await?;
+                rjoule_cost = None;
+            }
+            "render" => {
+                context = self.execute_render(step, context).await?;
+                rjoule_cost = None;
+            }
+            "flowdef" => {
+                let (new_context, _gas, _rjoule) = self
+                    .execute_flowdef(
+                        step,
+                        context,
+                        gas_cap_remaining as u64,
+                        rjoule_cap_remaining,
+                        0,
+                    )
+                    .await?;
+                context = new_context;
+                rjoule_cost = None;
+            }
+            _ => {
+                return Err(TemplateError::Manifest(format!(
+                    "Concurrent execution attempted on non-data step: {}",
+                    step.action
+                )));
+            }
+        }
+        let gas_used = task_budget.snapshot().gas_used as u32;
+        Ok((context, gas_used, rjoule_cost))
     }
 
     /// Set the template base path for resolving template_ref values.
@@ -545,6 +693,91 @@ impl ManifestExecutor {
     /// declaring `max_iterations: 10` that failed to converge errored at
     /// iteration 8 with "Matryoshka depth limit exceeded" instead of exiting
     /// `MaxedOut` at iteration 10.
+
+    /// Extract the set of `step_N_result` keys referenced in a step's
+    /// `input_mapping`. Returns the ordinals of the steps whose results
+    /// this step depends on. A step with no `input_mapping` or whose
+    /// mapping references no `step_N_result` keys has no dependencies.
+    fn step_dependencies(&self, step: &BundleManifestStep) -> std::collections::HashSet<u32> {
+        let mut deps = std::collections::HashSet::new();
+        if let Some(ref mapping) = step.input_mapping {
+            for key in self.extract_referenced_keys(mapping) {
+                // Keys like "step_3_result" → dependency on ordinal 3.
+                if let Some(rest) = key.strip_prefix("step_") {
+                    if let Some(num_str) = rest.strip_suffix("_result") {
+                        if let Ok(ordinal) = num_str.parse::<u32>() {
+                            deps.insert(ordinal);
+                        }
+                    }
+                }
+            }
+        }
+        deps
+    }
+
+    /// Determine whether a step is a "data step" that can potentially run
+    /// concurrently — i.e. it produces a result but doesn't affect control
+    /// flow. Control-flow actions (abort, escalate, loop, choice) and steps
+    /// with `branching` or `condition` cannot run concurrently because they
+    /// depend on or affect the execution sequence.
+    fn is_concurrent_capable(step: &BundleManifestStep) -> bool {
+        let is_data_action = matches!(
+            step.action.as_str(),
+            "select"
+                | "populate"
+                | "compute"
+                | "execute"
+                | "feedback"
+                | "validate"
+                | "retrieve"
+                | "render"
+                | "flowdef"
+        );
+        is_data_action && step.branching.is_none() && step.condition.is_none()
+    }
+
+    /// Identify the next wave of steps that can run concurrently starting
+    /// from `step_idx`. Returns the range of steps [start, end) that can
+    /// run together, and the set of ordinals they depend on that must be
+    /// completed first. If only one step can run (or the next step is a
+    /// control-flow step), returns a single-step wave.
+    fn identify_wave(
+        &self,
+        steps: &[BundleManifestStep],
+        step_idx: usize,
+        completed_ordinals: &std::collections::HashSet<u32>,
+    ) -> (usize, usize) {
+        // The first step in the wave is always steps[step_idx].
+        // If it's not concurrent-capable, it's a single-step wave.
+        if !Self::is_concurrent_capable(&steps[step_idx]) {
+            return (step_idx, step_idx + 1);
+        }
+
+        // Collect consecutive concurrent-capable steps whose dependencies
+        // are all satisfied by `completed_ordinals` (i.e. they don't depend
+        // on any step that's also in this wave).
+        let mut wave_end = step_idx + 1;
+        let wave_ordinals: std::collections::HashSet<u32> =
+            [steps[step_idx].ordinal].into_iter().collect();
+
+        while wave_end < steps.len() {
+            let candidate = &steps[wave_end];
+            if !Self::is_concurrent_capable(candidate) {
+                break;
+            }
+            let deps = self.step_dependencies(candidate);
+            // The candidate can join the wave only if none of its
+            // dependencies are in the current wave (they must already be
+            // completed).
+            if deps.iter().any(|d| wave_ordinals.contains(d)) {
+                break;
+            }
+            wave_end += 1;
+        }
+
+        (step_idx, wave_end)
+    }
+
     async fn run_cascade(
         &self,
         manifest: &BundleManifest,
@@ -596,6 +829,13 @@ impl ManifestExecutor {
 
         'cascade: loop {
             iteration += 1;
+            // Emit structured event: iteration started.
+            if let Some(ref events) = self.events {
+                events(CascadeEvent::IterationStart {
+                    iteration,
+                    max_iterations,
+                });
+            }
             // Update live convergence context for template awareness
             let snap = budget.snapshot();
             convergence.inject_running(
@@ -639,6 +879,17 @@ impl ManifestExecutor {
                     } else {
                         title(&format!("Step {}/{total}: {action}{desc}", step_idx + 1));
                     }
+                }
+
+                // Emit structured event: step started.
+                if let Some(ref events) = self.events {
+                    events(CascadeEvent::StepStart {
+                        ordinal: step.ordinal,
+                        action: step.action.clone(),
+                        description: step.description.clone(),
+                        step_index: step_idx,
+                        total_steps: steps.len(),
+                    });
                 }
 
                 // Evaluate step condition — skip if false.
@@ -707,6 +958,119 @@ impl ManifestExecutor {
                     }
                 }
 
+                // ── Concurrent wave execution ──────────────────────────────
+                // Identify a wave of independent steps that can run concurrently.
+                // If the wave has >1 step, execute them in parallel via
+                // `FuturesUnordered`, each with a clone of the context, then
+                // merge results. This is the concurrency fix — steps with no
+                // data dependency on each other run in parallel up to the
+                // manifest's `concurrency` limit (default 32, max 128).
+                let completed: std::collections::HashSet<u32> =
+                    (0..step_idx).map(|i| steps[i].ordinal).collect();
+                let (wave_start, wave_end) = self.identify_wave(steps, step_idx, &completed);
+                let wave_len = wave_end - wave_start;
+
+                if wave_len > 1 && manifest.concurrency > 1 {
+                    let concurrency_limit =
+                        manifest.concurrency.min(crate::bundle::MAX_CONCURRENCY) as usize;
+                    let wave_steps: Vec<&BundleManifestStep> =
+                        steps[wave_start..wave_end].iter().collect();
+
+                    info!(
+                        target: "reg.skill.cascade.wave_executed",
+                        iteration = iteration,
+                        wave_size = wave_len,
+                        steps = ?wave_steps.iter().map(|s| s.ordinal).collect::<Vec<_>>(),
+                        concurrency = concurrency_limit,
+                        "REG"
+                    );
+
+                    // Emit title for the wave.
+                    if let Some(ref title) = self.title {
+                        let total = steps.len();
+                        if iteration > 1 {
+                            title(&format!(
+                                "Iteration {iteration}, steps {}-{}/{}: concurrent ({wave_len} steps)",
+                                wave_start + 1,
+                                wave_end,
+                                total
+                            ));
+                        } else {
+                            title(&format!(
+                                "Steps {}-{}/{}: concurrent ({wave_len} steps)",
+                                wave_start + 1,
+                                wave_end,
+                                total
+                            ));
+                        }
+                    }
+
+                    // Clone the context for each concurrent step. Each step
+                    // gets its own copy, runs independently, and returns its
+                    // result. We merge results back after all complete.
+                    let context_clone = context.clone();
+                    let budget_clone = budget.snapshot();
+
+                    use futures_util::stream::{FuturesUnordered, StreamExt};
+                    let mut futures = FuturesUnordered::new();
+
+                    for step_ref in &wave_steps {
+                        let step_ref = step_ref.clone();
+                        let ctx = context_clone.clone();
+                        let executor = self.clone_for_concurrent();
+                        let budget_snap = budget_clone.clone();
+                        futures.push(async move {
+                            let result = executor
+                                .execute_single_data_step(&step_ref, ctx, budget_snap)
+                                .await;
+                            (step_ref.ordinal, result)
+                        });
+                    }
+
+                    // Collect results as they complete.
+                    while let Some((ordinal, result)) = futures.next().await {
+                        match result {
+                            Ok((step_context, gas_used, rjoule_used)) => {
+                                // Merge the step's result key into the shared context.
+                                let result_key = format!("step_{ordinal}_result");
+                                if let Some(val) = step_context.get(&result_key) {
+                                    context.insert(result_key, val.clone());
+                                }
+                                // Charge gas/rjoule for this step.
+                                budget.charge_iteration();
+                                if let Some(cost) = rjoule_used {
+                                    budget.charge_rjoule(cost);
+                                }
+                                last_result_ordinal = Some(ordinal);
+
+                                // Emit feedback span for select steps.
+                                let step = steps.iter().find(|s| s.ordinal == ordinal);
+                                if let Some(step) = step
+                                    && step.action == "select"
+                                    && let Some(ref template_ref) = step.template_ref
+                                    && let Some(phase) = extract_feedback_phase(template_ref)
+                                {
+                                    let span_target =
+                                        format!("{}.{}", manifest.ledger.span_namespace, phase);
+                                    info!(
+                                        target: "reg.skill",
+                                        ns = %span_target,
+                                        skill_id = %manifest.id,
+                                        phase = phase,
+                                        step = ordinal,
+                                        iteration = iteration,
+                                        "REG"
+                                    );
+                                }
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+
+                    step_idx = wave_end;
+                    continue; // Skip the serial match for this wave.
+                }
+
                 match step.action.as_str() {
                     // ── Abort: converged — exit with success ──
                     "abort" => {
@@ -727,6 +1091,12 @@ impl ManifestExecutor {
                             snap.rjoule_used,
                             snap.rjoule_cap,
                         );
+                        if let Some(ref events) = self.events {
+                            events(CascadeEvent::Converged {
+                                iterations: iteration,
+                                final_signal: 0.0,
+                            });
+                        }
                         break 'cascade;
                     }
 
@@ -1446,6 +1816,12 @@ impl ManifestExecutor {
                             if !chunk.reasoning_delta.is_empty() {
                                 if let Some(ref progress) = self.progress {
                                     progress(&chunk.reasoning_delta);
+                                }
+                                if let Some(ref events) = self.events {
+                                    events(CascadeEvent::StepStream {
+                                        ordinal: step.ordinal,
+                                        chunk: chunk.reasoning_delta.clone(),
+                                    });
                                 }
                                 full_reasoning.push_str(&chunk.reasoning_delta);
                             }
