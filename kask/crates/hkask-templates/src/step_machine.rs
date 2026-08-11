@@ -354,7 +354,13 @@ impl StepMachine {
                 self.execute_tool_invoke(node, infra).await
             }
             "flowdef" => self.execute_flowdef(node, infra).await,
-            "parallel" => self.execute_parallel(node, infra).await,
+            "parallel" => {
+                let mapping = node.input_mapping.as_deref().cloned();
+                let step_id = node.id;
+                let ordinal = node.ordinal;
+                self.execute_parallel(mapping, step_id, ordinal, infra)
+                    .await
+            }
             other => Err(crate::ports::TemplateError::Manifest(format!(
                 "Unknown manifest step action: '{other}'"
             ))),

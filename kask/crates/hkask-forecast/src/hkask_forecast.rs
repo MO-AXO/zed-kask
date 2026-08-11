@@ -1209,6 +1209,17 @@ mod tests {
     }
 
     #[test]
+    fn bayesian_negative_evidence_base_rate_returns_prior() {
+        // Negative base rate is invalid (P(E) < 0 is impossible). The guard
+        // returns the clamped prior, not a sign-flipped posterior clamped to 0.01.
+        let p = bayesian_update(0.3, 0.9, -1.0);
+        assert!(
+            (p - 0.3).abs() < 1e-9,
+            "negative base rate should return prior, got {p}"
+        );
+    }
+
+    #[test]
     fn brier_perfect() {
         assert_eq!(brier_score(1.0, true), 0.0);
     }
