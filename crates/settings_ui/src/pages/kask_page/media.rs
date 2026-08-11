@@ -19,10 +19,12 @@ pub(crate) fn render_media_page(
     let vision_model = media.vision_model;
     let image_gen_model = media.image_gen_model;
 
+    // Placeholders mirror hkask_inference::model_constants::DEFAULT_*_MODEL
+    // (DeepInfra defaults; fal.ai is deprecated for TTS/STT/image-gen).
     let tts_input = kask_string_input(
         "kask-media-tts-model",
         "TTS Model",
-        models::TTS_DEFAULT,
+        "DeepInfra/hexgrad/Kokoro-82M",
         tts_model,
         "media",
         "tts_model",
@@ -30,7 +32,7 @@ pub(crate) fn render_media_page(
     let stt_input = kask_string_input(
         "kask-media-stt-model",
         "STT Model",
-        models::STT_DEFAULT,
+        "DeepInfra/whisper-large-v3",
         stt_model,
         "media",
         "stt_model",
@@ -46,7 +48,7 @@ pub(crate) fn render_media_page(
     let image_gen_input = kask_string_input(
         "kask-media-image-gen-model",
         "Image Generation Model",
-        models::IMAGE_GEN_DEFAULT,
+        "DeepInfra/black-forest-labs/FLUX-2-klein-4b",
         image_gen_model,
         "media",
         "image_gen_model",
