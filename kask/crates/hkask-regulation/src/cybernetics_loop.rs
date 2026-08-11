@@ -279,12 +279,6 @@ impl CyberneticsLoop {
     /// Wire the direct curator directive channel: Curation → Cybernetics.
     ///
     /// expect: "The system provides configurable cybernetic self-regulation"
-    ///
-    /// Not yet wired in production — no caller in `main.rs` and no
-    /// agent-facing tool issues directives. The `CURATOR_STATIC_CONTEXT`
-    /// prompt tells the Curator to recommend adjustments to the user
-    /// instead. When a `CuratorDirectiveTool` is added, wire the channel
-    /// here and remove the "not yet wired" note from the prompt.
     /// post: returns Self for chaining
     #[must_use = "builder methods must be chained or assigned"]
     pub fn with_curator_directive_channel(
