@@ -69,7 +69,6 @@ impl ProviderId {
         // `strip_prefix` handles the matching; the match assigns the variant.
         const PREFIXES: &[(&str, ProviderId)] = &[
             ("DeepInfra/", ProviderId::DeepInfra),
-            ("fal.ai/", ProviderId::Fal),
             ("RunPod/", ProviderId::Runpod),
             ("OpenRouter/", ProviderId::OpenRouter),
             ("KiloCode/", ProviderId::KiloCode),
@@ -131,7 +130,6 @@ impl ProviderId {
     pub fn as_str(&self) -> &'static str {
         match self {
             ProviderId::DeepInfra => "DeepInfra",
-            ProviderId::Fal => "fal.ai",
             ProviderId::Runpod => "RunPod",
             ProviderId::OpenRouter => "OpenRouter",
             ProviderId::KiloCode => "KiloCode",
@@ -305,7 +303,6 @@ fn resolve_default_provider() -> ProviderId {
 fn parse_provider_code(raw: &str) -> ProviderId {
     match raw {
         "DeepInfra" => ProviderId::DeepInfra,
-        "fal.ai" => ProviderId::Fal,
         "RunPod" => ProviderId::Runpod,
         "OpenRouter" => ProviderId::OpenRouter,
         "KiloCode" => ProviderId::KiloCode,
@@ -448,10 +445,6 @@ mod tests {
         assert_eq!(
             ProviderId::DeepInfra.prefix_model("meta-llama/Llama-3.3-70B"),
             "DeepInfra/meta-llama/Llama-3.3-70B"
-        );
-        assert_eq!(
-            ProviderId::Fal.prefix_model("paddleocr"),
-            "fal.ai/paddleocr"
         );
         assert_eq!(
             ProviderId::Runpod.prefix_model("my-model"),

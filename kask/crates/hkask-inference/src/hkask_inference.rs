@@ -49,7 +49,6 @@ pub use config::{InferenceConfig, ProviderConfig, ProviderId};
 pub use inference_ipc_client::InferenceIpcClient;
 pub use media_router::MediaRouter;
 pub use provider::{MediaOp, MediaProvider, ProviderRegistry};
-pub use workflow::{FailurePolicy, GraphNode, NodeExecutor, WorkflowGraph};
 
 /// Unified model entry from any provider, with provider prefix applied.
 #[derive(Debug, Clone)]

@@ -48,7 +48,6 @@ impl std::str::FromStr for MediaOp {
             "upscale" => Ok(Self::Upscale),
             "generate_video" => Ok(Self::GenerateVideo),
             "image_to_video" => Ok(Self::ImageToVideo),
-            :
             "generate_speech" => Ok(Self::GenerateSpeech),
             "transcribe" => Ok(Self::Transcribe),
             other => Err(InferenceError::Connection(format!(

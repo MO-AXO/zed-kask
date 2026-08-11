@@ -78,7 +78,7 @@ impl ProviderScore {
 ///   (cheapest for these ops, registered first as fallback target)
 /// - `atlascloud`: highest for image/video (quality, broad support)
 /// - `atlascloud`: lower (fallback only, task-based API adds latency)
-fn score_provider(id: &str, op: MediaOp) -> {
+fn score_provider(id: &str, op: MediaOp) -> ProviderScore {
     match (id, op) {
         (
             "deepinfra",
@@ -199,10 +199,7 @@ mod tests {
         let params = MediaGenerateParams::default();
         // GenerateSpeech and Transcribe are served by both DeepInfra and AtlasCloud.
         // The score table ranks DeepInfra higher for these shared ops.
-        for op in [
-            MediaOp::GenerateSpeech,
-            MediaOp::Transcribe,
-        ] {
+        for op in [MediaOp::GenerateSpeech, MediaOp::Transcribe] {
             let (chosen, scores) =
                 select_scored(&router.registry, op, &params).expect("candidates exist");
             assert_eq!(chosen.id(), "deepinfra", "DeepInfra must win for {op:?}");
@@ -210,7 +207,10 @@ mod tests {
                 scores.iter().any(|s| s.id == "deepinfra"),
                 "DeepInfra scored"
             );
-            assert!(scores.iter().any(|s| s.id == "atlascloud"), "atlascloud scored");
+            assert!(
+                scores.iter().any(|s| s.id == "atlascloud"),
+                "atlascloud scored"
+            );
         }
     }
 
