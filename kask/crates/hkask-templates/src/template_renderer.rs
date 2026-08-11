@@ -18,7 +18,6 @@ use crate::step_context::StepContext;
 use hkask_types::NotFound;
 use minijinja::UndefinedBehavior;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -283,6 +282,7 @@ pub fn render_minijinja(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     // ── Path traversal regression tests (CWE-22) ──────────────────────────
 

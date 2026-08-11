@@ -17,7 +17,6 @@
 use crate::step_context::{ContextLookup, StepContext};
 use crate::template_renderer::TemplateRenderer;
 use serde_json::Value;
-use std::collections::HashMap;
 
 /// Resolve a dot-path like "step_1_result.field" from the context.
 pub(crate) fn resolve_dot_path<C: ContextLookup>(path: &str, context: &C) -> Option<Value> {

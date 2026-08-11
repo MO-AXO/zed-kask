@@ -17,7 +17,6 @@ use hkask_types::ChatToolDefinition;
 use hkask_types::ports::inference_port::InferencePort;
 use hkask_types::template::LLMParameters;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// What a step action produced. The machine merges this with the node's
