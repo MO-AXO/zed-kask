@@ -15,7 +15,6 @@
 
 use std::sync::Arc;
 
-use anyhow::Context;
 use futures_util::{FutureExt, StreamExt};
 use gpui::AsyncApp;
 use hkask_types::template::LLMParameters;
