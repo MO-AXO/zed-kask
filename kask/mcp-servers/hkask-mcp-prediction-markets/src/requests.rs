@@ -7,6 +7,8 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::volatility;
+
 /// Empty request for prediction_markets_status (no parameters needed).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct StatusRequest {}
