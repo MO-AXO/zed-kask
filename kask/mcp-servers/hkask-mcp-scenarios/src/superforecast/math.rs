@@ -411,7 +411,7 @@ pub fn score_forecast(
         outcome_date: chrono::Utc::now().date_naive(),
         event_outcomes,
         brier_score: bs,
-        brier_interpretation: brier_interpretation(bs).to_string(),
+        brier_interpretation: forecast::brier_interpretation(bs).to_string(),
     }
 }
 
