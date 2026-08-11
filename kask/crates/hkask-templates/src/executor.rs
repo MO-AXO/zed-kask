@@ -185,8 +185,9 @@ impl ManifestExecutor {
         let outcome = machine.run(&infra).await?;
 
         // Extract the legacy map (string-keyed context) for backward compat
-        // with the bridge and `extract_final_step_result`.
-        Ok(outcome.context.legacy_map().clone())
+        // with the bridge and `extract_final_step_result`. (K1) materialized
+        // once from the typed context — not a per-iteration mirror.
+        Ok(outcome.context.materialize())
     }
 }
 
