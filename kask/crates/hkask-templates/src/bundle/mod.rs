@@ -13,7 +13,6 @@ pub mod manifest;
 
 pub use composition::*;
 pub use config::*;
-pub(crate) use manifest::default_concurrency;
 pub use manifest::{BundleManifest, BundleManifestStep, BundleSkill, MAX_CONCURRENCY};
 // cascade types are pub(crate) — not re-exported
 

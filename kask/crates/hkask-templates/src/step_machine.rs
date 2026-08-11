@@ -300,7 +300,7 @@ impl StepMachine {
             // Emit feedback span for select steps.
             if node.action == "select"
                 && let Some(ref template_ref) = node.template_ref
-                && let Some(phase) = extract_feedback_phase(template_ref)
+                && let Some(phase) = crate::executor::extract_feedback_phase(template_ref)
             {
                 tracing::info!(
                     target: "reg.skill.cascade.step_executed",
