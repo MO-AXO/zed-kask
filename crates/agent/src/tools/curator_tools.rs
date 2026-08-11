@@ -1,8 +1,9 @@
 //! Curator tools — regulatory surface tools for the Curator agent.
 //!
 //! These tools are registered on Curator threads alongside the standard Zed
-//! Agent tools. They expose the Curator's regulatory surface: system health,
-//! escalation management, and regulation observability.
+//! Agent tools. They expose the Curator's regulatory surface: system health
+//! monitoring via `curator_status`. Additional tools (escalation management,
+//! regulation observability, directive issuance) are not yet implemented.
 //!
 //! The tools use a `MetacognitionProvider` trait (defined here) to read
 //! system health. The composition root injects the provider; when not set,
