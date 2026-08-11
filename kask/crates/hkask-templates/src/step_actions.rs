@@ -519,7 +519,7 @@ impl StepMachine {
             StepMachine::new(sub_graph, self.context.clone(), sub_budget, sub_convergence);
         sub_machine.depth = self.depth + 1;
 
-        let sub_outcome = Box::pin(sub_machine.run(infra)).await?;
+        let sub_outcome = Box::pin(sub_machine.run(infra.clone())).await?;
 
         // Extract the sub-cascade's final result.
         let result_value = sub_outcome
@@ -603,6 +603,12 @@ impl StepMachine {
                 .get("template_ref")
                 .and_then(|v| v.as_str())
                 .map(String::from);
+            // Each branch gets its own clone — `async move` captures by value,
+            // and `.map`'s `FnMut` closure must be callable once per branch.
+            let context_template = context_template.clone();
+            // `run` now owns the `Infra` (so its future is `Send + 'static` and
+            // tokio-spawnable); clone per branch so each owns its own.
+            let infra = infra.clone();
             async move {
                 let template_ref = template_ref.ok_or_else(|| {
                     TemplateError::Manifest(format!(
@@ -653,7 +659,7 @@ impl StepMachine {
                     &sub_manifest.steps,
                     sub_manifest.convergence.max_iterations,
                 );
-                let mut sub_machine = StepMachine::new(
+                let sub_machine = StepMachine::new(
                     sub_graph,
                     context_template.clone(),
                     sub_budget,

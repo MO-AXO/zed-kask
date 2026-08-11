@@ -193,7 +193,7 @@ impl ManifestExecutor {
         };
 
         let machine = StepMachine::new(graph, context, budget, convergence);
-        let outcome = machine.run(&infra).await?;
+        let outcome = machine.run(infra).await?;
 
         // (K5) return the typed outcome directly — callers extract the final
         // result via `extract_final_step_result(&outcome)` (last_result_step),
