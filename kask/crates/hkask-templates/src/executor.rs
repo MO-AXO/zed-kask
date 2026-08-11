@@ -1466,7 +1466,7 @@ impl ManifestExecutor {
                     usage: None,
                     tool_calls: Vec::new(),
                 });
-                InferenceResult {
+                Ok(InferenceResult {
                     text: full_text,
                     reasoning: if full_reasoning.is_empty() {
                         None
@@ -1476,14 +1476,15 @@ impl ManifestExecutor {
                     model: chunk.model,
                     finish_reason: chunk.finish_reason.unwrap_or_default(),
                     usage: chunk.usage.unwrap_or_default(),
+                    token_probabilities: None,
                     tool_calls: chunk.tool_calls,
                     cost_usd: None,
-                }
+                })
             })
             .await
             {
-                Ok(r) => r,
-                Ok(Err(e)) => return Err(TemplateError::Inference(e)),
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => return Err(e),
                 Err(_elapsed) => {
                     return Err(TemplateError::Manifest(format!(
                         "Step {} timed out after {}s",
