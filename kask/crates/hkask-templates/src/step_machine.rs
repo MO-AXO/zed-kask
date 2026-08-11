@@ -27,6 +27,44 @@ use hkask_types::ports::inference_port::InferencePort;
 use hkask_types::template::LLMParameters;
 use std::sync::Arc;
 
+/// Structured event emitted during cascade execution for rich UI feedback.
+/// Wired via `ManifestExecutor::with_events`.
+#[derive(Debug, Clone)]
+pub enum CascadeEvent {
+    IterationStart {
+        iteration: u32,
+        max_iterations: u32,
+    },
+    StepStart {
+        ordinal: u32,
+        action: String,
+        description: String,
+        step_index: usize,
+        total_steps: usize,
+    },
+    StepStream {
+        ordinal: u32,
+        chunk: String,
+    },
+    StepComplete {
+        ordinal: u32,
+        result_summary: String,
+    },
+    ConvergenceUpdate {
+        signal: f64,
+        threshold: f64,
+        distance: f64,
+        iteration: u32,
+    },
+    Converged {
+        iterations: u32,
+        final_signal: f64,
+    },
+    Aborted {
+        reason: String,
+    },
+}
+
 /// Infrastructure ports and callbacks passed to each `StepAction::execute`.
 /// Replaces the 10+ fields on `ManifestExecutor` that were accessed via
 /// `&self` inside the 720-line `run_cascade`.
@@ -468,32 +506,4 @@ enum PassResult {
     Reenter(StepId),
     /// The pass hit an `Exit` — the cascade is done.
     Exit(ExitKind),
-}
-
-/// Extract the feedback phase from a template reference (for span emission).
-/// Mirrors the function in the old executor.
-fn extract_feedback_phase(template_ref: &str) -> Option<&'static str> {
-    let last_segment = template_ref.rsplit('/').next().unwrap_or(template_ref);
-    if last_segment.contains("classify") {
-        Some("Classify")
-    } else if last_segment.contains("gather") {
-        Some("Gather")
-    } else if last_segment.contains("draft")
-        || last_segment.contains("generate")
-        || last_segment.contains("extract")
-    {
-        Some("Draft")
-    } else if last_segment.contains("evaluate") {
-        Some("Evaluate")
-    } else if last_segment.contains("convergence") || last_segment.contains("converge") {
-        Some("Convergence")
-    } else if last_segment.contains("operator_feedback") || last_segment.contains("feedback") {
-        Some("OperatorFeedback")
-    } else if last_segment.contains("write") {
-        Some("Write")
-    } else if last_segment.contains("outcome") {
-        Some("Outcome")
-    } else {
-        None
-    }
 }

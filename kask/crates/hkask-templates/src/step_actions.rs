@@ -677,6 +677,7 @@ async fn call_inference_stream(
             finish_reason: Some("stop".to_string()),
             usage: None,
             tool_calls: Vec::new(),
+            cost_usd: None,
         });
         Ok::<_, TemplateError>((full_text, chunk.tool_calls))
     })
