@@ -29,8 +29,10 @@ pub enum MediaOp {
     Upscale,
     GenerateVideo,
     ImageToVideo,
+    SegmentObject,
     GenerateSpeech,
     Transcribe,
+    ExecuteWorkflow,
 }
 
 /// Parse the string op name used by `InferencePort::media_generate`.
@@ -48,8 +50,10 @@ impl std::str::FromStr for MediaOp {
             "upscale" => Ok(Self::Upscale),
             "generate_video" => Ok(Self::GenerateVideo),
             "image_to_video" => Ok(Self::ImageToVideo),
+            "segment_object" => Ok(Self::SegmentObject),
             "generate_speech" => Ok(Self::GenerateSpeech),
             "transcribe" => Ok(Self::Transcribe),
+            "execute_workflow" => Ok(Self::ExecuteWorkflow),
             other => Err(InferenceError::Connection(format!(
                 "unknown media op: {other}"
             ))),
@@ -68,6 +72,7 @@ impl MediaOp {
             Self::Upscale => "upscale",
             Self::GenerateVideo => "generate_video",
             Self::ImageToVideo => "image_to_video",
+            Self::SegmentObject => "segment_object",
             Self::GenerateSpeech => "generate_speech",
             Self::Transcribe => "transcribe",
             Self::ExecuteWorkflow => "execute_workflow",
