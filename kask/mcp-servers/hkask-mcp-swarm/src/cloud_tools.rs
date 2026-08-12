@@ -1879,7 +1879,7 @@ impl SwarmServer {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_execute_response;
+    use super::{build_create_agent_card, extract_execute_response};
     use serde_json::json;
 
     #[test]

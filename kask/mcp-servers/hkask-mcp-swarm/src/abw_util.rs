@@ -339,4 +339,88 @@ mod tests {
         });
         assert_eq!(effective_hire_cost(&with_deps), 5);
     }
+
+    // ── Property-based tests ───────────────────────────────────────────
+    //
+    // `make_swarm_slug` had a historical panic (byte-slice mid-codepoint on
+    // multi-byte UTF-8 + pre-epoch clock). `url_encode_segment` is the URL
+    // path-safety boundary. Both are pure functions over arbitrary strings —
+    // ideal proptest targets.
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // P4 (panic_freedom): must never panic on any string, including
+        // multi-byte UTF-8 and empty strings. The prior inline version
+        // panicked via `&string[..4]` on an empty millis suffix; the
+        // extracted helper uses safe char-boundary slicing.
+        #[test]
+        fn make_swarm_slug_never_panics(base in any::<String>()) {
+            let now = std::time::SystemTime::now();
+            let _ = make_swarm_slug(&base, now);
+        }
+
+        // P1 (invariant): the slug never exceeds ABW's 64-char cap. The
+        // helper truncates the base to leave room for the millis suffix.
+        #[test]
+        fn make_swarm_slug_caps_at_64_chars(base in any::<String>()) {
+            let now = std::time::SystemTime::now();
+            let slug = make_swarm_slug(&base, now);
+            prop_assert!(
+                slug.len() <= 64,
+                "slug must fit ABW's 64-char cap, got {} chars: {:?}",
+                slug.len(), slug
+            );
+        }
+
+        // P1 (invariant): the slug only contains lowercase letters, digits,
+        // and underscores (ABW's slug charset). The base is alphanumeric-
+        // mapped in `swarm_create_swarm`, but `make_swarm_slug` itself only
+        // adds `_<digits>` and trims underscores — it must not introduce any
+        // other character regardless of the input.
+        #[test]
+        fn make_swarm_slug_only_slug_chars(base in "[a-zA-Z0-9_]*") {
+            let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+            let slug = make_swarm_slug(&base, now);
+            prop_assert!(
+                slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "slug contains non-slug chars: {:?}",
+                slug
+            );
+        }
+    }
+
+    proptest! {
+        // P4 (panic_freedom): must never panic on any string.
+        #[test]
+        fn url_encode_segment_never_panics(segment in any::<String>()) {
+            let _ = url_encode_segment(&segment);
+        }
+
+        // P1 (invariant): the encoded segment contains no unencoded
+        // path-unsafe characters (space, ?, &, #, /). These would corrupt
+        // the URL path when interpolated into an ABW endpoint.
+        #[test]
+        fn url_encode_segment_no_unsafe_chars(segment in any::<String>()) {
+            let encoded = url_encode_segment(&segment);
+            for unsafe_byte in [b' ', b'?', b'&', b'#', b'/'] {
+                prop_assert!(
+                    !encoded.bytes().any(|b| b == unsafe_byte),
+                    "encoded segment still contains unsafe byte {:?}: {:?}",
+                    unsafe_byte as char, encoded
+                );
+            }
+        }
+
+        // P1 (idempotency): encode(encode(x)) == encode(x). The percent-
+        // sign and hex digits produced by encoding are themselves
+        // unreserved/path-allowed, so re-encoding is a no-op. This is what
+        // makes it safe to apply at multiple layers without double-encoding.
+        #[test]
+        fn url_encode_segment_is_idempotent(segment in any::<String>()) {
+            let once = url_encode_segment(&segment);
+            let twice = url_encode_segment(&once);
+            prop_assert_eq!(once, twice);
+        }
+    }
 }
