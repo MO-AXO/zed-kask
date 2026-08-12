@@ -1193,7 +1193,7 @@ impl PredictionMarketsServer {
         let mut market_ids: Vec<String> = Vec::new();
         for record in records {
             let r: AnnotatedMarketRecord = serde_json::from_value(record).map_err(|e| {
-                McpToolError::internal(format!("record deserialization failed: {e}"))
+                McpToolError::invalid_argument(format!("record deserialization failed: {e}"))
             })?;
             oriented.push(cmp_portfolio::OrientedConstituent {
                 constituent: cmp_portfolio::Constituent {
