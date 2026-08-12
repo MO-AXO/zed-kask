@@ -34,7 +34,7 @@ mds_categories: [domain, composition, trust, lifecycle, curation]
 | Document                                                                   | Description                                                             |
 | -------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | [`reference/regulation-spans.md`](reference/regulation-spans.md)           | Regulation span catalog.                                                |
-| [`reference/mcp-servers/README.md`](reference/mcp-servers/README.md)       | MCP server registry — 12 built-in servers (child processes over stdio). |
+| [`reference/mcp-servers/README.md`](reference/mcp-servers/README.md)       | MCP server registry — 13 built-in servers (child processes over stdio). |
 | [`reference/mcp-servers/companies.md`](reference/mcp-servers/companies.md) | Companies server — valuation, forecasting, portfolio.                   |
 | [`reference/mcp-servers/condenser.md`](reference/mcp-servers/condenser.md) | Condenser server — compression algorithms.                              |
 | [`reference/mcp-servers/corpus.md`](reference/mcp-servers/corpus.md)       | Corpus server — gather→process→output pipeline.                         |

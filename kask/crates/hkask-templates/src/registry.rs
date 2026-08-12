@@ -903,8 +903,7 @@ mod tests {
     fn skill_router_manifest_is_published_and_one_shot() {
         let yaml = process_manifest_yaml("skill-router")
             .expect("skill-router process manifest must be embedded (published)");
-        let manifest =
-            load_manifest_from_yaml(yaml).expect("skill-router manifest must parse");
+        let manifest = load_manifest_from_yaml(yaml).expect("skill-router manifest must parse");
 
         assert_eq!(manifest.id, "skill-router");
         // One-shot routing: a single match pass over the catalog (swarm-steering
