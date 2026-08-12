@@ -558,14 +558,26 @@ mod tests {
             "skills section must explicitly disclaim manual instruction following"
         );
 
-        // The model must be told NOT to read_file the SKILL.md body.
+        // The model must be told NOT to read_file the SKILL.md body. Asserted
+        // on the invariant (a prohibition naming `read_file` and `SKILL.md`)
+        // rather than one exact sentence, so the prose can be tightened without
+        // a false failure — while still failing if the prohibition disappears.
         assert!(
-            rendered.contains("Do **not** `read_file` the `SKILL.md`"),
+            rendered.contains("Never `read_file` the `SKILL.md`")
+                || rendered.contains("Do **not** `read_file` the `SKILL.md`"),
             "skills section must forbid reading the SKILL.md body"
         );
         assert!(
             rendered.contains("discovery-only catalog entry"),
             "skills section must label SKILL.md as discovery-only"
+        );
+        // The prohibition is now backed by a runtime gate in `read_file`
+        // (`refuse_skill_catalog_read`). Saying so converts an unenforceable
+        // OUGHT into a statement of fact the model can rely on.
+        assert!(
+            rendered.contains("`read_file` refuses it"),
+            "skills section must state the refusal is enforced by the tool, not \
+             merely requested"
         );
 
         // The upstream phrasing that taught the bypass must be gone.

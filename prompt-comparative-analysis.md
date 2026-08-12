@@ -206,6 +206,10 @@ The behavioral A/B could not run: `eval_cli` requires live provider credentials 
 
 **Verdict:** the prose is the *only* enforcement point, and per L6 ("enforcement gates belong outside the prompt") the correct fix is a runtime gate, not less prose. Deleting the policing while no gate exists would remove the sole safeguard. **R6 is refuted and was not implemented.** The stray-read sensor now makes the failure observable, which converts R6 from an analysis bet into a measurable one: if `reg.skill.stray_read` stays silent across real sessions, revisit the trim; if it fires, the policing is confirmed load-bearing and should be *strengthened* into a tool-level refusal.
 
+**Resolved 2026-08-12 (F1).** The gate now exists: `refuse_skill_catalog_read` in `read_file_tool.rs` returns a tool error redirecting the model to the `skill` tool, wired into both resolution paths, with skill *resource* files still readable. With enforcement in place, R6's trim became safe and was applied — the skills section lost ~400 bytes of justification prose (24,350 → 23,949) while the prohibition itself got *stronger* ("Never" + "`read_file` refuses it", a statement of fact rather than a request). This is the resolution the falsifier pointed to: **R6 was right that the prose was redundant and wrong about why — it was redundant only once a gate existed, not before.** Deleting it first would have removed the sole defense; adding the gate first made the deletion free.
+
+The pinning test was also loosened from exact-sentence matching to invariant matching, so the prose can be tightened in future without a false failure while still failing if the prohibition disappears.
+
 The correction above does not change the verdict, but it is worth recording *how* the error happened: I inferred a causal claim ("mismatch → envelope") from two aggregate counts without checking the direction of the set difference. Two numbers that differ do not tell you which side is missing. The falsifier for a set-difference claim is `comm`, not subtraction — and one line of `comm` overturned it. The orphan-manifest finding it surfaced instead is now follow-up F2.
 
 ### Rejected by essentialist

@@ -18,12 +18,22 @@ fn tool_content_err(e: impl std::fmt::Display) -> LanguageModelToolResultContent
     LanguageModelToolResultContent::from(e.to_string())
 }
 
-/// Sensor for the R3 falsifier: detect when the model `read_file`s a skill's
-/// `SKILL.md` — the discovery-only catalog entry whose body is never injected.
-/// Reading it directly is the documented bypass of the manifest cascade (the
-/// system prompt forbids it). This `log::warn!` is the observable telemetry that
-/// lets the R3 falsifier measure the stray-read rate before/after collapsing the
-/// prompt's anti-pattern policing. Advisory only — it never blocks the read.
+/// Detect a read of a skill's `SKILL.md` — the discovery-only catalog entry
+/// whose body is never injected (see `skill_tool.rs`: body injection is disabled
+/// in zed-kask). Reading it bypasses the manifest cascade, the gas/OCAP
+/// membrane, and the convergence loop.
+///
+/// This is the enforcement point for the invariant the system prompt states.
+/// It was previously advisory (`log::warn!` only), which made the prompt prose
+/// the *sole* defense — and per the `.rules` "advertised invariants need
+/// enforcement points" trap, an invariant with no gate is a declaration. The
+/// model's trained prior actively pushes against it: every other major agent
+/// system loads skill bodies as prose, so "read the skill file" is the
+/// statistically expected action.
+///
+/// Only the catalog file itself is gated. Resource files *inside* a skill
+/// directory (templates, references, scripts) stay readable — a cascade result
+/// may legitimately direct the model to them.
 fn is_skill_catalog_file(path: &Path) -> bool {
     if path.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
         return false;
@@ -43,16 +53,43 @@ fn is_skill_catalog_file(path: &Path) -> bool {
         })
 }
 
-fn warn_if_skill_catalog_read(resolved_path: &Path, requested_path: &str) {
-    if is_skill_catalog_file(resolved_path) {
-        log::warn!(
-            "reg.skill.stray_read: read_file of SKILL.md at {} (requested '{}') — \
-             SKILL.md is discovery-only; invoke the `skill` tool instead of reading the body. \
-             (R3 stray-read sensor)",
-            resolved_path.display(),
-            requested_path
-        );
+/// Refuse a `SKILL.md` read, returning the redirect the model should act on.
+///
+/// Returns `Err` (the tool-error channel) when `resolved_path` is a skill
+/// catalog file, so the model receives the redirect as the tool result rather
+/// than the file body. The `log::warn!` is retained as the `reg.skill.stray_read`
+/// telemetry signal: it now counts *blocked* attempts, which is the measurement
+/// that tells us whether the prompt's prohibition prose is still carrying load
+/// or has become redundant now that a gate exists.
+fn refuse_skill_catalog_read(
+    resolved_path: &Path,
+    requested_path: &str,
+) -> Result<(), LanguageModelToolResultContent> {
+    if !is_skill_catalog_file(resolved_path) {
+        return Ok(());
     }
+    log::warn!(
+        "reg.skill.stray_read: blocked read_file of SKILL.md at {} (requested '{}') — \
+         SKILL.md is discovery-only; the `skill` tool executes the manifest cascade.",
+        resolved_path.display(),
+        requested_path
+    );
+    let skill_name = resolved_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("<name>");
+    Err(LanguageModelToolResultContent::from(format!(
+        "Refused: `{requested_path}` is a skill catalog entry, not a readable \
+         document. Its body is never injected — reading it would bypass the \
+         manifest cascade, the gas/OCAP membrane, and the convergence loop.\n\n\
+         To run this skill, call the `skill` tool with name `{skill_name}` and \
+         the user's full request as `task`. The tool executes the skill's \
+         manifest and returns its result; you do not need to read or interpret \
+         the methodology yourself.\n\n\
+         Resource files inside the skill directory (templates, references) are \
+         still readable if a cascade result directs you to one."
+    )))
 }
 
 /// Resolves the optional `start_line` / `end_line` inputs from the tool schema
@@ -192,6 +229,8 @@ use crate::{AgentTool, ToolCallEventStream, ToolInput, outline};
 ///   Do NOT retry reading the same file without line numbers if you receive an outline.
 /// - This tool supports reading image files. Supported formats: PNG, JPEG, WebP, GIF, BMP, TIFF.
 ///   Image files are returned as visual content that you can analyze directly.
+/// - A skill's `SKILL.md` cannot be read: it is a discovery-only catalog entry, and this tool
+///   refuses it. Invoke the `skill` tool instead. Other files inside a skill directory are readable.
 ///
 /// The only supported path outside the project is the global skills directory or a descendant, for global agent skills.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -301,7 +340,7 @@ impl AgentTool for ReadFileTool {
             if let Some(skill_path) =
                 resolve_global_skill_path(Path::new(&input.path), fs.as_ref()).await
             {
-                warn_if_skill_catalog_read(&skill_path, &input.path);
+                refuse_skill_catalog_read(&skill_path, &input.path)?;
                 return read_global_skill_file(
                     &skill_path,
                     fs.as_ref(),
@@ -336,7 +375,7 @@ impl AgentTool for ReadFileTool {
                     anyhow!("Failed to convert {} to absolute path", input.path)
                 }).map_err(tool_content_err)?;
 
-            warn_if_skill_catalog_read(&abs_path, &input.path);
+            refuse_skill_catalog_read(&abs_path, &input.path)?;
 
             // Check settings exclusions synchronously
             project.read_with(cx, |_project, cx| {
@@ -610,6 +649,44 @@ mod test {
         // A `skills/` dir whose parent is neither `.agents` nor `agents` is NOT
         // flagged (avoids false positives on unrelated `skills/` trees).
         assert!(!is_skill_catalog_file(Path::new("/home/u/repos/skills/foo/SKILL.md")));
+    }
+
+    #[test]
+    fn test_refuse_skill_catalog_read_redirects_to_skill_tool() {
+        // The refusal must name the `skill` tool and the skill's own name,
+        // otherwise the model has no actionable next step and will retry the
+        // read or improvise the methodology — the exact failure this gates.
+        let err = refuse_skill_catalog_read(
+            Path::new("/home/u/proj/.agents/skills/hypothesis-framer/SKILL.md"),
+            ".agents/skills/hypothesis-framer/SKILL.md",
+        )
+        .expect_err("a SKILL.md read must be refused");
+        let message = format!("{err:?}");
+        assert!(
+            message.contains("skill") && message.contains("hypothesis-framer"),
+            "refusal must redirect to the `skill` tool with the skill name: {message}"
+        );
+        assert!(
+            message.contains("task"),
+            "refusal must tell the model to pass the request as `task`: {message}"
+        );
+    }
+
+    #[test]
+    fn test_refuse_skill_catalog_read_allows_skill_resources_and_other_files() {
+        // Resource files inside a skill directory stay readable — a cascade
+        // result may direct the model to a template or reference. Gating the
+        // whole directory would break that path.
+        refuse_skill_catalog_read(
+            Path::new("/home/u/proj/.agents/skills/hypothesis-framer/templates/finer.j2"),
+            "templates/finer.j2",
+        )
+        .expect("skill resource files must remain readable");
+
+        // A user's own file that happens to be named SKILL.md is not a catalog
+        // entry and must not be refused.
+        refuse_skill_catalog_read(Path::new("/home/u/proj/docs/SKILL.md"), "docs/SKILL.md")
+            .expect("a non-catalog SKILL.md must remain readable");
     }
 
     #[gpui::test]
@@ -1838,6 +1915,59 @@ mod test {
         assert_eq!(
             text.as_ref(),
             "     1\t# Spec\n     2\t\n     3\tReference body."
+        );
+    }
+
+    #[gpui::test]
+    async fn test_read_file_refuses_global_skill_catalog_entry(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        // End-to-end: the tool itself must refuse, not merely the helper. The
+        // global-skills fast path resolves before project-path machinery, so it
+        // needs its own coverage — a gate wired into only one of the two call
+        // sites would leave the bypass open.
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/root"), json!({})).await;
+
+        let catalog_path = agent_skills::global_skills_dir()
+            .join("my-skill")
+            .join("SKILL.md");
+        fs.create_dir(catalog_path.parent().unwrap()).await.unwrap();
+        fs.insert_file(
+            &catalog_path,
+            b"---\nname: my-skill\n---\nSENTINEL_SKILL_BODY_TEXT".to_vec(),
+        )
+        .await;
+
+        let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+
+        let result = cx
+            .update(|cx| {
+                let input = ReadFileToolInput {
+                    path: catalog_path.to_string_lossy().into_owned(),
+                    start_line: None,
+                    end_line: None,
+                };
+                tool.run(
+                    ToolInput::resolved(input),
+                    ToolCallEventStream::test().0,
+                    cx,
+                )
+            })
+            .await;
+
+        let error = result.expect_err("reading a SKILL.md catalog entry must be refused");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("Refused") && message.contains("my-skill"),
+            "refusal must name the skill so the model can invoke it: {message}"
+        );
+        // The gate is pointless if the refusal echoes the content it withholds.
+        assert!(
+            !message.contains("SENTINEL_SKILL_BODY_TEXT"),
+            "the refusal must not leak the SKILL.md body it is gating: {message}"
         );
     }
 
