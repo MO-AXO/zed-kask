@@ -403,15 +403,13 @@ mod task_list {
             .and_then(|t| t.as_array())
             .and_then(|a| a.first())
             .expect("missing tasks array entry");
-        // R1: the `swarm_id` field is present (null when unset).
+        // R1: `swarm_id` is omitted (skip_serializing_if) when the task is not
+        // spawned under a swarm. The positive case (present when set) is pinned
+        // by the spawn_task lib tests (C2) + the TaskInfo mapping reads
+        // `t.swarm_id.clone()`.
         assert!(
-            task.get("swarm_id").is_some(),
-            "TaskInfo must carry a `swarm_id` field (R1)"
-        );
-        assert_eq!(
-            task.get("swarm_id").and_then(|s| s.as_str()),
-            None,
-            "swarm_id is null when the task is not spawned under a swarm"
+            task.get("swarm_id").is_none(),
+            "swarm_id must be absent when the task is not spawned under a swarm"
         );
         // R3: the `activity` field is populated from the latest comment.
         let activity = task
