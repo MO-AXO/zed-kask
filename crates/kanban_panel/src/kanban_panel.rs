@@ -23,12 +23,12 @@ use std::time::Duration;
 use std::collections::HashSet;
 
 use anyhow::Result;
+use editor::Editor;
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString, Task,
     WeakEntity, Window, actions,
 };
 use gpui_util::ResultExt;
-use editor::Editor;
 use hkask_kanban_widget::block::{KanbanBlockBody, TaskActivityBody, TaskBody};
 use hkask_kanban_widget::view::KanbanWidget;
 use hkask_tool_invoker::{BlockProvenance, shared_tool_invoker};
@@ -49,15 +49,14 @@ use workspace::{
 // kanban MCP tools.
 use agent::ThreadStore;
 use agent_ui::{Agent, AgentConnectionStore, AgentThreadSource, ConversationView};
-use gpui::SharedString;
 
 pub mod panel_button;
 pub mod task_actions;
 pub use panel_button::KanbanPanelButton;
 
 use task_actions::{
-    CreateTaskForm, EditTaskForm, SpawnTaskForm, render_create_board_form,
-    render_create_task_form, render_edit_task_form, render_spawn_task_form,
+    CreateTaskForm, EditTaskForm, SpawnTaskForm, render_create_board_form, render_create_task_form,
+    render_edit_task_form, render_spawn_task_form,
 };
 
 /// The MCP server id (matches `KANBAN_SERVER_NAME` in `hkask_types::kanban_wire`).
@@ -176,7 +175,9 @@ pub fn init(cx: &mut App) {
 /// coordinating with swarms.
 fn steer_system_prompt(selected_board_id: Option<&str>) -> SharedString {
     let board_clause = match selected_board_id {
-        Some(id) => format!("\nThe active board is `{id}`. Use this board id when creating or moving tasks."),
+        Some(id) => format!(
+            "\nThe active board is `{id}`. Use this board id when creating or moving tasks."
+        ),
         None => String::new(),
     };
     format!(
@@ -373,7 +374,7 @@ impl KanbanPanel {
         cx: &mut Context<Workspace>,
     ) -> Entity<Self> {
         let workspace_handle = workspace.weak_handle();
-        let project = workspace.app_state().project.clone();
+        let project = workspace.project().clone();
         let fs = workspace.app_state().fs.clone();
         cx.new(|cx| {
             let mut this = Self {
@@ -815,7 +816,11 @@ impl KanbanPanel {
             cx.notify();
             return;
         };
-        let tool = if is_assigned { TASK_UNASSIGN_TOOL } else { TASK_ASSIGN_TOOL };
+        let tool = if is_assigned {
+            TASK_UNASSIGN_TOOL
+        } else {
+            TASK_ASSIGN_TOOL
+        };
         let args = json!({ "task_id": task_id });
         let task = invoker.invoke_tool(KANBAN_SERVER, tool, args);
         cx.spawn(async move |this, cx| match task.await {
@@ -966,14 +971,11 @@ impl KanbanPanel {
     // ── Steer mode ─────────────────────────────────────────────────────────
 
     /// Switch the panel mode (Browse or Steer).
-    fn set_mode(&mut self, mode: PanelMode, window: &mut Window, cx: &mut Context<Self>) {
+    fn set_mode(&mut self, mode: PanelMode, cx: &mut Context<Self>) {
         if self.mode == mode {
             return;
         }
         self.mode = mode;
-        if mode == PanelMode::Steer {
-            self.ensure_steer_conversation(window, cx);
-        }
         cx.notify();
     }
 
@@ -1171,9 +1173,7 @@ impl KanbanPanel {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .when(has_board, |this| {
-                        this.hover(|this| this.bg(border_color))
-                    })
+                    .when(has_board, |this| this.hover(|this| this.bg(border_color)))
                     .when(!has_board, |this| this.opacity(0.5))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.selected_board_id.is_some() {
@@ -1184,7 +1184,11 @@ impl KanbanPanel {
                     .child(
                         Icon::new(IconName::Plus)
                             .size(IconSize::Small)
-                            .color(if has_board { Color::Accent } else { Color::Muted }),
+                            .color(if has_board {
+                                Color::Accent
+                            } else {
+                                Color::Muted
+                            }),
                     ),
             )
             .child(
@@ -1212,9 +1216,7 @@ impl KanbanPanel {
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .when(has_board, |this| {
-                        this.hover(|this| this.bg(border_color))
-                    })
+                    .when(has_board, |this| this.hover(|this| this.bg(border_color)))
                     .when(!has_board, |this| this.opacity(0.5))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.selected_board_id.is_some() {
@@ -1225,7 +1227,11 @@ impl KanbanPanel {
                     .child(
                         Icon::new(IconName::Trash)
                             .size(IconSize::Small)
-                            .color(if has_board { Color::Warning } else { Color::Muted }),
+                            .color(if has_board {
+                                Color::Warning
+                            } else {
+                                Color::Muted
+                            }),
                     ),
             )
             .child(self.render_refresh_button(cx))
@@ -1235,26 +1241,22 @@ impl KanbanPanel {
     fn render_action_form(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         match &self.active_action {
             None => None,
-            Some(TaskActionKind::CreateTask) => {
-                self.create_task_form
-                    .as_ref()
-                    .map(|form| render_create_task_form(form, cx).into_any_element())
-            }
-            Some(TaskActionKind::EditTask(task_id)) => {
-                self.edit_task_form
-                    .as_ref()
-                    .map(|form| render_edit_task_form(form, cx).into_any_element())
-            }
-            Some(TaskActionKind::SpawnTask(_task_id)) => {
-                self.spawn_task_form
-                    .as_ref()
-                    .map(|form| render_spawn_task_form(form, cx).into_any_element())
-            }
-            Some(TaskActionKind::CreateBoard) => {
-                self.create_board_editor
-                    .as_ref()
-                    .map(|editor| render_create_board_form(editor, cx).into_any_element())
-            }
+            Some(TaskActionKind::CreateTask) => self
+                .create_task_form
+                .as_ref()
+                .map(|form| render_create_task_form(form, cx).into_any_element()),
+            Some(TaskActionKind::EditTask(task_id)) => self
+                .edit_task_form
+                .as_ref()
+                .map(|form| render_edit_task_form(form, cx).into_any_element()),
+            Some(TaskActionKind::SpawnTask(_task_id)) => self
+                .spawn_task_form
+                .as_ref()
+                .map(|form| render_spawn_task_form(form, cx).into_any_element()),
+            Some(TaskActionKind::CreateBoard) => self
+                .create_board_editor
+                .as_ref()
+                .map(|editor| render_create_board_form(editor, cx).into_any_element()),
             Some(TaskActionKind::ConfirmDeleteTask(task_id)) => {
                 let task_id_clone = task_id.clone();
                 let task_id_cancel = task_id.clone();
@@ -1312,7 +1314,11 @@ impl KanbanPanel {
                 )
             }
             Some(TaskActionKind::ConfirmDeleteBoard) => {
-                let board_name = self.board_name.as_ref().map(|s| s.to_string()).unwrap_or_default();
+                let board_name = self
+                    .board_name
+                    .as_ref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
                 Some(
                     v_flex()
                         .gap_2()
@@ -1415,6 +1421,12 @@ impl Render for KanbanPanel {
             }));
         }
 
+        // Lazily initialize the Steer mode conversation when the operator
+        // switches to Steer (ConversationView::new needs a Window).
+        if self.mode == PanelMode::Steer && self.steer_conversation.is_none() {
+            self.ensure_steer_conversation(window, cx);
+        }
+
         let mode = self.mode;
         let border_color = cx.theme().colors().border;
 
@@ -1450,8 +1462,8 @@ impl Render for KanbanPanel {
                                                     .when(mode == PanelMode::Browse, |this| {
                                                         this.bg(Color::Accent.color(cx))
                                                     })
-                                                    .on_click(cx.listener(move |this, window, _, cx| {
-                                                        this.set_mode(PanelMode::Browse, window, cx);
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.set_mode(PanelMode::Browse, cx);
                                                     }))
                                                     .child(
                                                         Label::new("Browse")
@@ -1473,8 +1485,8 @@ impl Render for KanbanPanel {
                                                     .when(mode == PanelMode::Steer, |this| {
                                                         this.bg(Color::Accent.color(cx))
                                                     })
-                                                    .on_click(cx.listener(move |this, window, _, cx| {
-                                                        this.set_mode(PanelMode::Steer, window, cx);
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.set_mode(PanelMode::Steer, cx);
                                                     }))
                                                     .child(
                                                         Label::new("Steer")
@@ -1500,31 +1512,22 @@ impl Render for KanbanPanel {
                         .when_some(self.render_action_form(cx), |this, form| this.child(form))
                     }),
             )
-            .child(
-                v_flex()
-                    .px_4()
-                    .size_full()
-                    .overflow_y_hidden()
-                    .map(|this| {
-                        if mode == PanelMode::Steer {
-                            if let Some(conversation) = &self.steer_conversation {
-                                this.child(conversation.clone()).into_any_element()
-                            } else {
-                                this.child(
-                                    Label::new("Initializing Steer mode…")
-                                        .color(Color::Muted),
-                                )
-                                .into_any_element()
-                            }
-                        } else if self.fetching && self.kanban_widget.is_none() {
-                            this.child(self.render_loading()).into_any_element()
-                        } else if let Some(widget) = &self.kanban_widget {
-                            this.child(widget.clone()).into_any_element()
-                        } else {
-                            this.child(self.render_empty_state()).into_any_element()
-                        }
-                    }),
-            )
+            .child(v_flex().px_4().size_full().overflow_y_hidden().map(|this| {
+                if mode == PanelMode::Steer {
+                    if let Some(conversation) = &self.steer_conversation {
+                        this.child(conversation.clone()).into_any_element()
+                    } else {
+                        this.child(Label::new("Initializing Steer mode…").color(Color::Muted))
+                            .into_any_element()
+                    }
+                } else if self.fetching && self.kanban_widget.is_none() {
+                    this.child(self.render_loading()).into_any_element()
+                } else if let Some(widget) = &self.kanban_widget {
+                    this.child(widget.clone()).into_any_element()
+                } else {
+                    this.child(self.render_empty_state()).into_any_element()
+                }
+            }))
     }
 }
 

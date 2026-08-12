@@ -885,7 +885,12 @@ async fn call_inference_stream(
     tools: Option<&[ChatToolDefinition]>,
     timeout: std::time::Duration,
     progress: Option<&(dyn Fn(&str) + Send + Sync)>,
-) -> Result<(String, Vec<hkask_types::StructuredToolCall>, Option<f64>, Option<String>)> {
+) -> Result<(
+    String,
+    Vec<hkask_types::StructuredToolCall>,
+    Option<f64>,
+    Option<String>,
+)> {
     use futures_util::StreamExt;
 
     // Defense in depth: if a caller passes Duration::ZERO (e.g. from a
@@ -1160,13 +1165,12 @@ mod tests {
         // zed-kask: D25 — `call_inference_stream` must return the chunk's
         // finish_reason so `execute_select` can detect truncation
         // (finish_reason "length") and refuse to parse partial output as JSON.
-        use futures_util::Stream;
-        use hkask_types::{InferenceError, InferenceResult, InferenceStreamChunk};
+        use hkask_types::{InferenceError, InferenceResult, InferenceUsage};
         use std::future::Future;
         use std::pin::Pin;
 
         struct TruncationStream {
-            finish_reason: Option<String>,
+            finish_reason: String,
             text: String,
         }
         impl InferencePort for TruncationStream {
@@ -1175,34 +1179,37 @@ mod tests {
                 _prompt: &str,
                 _parameters: &LLMParameters,
                 _tools: Option<&[ChatToolDefinition]>,
-            ) -> Pin<Box<dyn Future<Output = std::result::Result<InferenceResult, InferenceError> + Send + '_>> {
-                Box::pin(async {
-                    Err(InferenceError::Generation(
-                        "stream stub overrides generate_stream".into(),
-                    ))
-                })
-            }
-            fn generate_stream(
-                &self,
-                _prompt: &str,
-                _parameters: &LLMParameters,
-                _tools: Option<&[ChatToolDefinition]>,
-            ) -> Pin<Box<dyn Stream<Item = std::result::Result<InferenceStreamChunk, InferenceError> + Send + '_>> {
-                let chunk = InferenceStreamChunk {
-                    text_delta: self.text.clone(),
-                    reasoning_delta: String::new(),
+            ) -> Pin<
+                Box<
+                    dyn Future<Output = std::result::Result<InferenceResult, InferenceError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                // Return a truncated result: finish_reason "length", no tool
+                // calls, partial text. The default `generate_stream` wraps this
+                // into a single `InferenceStreamChunk` via `From<InferenceResult>`
+                // which carries `finish_reason` through as `Some(...)`.
+                let result = InferenceResult {
+                    text: self.text.clone(),
                     model: "test".into(),
+                    usage: InferenceUsage {
+                        prompt_tokens: 0,
+                        completion_tokens: 0,
+                        total_tokens: 0,
+                    },
                     finish_reason: self.finish_reason.clone(),
-                    usage: None,
+                    token_probabilities: None,
                     tool_calls: Vec::new(),
+                    reasoning: None,
                     cost_usd: None,
                 };
-                Box::pin(stream::once(async move { Ok(chunk) }))
+                Box::pin(async move { Ok(result) })
             }
         }
 
         let inference = Arc::new(TruncationStream {
-            finish_reason: Some("length".into()),
+            finish_reason: "length".into(),
             text: "{\"partial\":".into(),
         }) as Arc<dyn InferencePort>;
         let (text, tool_calls, _cost, finish_reason) = call_inference_stream(

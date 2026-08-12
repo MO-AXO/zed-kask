@@ -305,7 +305,11 @@ pub(crate) fn render_create_task_form(
                             this.active_action = None;
                             cx.notify();
                         }))
-                        .child(Label::new("Cancel").size(LabelSize::Small).color(Color::Muted)),
+                        .child(
+                            Label::new("Cancel")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
                 ),
         )
 }
@@ -369,7 +373,11 @@ pub(crate) fn render_edit_task_form(
                             this.active_action = None;
                             cx.notify();
                         }))
-                        .child(Label::new("Cancel").size(LabelSize::Small).color(Color::Muted)),
+                        .child(
+                            Label::new("Cancel")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
                 ),
         )
 }
@@ -433,7 +441,11 @@ pub(crate) fn render_spawn_task_form(
                             this.active_action = None;
                             cx.notify();
                         }))
-                        .child(Label::new("Cancel").size(LabelSize::Small).color(Color::Muted)),
+                        .child(
+                            Label::new("Cancel")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
                 ),
         )
 }
@@ -490,7 +502,11 @@ pub(crate) fn render_create_board_form(
                             this.active_action = None;
                             cx.notify();
                         }))
-                        .child(Label::new("Cancel").size(LabelSize::Small).color(Color::Muted)),
+                        .child(
+                            Label::new("Cancel")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                        ),
                 ),
         )
 }

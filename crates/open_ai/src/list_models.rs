@@ -64,7 +64,11 @@ pub struct DiscoveredModel {
     /// folds that into this field when the top-level value is absent.
     /// AtlasCloud uses the field name `max_output_length` for the same
     /// quantity, handled via the serde alias.
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "max_output_length")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "max_output_length"
+    )]
     pub max_output_tokens: Option<u64>,
     /// Optional list of supported parameters. Used to detect tool support
     /// (presence of `"tools"`) and reasoning support (presence of
@@ -314,8 +318,11 @@ mod tests {
         // The {code, msg} wrapper is ignored — only `data` is parsed.
         let model = parsed.data.get_mut(0).unwrap();
         model.resolve_provider_fallbacks();
-        assert_eq!(model.max_output_tokens, Some(131072),
-            "AtlasCloud's max_output_length must deserialize into max_output_tokens via the alias");
+        assert_eq!(
+            model.max_output_tokens,
+            Some(131072),
+            "AtlasCloud's max_output_length must deserialize into max_output_tokens via the alias"
+        );
         assert_eq!(model.context_length, Some(131072));
     }
 
