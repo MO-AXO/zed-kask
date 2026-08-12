@@ -18,27 +18,30 @@
 //! 3. A background `refresh_task` re-fetches the task list every 10 seconds
 //!    so the board stays current without manual refresh.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use gpui::{
-    App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString,
-    Task, WeakEntity, Window, actions,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString, Task,
+    WeakEntity, Window, actions,
 };
+use gpui_util::ResultExt;
 use hkask_kanban_widget::block::{KanbanBlockBody, TaskActivityBody, TaskBody};
 use hkask_kanban_widget::view::KanbanWidget;
-use hkask_tool_invoker::{BlockProvenance, ToolInvoker, shared_tool_invoker};
+use hkask_tool_invoker::{BlockProvenance, shared_tool_invoker};
 use hkask_types::kanban_wire::KANBAN_SERVER_NAME;
 use hkask_types::tool_response::parse_tool_response;
 use serde::Deserialize;
 use serde_json::json;
-use ui::prelude::*;
+use ui::{CommonAnimationExt, IconName, prelude::*};
 use workspace::{
     Workspace,
     item::{Item, ItemEvent, SerializableItem},
     register_serializable_item,
 };
+
+pub mod panel_button;
+pub use panel_button::KanbanPanelButton;
 
 /// The MCP server id (matches `KANBAN_SERVER_NAME` in `hkask_types::kanban_wire`).
 const KANBAN_SERVER: &str = KANBAN_SERVER_NAME;
@@ -122,6 +125,7 @@ struct BoardInfo {
     #[serde(default)]
     name: String,
     #[serde(default)]
+    #[allow(dead_code)]
     column_count: usize,
 }
 
@@ -185,6 +189,7 @@ struct ColumnDef {
 
 /// A persistent, auto-refreshing kanban board panel.
 pub struct KanbanPanel {
+    #[allow(dead_code)]
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     /// The currently selected board ID. None until the operator picks one
@@ -459,39 +464,44 @@ impl KanbanPanel {
         cx.notify();
     }
 
-    /// Render the board selector as a row of toggle buttons (one per board).
-    /// Hidden when there are zero or one boards.
+    /// Render the board selector as a row of clickable labels (one per
+    /// board). Hidden when there are zero or one boards.
     fn render_board_selector(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         if self.boards.len() <= 1 {
             return None;
         }
 
         let selected_id = self.selected_board_id.clone();
-        let buttons: Vec<ToggleButtonSimple> = self
+        let buttons: Vec<AnyElement> = self
             .boards
             .iter()
             .map(|board| {
                 let board_id = board.board_id.clone();
                 let is_selected = selected_id.as_ref() == Some(&board.board_id);
-                ToggleButtonSimple::new(
-                    board.name.clone(),
-                    cx.listener(move |this, _, _, cx| {
+                div()
+                    .id(format!("kanban-board-{}", board.board_id))
+                    .cursor_pointer()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .when(is_selected, |this| {
+                        this.border_1().border_color(Color::Accent.color(cx))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
                         this.select_board(board_id.clone(), cx);
-                    }),
-                )
-                .selected(is_selected)
+                    }))
+                    .child(Label::new(board.name.clone()).size(LabelSize::Small).color(
+                        if is_selected {
+                            Color::Accent
+                        } else {
+                            Color::Muted
+                        },
+                    ))
+                    .into_any_element()
             })
             .collect();
 
-        Some(
-            div().child(
-                ToggleButtonGroup::single_row("kanban-board-selector", buttons)
-                    .style(ToggleButtonGroupStyle::Outlined)
-                    .label_size(LabelSize::Small)
-                    .auto_width()
-                    .into_any_element(),
-            ),
-        )
+        Some(h_flex().gap_1().children(buttons))
     }
 
     /// Render the refresh button.
@@ -656,7 +666,7 @@ impl SerializableItem for KanbanPanel {
         workspace: WeakEntity<Workspace>,
         _workspace_id: workspace::WorkspaceId,
         _item_id: workspace::ItemId,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut App,
     ) -> Task<Result<Entity<Self>>> {
         cx.spawn(async move |cx| {
@@ -681,4 +691,3 @@ impl SerializableItem for KanbanPanel {
         false
     }
 }
-

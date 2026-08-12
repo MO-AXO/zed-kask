@@ -11125,10 +11125,10 @@ dependencies = [
  "hkask-kanban-widget",
  "hkask-tool-invoker",
  "hkask-types",
- "log",
+ "marketplace_ui_common",
+ "project",
  "serde",
  "serde_json",
- "tracing",
  "ui",
  "workspace",
 ]
