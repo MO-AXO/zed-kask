@@ -549,20 +549,10 @@ impl agent::SkillManifestExecutor for BridgeManifestExecutor {
         progress: Option<agent::CascadeProgress>,
         title: Option<agent::CascadeProgress>,
     ) -> Result<String, String> {
-        // Load the manifest FIRST so we can validate the caller-supplied context
-        // against its declared `inputs` (Layer A) before injecting runtime
-        // defaults or running the cascade. Validating before the model-default
-        // injection keeps the user-supplied keys distinguishable from the
-        // runtime-injected system keys (listed in SKILL_CONTEXT_SYSTEM_KEYS).
-        let manifest_yaml = self.manifest_yaml(skill_name).ok_or_else(|| {
-            format!(
-                "No manifest found for skill '{skill_name}' on disk at {}",
-                self.manifest_path(skill_name).display()
-            )
-        })?;
-
-        let manifest = load_manifest_from_yaml(&manifest_yaml)
-            .map_err(|e| format!("Failed to load manifest '{skill_name}': {e}"))?;
+        // Load the manifest with caching. Loaded before validation so we can
+        // check the caller-supplied context against declared `inputs` (Layer A)
+        // before injecting runtime defaults.
+        let manifest = self.load_cached_manifest(skill_name)?;
 
         // Enforce the category labelling system at the execution boundary.
         if !manifest.is_skill() {

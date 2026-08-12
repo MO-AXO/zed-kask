@@ -315,7 +315,7 @@ impl KanbanPanel {
                                 let first = this.boards[0].clone();
                                 this.selected_board_id = Some(first.board_id.clone());
                                 this.board_name = Some(first.name.into());
-                                this.columns = first.columns.clone();
+                                this.columns = first.columns;
                                 this.fetch_tasks(cx);
                             }
                         }
