@@ -133,7 +133,8 @@ impl SwarmPanel {
                             let workspace_id = detail.workspace_id.clone();
                             move |this, _, window, cx| {
                                 let agent_name = this
-                                    .swarm_add_agent_editor
+                                    .detail
+                                    .add_agent_editor
                                     .read(cx)
                                     .text(cx)
                                     .trim()
@@ -153,7 +154,8 @@ impl SwarmPanel {
                                 }
                                 // Clear the input whether the add/hire
                                 // succeeded or is awaiting consent.
-                                this.detail.add_agent_editor
+                                this.detail
+                                    .add_agent_editor
                                     .update(cx, |editor, cx| editor.clear(window, cx));
                             }
                         })),

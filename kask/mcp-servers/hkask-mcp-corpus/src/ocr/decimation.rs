@@ -10,7 +10,6 @@
 use crate::ocr::PipelineError;
 use image::DynamicImage;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Render a PDF to per-page images.
 ///
@@ -335,6 +334,7 @@ fn pdftoppm_error(detail: &str) -> PipelineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     /// Check if pdftoppm is available on this system.
     fn pdftoppm_available() -> bool {
