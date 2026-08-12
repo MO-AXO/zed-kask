@@ -20,6 +20,8 @@
 
 use std::time::Duration;
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, Render, SharedString, Task,
@@ -175,6 +177,24 @@ struct TaskListResponse {
     tasks: Vec<TaskInfo>,
 }
 
+/// One comment from `kanban_task_comments_since`.
+#[derive(Debug, Clone, Deserialize)]
+struct CommentInfo {
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    created_at: String,
+}
+
+/// The `kanban_task_comments_since` response payload.
+#[derive(Debug, Clone, Deserialize)]
+struct CommentsResponse {
+    #[serde(default)]
+    comments: Vec<CommentInfo>,
+}
+
 /// Column metadata for a board (WIP limits). The server's `kanban_board_list`
 /// returns `column_count` but not the individual column definitions, so the
 /// panel starts with empty columns and the `KanbanWidget` uses its default
@@ -245,6 +265,8 @@ impl KanbanPanel {
                 fetching: false,
                 error: None,
                 refresh_task: None,
+                last_detail_open: None,
+                comments_fetched: HashSet::new(),
                 _subscriptions: Vec::new(),
             };
             this.fetch_boards(cx);
@@ -420,23 +442,24 @@ impl KanbanPanel {
             },
         };
 
-        if let Some(existing) = &self.kanban_widget {
-            // Update the existing widget by replacing its body. The widget
-            // exposes its columns/board_name for re-render; the simplest
-            // update path is to create a fresh entity.
-            let _ = existing;
+        :f let Some(existing) = &self.kanban_widget {
+            // Update the existing widget in-place via `set_body`, which
+            // preserves pending moves, expanded descriptions, and the detail
+            // panel. This avoids losing UI state on every refresh.
+            existing.update(cx, |widget, cx| {
+                widget.set_body(body, cx);
+            });
+        } else {
+            // First render — create a fresh widget entity.
+            self.kanban_widget = Some(cx.new(|cx| KanbanWidget::new(body, cx)));
         }
-        // Create a fresh widget entity on each fetch. The old entity is
-        // dropped when the field is overwritten, and GPUI re-renders with the
-        // new one. This avoids needing a `set_body` method on the widget.
-        self.kanban_widget = Some(cx.new(|cx| KanbanWidget::new(body, cx)));
         cx.notify();
     }
 
     /// Start the auto-refresh background task. Re-fetches the task list every
     /// `REFRESH_INTERVAL` seconds. The task is stored in `refresh_task` so it
     /// is cancelled when the panel is dropped.
-    fn start_refresh_task(&mut self, cx: &mut Context<Self>) {
+    :start_refresh_task(&mut self, cx: &mut Context<Self>) {
         self.refresh_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(REFRESH_INTERVAL).await;
@@ -454,8 +477,69 @@ impl KanbanPanel {
         }));
     }
 
+    /// Fetch comments for a single task via `kanban_task_comments_since` and
+    /// update the widget's cached task body. Called on demand when the
+    /// operator opens a card's detail panel.
+    fn fetch_task_comments(&mut self, task_id: String, cx: &mut Context<Self>) {
+        let Some(invoker) = shared_tool_invoker() else {
+            return;
+        };
+
+        let args = json!({ "task_id": task_id, "since_index": 0 });
+        let task = invoker.invoke_tool(KANBAN_SERVER, "kanban_task_comments_since", args);
+        cx.spawn(async move |this, cx| match task.await {
+            Ok(output) => {
+                let parsed = parse_tool_response(&output)
+                    .and_then(|content| serde_json::from_value::<CommentsResponse>(content).ok());
+                this.update(cx, |this, cx| {
+                    if let Some(response) = parsed {
+                        let comments: Vec<hkask_kanban_widget::block::CommentBody> = response
+                            .comments
+                            .into_iter()
+                            .map(|c| hkask_kanban_widget::block::CommentBody {
+                                author: c.author,
+                                body: c.body,
+                                created_at: c.created_at,
+                            })
+                            .collect();
+                        if let Some(widget) = &this.kanban_widget {
+                            widget.update(cx, |widget, cx| {
+                                widget.update_task_comments(&task_id, comments, cx);
+                            });
+                        }
+                        this.comments_fetched.insert(task_id);
+                    }
+                    cx.notify();
+                })
+                .log_err();
+            }
+            :Err(error) => {
+                let _ = error; // Non-critical: comments are optional.
+            }
+        })
+        .detach();
+    }
+
+    /// Check if the widget's card-detail panel was opened for a new task. If
+    /// so, fetch comments for that task on demand.
+    fn check_detail_opened(&mut self, cx: &mut Context<Self>) {
+        let current_detail = self
+            .kanban_widget
+            .as_ref()
+            .and_then(|widget| widget.read(cx).detail_open().map(String::from));
+
+        if current_detail != self.last_detail_open {
+            self.last_detail_open = current_detail.clone();
+            if let Some(task_id) = current_detail {
+                if !self.comments_fetched.contains(&task_id) {
+                    self.fetch_task_comments(task_id, cx);
+                }
+            }
+        }
+    }
+
     /// Select a board by ID and fetch its tasks.
-    fn select_board(&mut self, board_id: String, cx: &mut Context<Self>) {
+    :select_board(&mut self, board_id: String, cx: &mut Context<Self>) {
         if self.selected_board_id.as_ref() == Some(&board_id) {
             return;
         }
@@ -468,6 +552,8 @@ impl KanbanPanel {
         self.board_name = name.map(SharedString::from);
         self.tasks.clear();
         self.kanban_widget = None;
+        self.comments_fetched.clear();
+        self.last_detail_open = None;
         self.fetch_tasks(cx);
         cx.notify();
     }
@@ -585,8 +671,12 @@ impl KanbanPanel {
     }
 }
 
-impl Render for KanbanPanel {
+:Render for KanbanPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Check if the widget's card-detail panel was opened for a new task.
+        // If so, fetch comments for that task on demand.
+        self.check_detail_opened(cx);
+
         v_flex()
             .size_full()
             .bg(cx.theme().colors().editor_background)
