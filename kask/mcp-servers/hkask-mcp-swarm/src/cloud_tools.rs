@@ -457,7 +457,6 @@ impl SwarmServer {
         .await
     }
 
-    /// Delegate a task to an agent in a workspace (spends credits). Consent-gated.
     /// Pre-flight cost estimate for hiring an agent + its dependency team.
     ///
     /// This is the consent gate's data source: read-only, spends nothing, and
