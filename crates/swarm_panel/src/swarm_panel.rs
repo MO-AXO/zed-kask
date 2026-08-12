@@ -2495,9 +2495,24 @@ impl Render for SwarmPanel {
                     .size_full()
                     .overflow_y_hidden()
                     .map(|this| match self.mode {
-                        PanelMode::Author => this.child(self.render_author(cx)).into_any_element(),
+                        PanelMode::Author => this
+                            .child(
+                                div()
+                                    .id("author-scroll")
+                                    .size_full()
+                                    .overflow_y_scroll()
+                                    .child(self.render_author(cx)),
+                            )
+                            .into_any_element(),
                         PanelMode::Compose => {
-                            this.child(self.render_compose(cx)).into_any_element()
+                            this.child(
+                                div()
+                                    .id("compose-scroll")
+                                    .size_full()
+                                    .overflow_y_scroll()
+                                    .child(self.render_compose(cx)),
+                            )
+                            .into_any_element()
                         }
                         PanelMode::Steer => {
                             // The `ConversationView` is lazily constructed
