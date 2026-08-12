@@ -155,6 +155,10 @@ mod tests {
         // Pins the zed-kask-only loop-budget guardrail added to `## Task
         // Execution` (a divergence in a shared upstream section) so an upstream
         // merge that drops it is caught.
+        //
+        // The threshold must stay a concrete count, not a vague quantifier:
+        // "several iterations" left the stop point to model discretion, so
+        // different models bounded the loop at different depths.
         let project = prompt_store::ProjectContext::default();
         let template = SystemPromptTemplate {
             project: &project,
@@ -172,13 +176,28 @@ mod tests {
             rendered.contains("If a tool loop repeats without measurable progress"),
             "loop-termination guardrail must be present in the rendered prompt"
         );
+        assert!(
+            rendered.contains("three times"),
+            "the loop guardrail must state a concrete iteration count, not a \
+             vague quantifier the model has to interpret"
+        );
     }
 
     #[test]
-    fn test_system_prompt_mermaid_list_omits_kanban_as_mermaid_type() {
-        // Pins the R5 correction: `kanban` is a D18 fenced-block widget, not a
-        // mermaid type, so it must not appear in the mermaid diagram-types list;
-        // the D18 widget blocks are documented as rendered separately.
+    fn test_system_prompt_mermaid_list_uses_renderer_directives() {
+        // Supersedes an earlier test that asserted `kanban` was NOT a mermaid
+        // type. That was wrong: `kanban` is in the renderer's allowlist
+        // (`markdown::mermaid::SUPPORTED_PREFIXES`) and
+        // `test_beta_suffixed_diagram_types_are_extracted` proves merman
+        // extracts it. `kanban` is BOTH a mermaid directive and, separately, a
+        // D18 fenced-block widget tag — the prompt must distinguish the two
+        // rather than deny the mermaid form.
+        //
+        // The prompt must also name the `-beta` directives merman actually
+        // requires; advertising bare `sankey`/`xychart` produced diagrams the
+        // renderer silently dropped. The exhaustive prompt-vs-allowlist check
+        // lives in `markdown`, next to the constant
+        // (`test_system_prompt_advertises_every_supported_diagram_type`).
         let project = prompt_store::ProjectContext::default();
         let template = SystemPromptTemplate {
             project: &project,
@@ -192,17 +211,19 @@ mod tests {
             is_windows: false,
         };
         let rendered = template.render(&Templates::new()).unwrap();
+        for directive in ["sankey-beta", "xychart-beta", "architecture-beta", "radar-beta"] {
+            assert!(
+                rendered.contains(directive),
+                "prompt must advertise the `{directive}` directive merman requires"
+            );
+        }
         assert!(
-            rendered.contains("journey, sankey, architecture, radar, treemap, and block diagrams"),
-            "mermaid list must include the beta types without kanban"
+            rendered.contains("kanban"),
+            "`kanban` is a supported mermaid directive and must be advertised"
         );
         assert!(
-            !rendered.contains("sankey, kanban, architecture"),
-            "kanban must not be advertised as a mermaid diagram type"
-        );
-        assert!(
-            rendered.contains("fenced-block widget types are rendered separately"),
-            "D18 widget blocks must be documented as rendered separately from mermaid"
+            rendered.contains("kask viz widgets, not mermaid"),
+            "D18 widget blocks must be distinguished from mermaid diagrams"
         );
     }
 
