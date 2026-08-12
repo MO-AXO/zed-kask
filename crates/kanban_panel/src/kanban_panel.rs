@@ -129,6 +129,25 @@ struct BoardInfo {
     #[serde(default)]
     #[allow(dead_code)]
     column_count: usize,
+    /// Column definitions including WIP limits. Populated by the server's
+    /// `kanban_board_list` response so the panel can render WIP limits.
+    #[serde(default)]
+    columns: Vec<ColumnDef>,
+}
+
+/// One column definition from the server. Mirrors the server's `ColumnInfo`.
+#[derive(Debug, Clone, Deserialize)]
+struct ColumnDef {
+    #[serde(default)]
+    #[allow(dead_code)]
+    id: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    name: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    wip_limit: Option<u32>,
 }
 
 /// The `kanban_board_list` response payload (after unwrapping the `content`
@@ -195,16 +214,6 @@ struct CommentsResponse {
     comments: Vec<CommentInfo>,
 }
 
-/// Column metadata for a board (WIP limits). The server's `kanban_board_list`
-/// returns `column_count` but not the individual column definitions, so the
-/// panel starts with empty columns and the `KanbanWidget` uses its default
-/// five-column layout.
-#[derive(Debug, Clone)]
-struct ColumnDef {
-    status: String,
-    wip_limit: Option<u32>,
-}
-
 // ── Panel ───────────────────────────────────────────────────────────────────
 
 /// A persistent, auto-refreshing kanban board panel.
@@ -221,8 +230,8 @@ pub struct KanbanPanel {
     boards: Vec<BoardInfo>,
     /// Tasks for the selected board (from `kanban_task_list`).
     tasks: Vec<TaskInfo>,
-    /// Column metadata (WIP limits). Empty until the server provides column
-    /// definitions in its response.
+    /// Column definitions including WIP limits. Populated from the
+    /// selected board's `columns` field in the `kanban_board_list` response.
     columns: Vec<ColumnDef>,
     /// The rendered `KanbanWidget`, cached and reused across refreshes.
     kanban_widget: Option<Entity<KanbanWidget>>,
@@ -306,6 +315,7 @@ impl KanbanPanel {
                                 let first = this.boards[0].clone();
                                 this.selected_board_id = Some(first.board_id.clone());
                                 this.board_name = Some(first.name.into());
+                                this.columns = first.columns.clone();
                                 this.fetch_tasks(cx);
                             }
                         }
@@ -442,7 +452,7 @@ impl KanbanPanel {
             },
         };
 
-        :       if let Some(existing) = &self.kanban_widget {
+        if let Some(existing) = &self.kanban_widget {
             // Update the existing widget in-place via `set_body`, which
             // preserves pending moves, expanded descriptions, and the detail
             // panel. This avoids losing UI state on every refresh.
@@ -513,7 +523,7 @@ impl KanbanPanel {
                 })
                 .log_err();
             }
-            :Err(error) => {
+            Err(error) => {
                 let _ = error; // Non-critical: comments are optional.
             }
         })
@@ -543,13 +553,12 @@ impl KanbanPanel {
         if self.selected_board_id.as_ref() == Some(&board_id) {
             return;
         }
-        let name = self
-            .boards
-            .iter()
-            .find(|board| board.board_id == board_id)
-            .map(|board| board.name.clone());
+        let board = self.boards.iter().find(|board| board.board_id == board_id);
+        let name = board.map(|b| b.name.clone());
+        let columns = board.map(|b| b.columns.clone()).unwrap_or_default();
         self.selected_board_id = Some(board_id);
         self.board_name = name.map(SharedString::from);
+        self.columns = columns;
         self.tasks.clear();
         self.kanban_widget = None;
         self.comments_fetched.clear();
