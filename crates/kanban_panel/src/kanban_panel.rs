@@ -1100,11 +1100,7 @@ impl KanbanPanel {
         // board. Drop the conversation so the next Steer selection rebuilds with
         // the new board. Mirrors `set_swarm_mode` in the swarm panel, which
         // drops its Steer conversation for the same reason.
-        if self.steer_conversation.take().is_some() {
-            log::info!(
-                "kanban-panel: board changed — Steer conversation rebuilt for the new board"
-            );
-        }
+        self.steer_conversation = None;
         self.fetch_tasks(cx);
         cx.notify();
     }
