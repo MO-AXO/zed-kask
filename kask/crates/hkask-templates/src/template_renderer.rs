@@ -627,4 +627,18 @@ mod tests {
         let (_stripped, config) = parse_and_strip_inference_block(body);
         assert_eq!(config.thinking_budget.as_deref(), Some("none"));
     }
+
+    #[test]
+    fn parse_inference_block_handles_thinking_budget_off() {
+        let body = "[inference]\nthinking_budget = \"off\"\n\nFormat probe results.\n";
+        let (_stripped, config) = parse_and_strip_inference_block(body);
+        assert_eq!(config.thinking_budget.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn parse_inference_block_handles_thinking_budget_on() {
+        let body = "[inference]\nthinking_budget = \"on\"\n\nGenerate a response.\n";
+        let (_stripped, config) = parse_and_strip_inference_block(body);
+        assert_eq!(config.thinking_budget.as_deref(), Some("on"));
+    }
 }
