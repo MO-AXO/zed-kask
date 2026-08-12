@@ -18,6 +18,43 @@ fn tool_content_err(e: impl std::fmt::Display) -> LanguageModelToolResultContent
     LanguageModelToolResultContent::from(e.to_string())
 }
 
+/// Sensor for the R3 falsifier: detect when the model `read_file`s a skill's
+/// `SKILL.md` — the discovery-only catalog entry whose body is never injected.
+/// Reading it directly is the documented bypass of the manifest cascade (the
+/// system prompt forbids it). This `log::warn!` is the observable telemetry that
+/// lets the R3 falsifier measure the stray-read rate before/after collapsing the
+/// prompt's anti-pattern policing. Advisory only — it never blocks the read.
+fn is_skill_catalog_file(path: &Path) -> bool {
+    if path.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
+        return false;
+    }
+    // A skills directory is one whose parent is `.agents` (project) or `agents`
+    // (global / marketplace). Walk ancestors so nested layouts
+    // (`.../skills/_marketplace/<name>/SKILL.md`) match too.
+    path.ancestors()
+        .skip(1)
+        .any(|anc| {
+            anc.file_name().and_then(|n| n.to_str()) == Some("skills")
+                && anc
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n == ".agents" || n == "agents")
+                    .unwrap_or(false)
+        })
+}
+
+fn warn_if_skill_catalog_read(resolved_path: &Path, requested_path: &str) {
+    if is_skill_catalog_file(resolved_path) {
+        log::warn!(
+            "reg.skill.stray_read: read_file of SKILL.md at {} (requested '{}') — \
+             SKILL.md is discovery-only; invoke the `skill` tool instead of reading the body. \
+             (R3 stray-read sensor)",
+            resolved_path.display(),
+            requested_path
+        );
+    }
+}
+
 /// Resolves the optional `start_line` / `end_line` inputs from the tool schema
 /// to a concrete 1-indexed, inclusive `(start, end)` line range:
 ///
@@ -264,6 +301,7 @@ impl AgentTool for ReadFileTool {
             if let Some(skill_path) =
                 resolve_global_skill_path(Path::new(&input.path), fs.as_ref()).await
             {
+                warn_if_skill_catalog_read(&skill_path, &input.path);
                 return read_global_skill_file(
                     &skill_path,
                     fs.as_ref(),
@@ -297,6 +335,8 @@ impl AgentTool for ReadFileTool {
                 .ok_or_else(|| {
                     anyhow!("Failed to convert {} to absolute path", input.path)
                 }).map_err(tool_content_err)?;
+
+            warn_if_skill_catalog_read(&abs_path, &input.path);
 
             // Check settings exclusions synchronously
             project.read_with(cx, |_project, cx| {
@@ -546,6 +586,31 @@ mod test {
     use std::path::PathBuf;
     use std::sync::Arc;
     use util::path;
+
+    #[test]
+    fn test_is_skill_catalog_file_detects_skill_catalog_reads() {
+        // Project skill: `.agents/skills/<name>/SKILL.md`.
+        assert!(is_skill_catalog_file(Path::new(
+            "/home/u/proj/.agents/skills/hypothesis-framer/SKILL.md"
+        )));
+        // Global skill: `<data>/agents/skills/<name>/SKILL.md`.
+        assert!(is_skill_catalog_file(Path::new(
+            "/home/u/.local/share/zed-kask/agents/skills/grill-me/SKILL.md"
+        )));
+        // Marketplace skill nested under `_marketplace` is still detected.
+        assert!(is_skill_catalog_file(Path::new(
+            "/home/u/.local/share/zed-kask/agents/skills/_marketplace/published/SKILL.md"
+        )));
+        // A resource file inside a skill dir is NOT a catalog read.
+        assert!(!is_skill_catalog_file(Path::new(
+            "/home/u/proj/.agents/skills/hypothesis-framer/templates/foo.j2"
+        )));
+        // A user file named SKILL.md not under a skills dir is NOT flagged.
+        assert!(!is_skill_catalog_file(Path::new("/home/u/proj/docs/SKILL.md")));
+        // A `skills/` dir whose parent is neither `.agents` nor `agents` is NOT
+        // flagged (avoids false positives on unrelated `skills/` trees).
+        assert!(!is_skill_catalog_file(Path::new("/home/u/repos/skills/foo/SKILL.md")));
+    }
 
     #[gpui::test]
     async fn test_read_directory_path(cx: &mut TestAppContext) {

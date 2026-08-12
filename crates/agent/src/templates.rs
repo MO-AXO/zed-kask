@@ -120,6 +120,93 @@ mod tests {
     }
 
     #[test]
+    fn test_system_prompt_renders_session_context_without_rules_or_agents_md() {
+        // Regression: the `static_context` (Session Context) block was nested
+        // inside `{{#if (or user_agents_md has_rules)}}`, so it was silently
+        // dropped for projects with no `.rules` and no personal `AGENTS.md` —
+        // which dropped the Curator overlay's `CURATOR_STATIC_CONTEXT`. It must
+        // render independently of that guard.
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec!["echo".into()],
+            model_name: Some("test-model".to_string()),
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            static_context: Some("CURATOR-CTX".to_string().into()),
+            sandboxing: false,
+            is_linux: false,
+            is_windows: false,
+        };
+        let templates = Templates::new();
+        let rendered = template.render(&templates).unwrap();
+        assert!(
+            rendered.contains("## Session Context"),
+            "Session Context heading must render even without rules/AGENTS.md"
+        );
+        assert!(
+            rendered.contains("CURATOR-CTX"),
+            "static_context body must render even without rules/AGENTS.md"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_contains_loop_termination_guardrail() {
+        // Pins the zed-kask-only loop-budget guardrail added to `## Task
+        // Execution` (a divergence in a shared upstream section) so an upstream
+        // merge that drops it is caught.
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec!["echo".into()],
+            model_name: None,
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            static_context: None,
+            sandboxing: false,
+            is_linux: false,
+            is_windows: false,
+        };
+        let rendered = template.render(&Templates::new()).unwrap();
+        assert!(
+            rendered.contains("If a tool loop repeats without measurable progress"),
+            "loop-termination guardrail must be present in the rendered prompt"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_mermaid_list_omits_kanban_as_mermaid_type() {
+        // Pins the R5 correction: `kanban` is a D18 fenced-block widget, not a
+        // mermaid type, so it must not appear in the mermaid diagram-types list;
+        // the D18 widget blocks are documented as rendered separately.
+        let project = prompt_store::ProjectContext::default();
+        let template = SystemPromptTemplate {
+            project: &project,
+            available_tools: vec!["echo".into()],
+            model_name: None,
+            date: "2026-01-01".to_string(),
+            user_agents_md: None,
+            static_context: None,
+            sandboxing: false,
+            is_linux: false,
+            is_windows: false,
+        };
+        let rendered = template.render(&Templates::new()).unwrap();
+        assert!(
+            rendered.contains("journey, sankey, architecture, radar, treemap, and block diagrams"),
+            "mermaid list must include the beta types without kanban"
+        );
+        assert!(
+            !rendered.contains("sankey, kanban, architecture"),
+            "kanban must not be advertised as a mermaid diagram type"
+        );
+        assert!(
+            rendered.contains("fenced-block widget types are rendered separately"),
+            "D18 widget blocks must be documented as rendered separately from mermaid"
+        );
+    }
+
+    #[test]
     fn test_system_prompt_renders_user_agents_md_before_project_rules() {
         use prompt_store::{ProjectContext, RulesFileContext, WorktreeContext};
         use util::rel_path::RelPath;
