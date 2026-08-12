@@ -1889,7 +1889,7 @@ mod tests {
             "evidence": [{ "summary": "s1", "key_findings": ["f1"] }],
             "status": "Success",
         });
-        assert_eq!
+        assert_eq!(
             extract_execute_response(&data),
             Some("The market is trending up.".to_string())
         );
