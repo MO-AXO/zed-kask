@@ -176,7 +176,7 @@ impl TemplateRenderer {
         // `add_template_owned` replaces any prior "step" registration (no
         // accumulation across renders). The loader handles only `{% include %}`
         // references, not "step".
-        env.add_template_owned("step", renderable.to_string())
+        env.add_template_owned("step", renderable)
             .map_err(|e| TemplateError::Render(format!("Invalid template: {}", e)))?;
 
         // `Value::from_serialize` accepts any `Serialize` type directly — the
