@@ -1,12 +1,10 @@
-//! Bridge — cross-validation of estimates and conversion of external server
-//! outputs (companies + prediction-markets) into `ScenarioEvent`s. Adapts the
-//! `hkask-mcp-companies`/`-prediction-markets` data shapes into the scenario
-//! forecast model.
+//! Bridge — cross-validation of estimates and conversion of prediction-market
+//! records into `ScenarioEvent`s. Adapts the `hkask-mcp-prediction-markets`
+//! data shape into the scenario forecast model.
 //!
 //! Extracted from `superforecast.rs` (deep-module split).
 
 use super::ForecastStore;
-use super::calibrate_from_fermi;
 
 use crate::types::{
     CrossValidation, ScenarioError, ScenarioEvent, ScenarioType, SubQuestion,

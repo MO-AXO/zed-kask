@@ -30,7 +30,7 @@
 //! - `scenario_cross_validate` — LLM vs computation cross-validation
 //! - `scenario_assess` — Chermack five-phase project evaluation
 //! - `scenario_full` — Full pipeline orchestrator (single call)
-//! - `scenario_from_companies` — DEPRECATED: use scenario_impact_valuation on hkask-mcp-companies
+//! - `scenario_from_markets` — Bridge from prediction-markets MCP server
 
 use std::collections::HashSet;
 
@@ -460,10 +460,10 @@ impl ScenariosServer {
     }
 
     /// Bridge: convert a prediction-market record into a scenario event.
-    /// Caller-mediated (like scenario_from_companies): the agent pastes the
-    /// annotated MarketRecord JSON from hkask-mcp-prediction-markets. The
-    /// domain-bias correction is applied deterministically here; low
-    /// reliability or weak match confidence withholds the base rate.
+    /// Caller-mediated: the agent pastes the annotated MarketRecord JSON
+    /// from hkask-mcp-prediction-markets. The domain-bias correction is
+    /// applied deterministically here; low reliability or weak match
+    /// confidence withholds the base rate.
     #[tool(
         description = "Convert a prediction-market record (from hkask-mcp-prediction-markets market_lookup/market_match) into a ScenarioEvent anchored on the market-implied base rate. Applies the domain-bias correction deterministically; withholds base_rate on low reliability or weak match confidence."
     )]
