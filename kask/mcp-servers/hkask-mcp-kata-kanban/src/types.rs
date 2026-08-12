@@ -339,6 +339,12 @@ pub struct TaskSpawnRequest {
     /// rJoule budget to grant on spawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rjoule_budget: Option<u64>,
+    /// The swarm this task belongs to, when the task is coordinated via a
+    /// local swarm. Written to `Task.swarm_id` by `KanbanService::spawn_task`
+    /// so `kanban_task_delegate_result` returns the durable link. `None` when
+    /// the spawn is not scoped to a swarm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

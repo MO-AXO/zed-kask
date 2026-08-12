@@ -941,6 +941,7 @@ mod task_spawn {
             memory_scope: Some("episodic".to_string()),
             gas_budget: Some(1000),
             rjoule_budget: None,
+            swarm_id: None,
         };
         let out = server
             .kanban_task_spawn(rmcp::handler::server::wrapper::Parameters(req))
@@ -959,6 +960,7 @@ mod task_spawn {
             memory_scope: None,
             gas_budget: None,
             rjoule_budget: None,
+            swarm_id: None,
         };
         let out = server
             .kanban_task_spawn(rmcp::handler::server::wrapper::Parameters(req))

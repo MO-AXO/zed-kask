@@ -749,6 +749,7 @@ impl KanbanServer {
             memory_scope,
             gas_budget,
             rjoule_budget,
+            swarm_id,
         }): Parameters<TaskSpawnRequest>,
     ) -> String {
         execute_tool_semantic(
@@ -789,7 +790,8 @@ impl KanbanServer {
                 let skills_for_agent = delegated_skills.clone();
                 let spec = crate::SpawnSpec::new(tid)
                     .with_level(&delegation_level)
-                    .with_skills(delegated_skills);
+                    .with_skills(delegated_skills)
+                    .with_swarm(swarm_id.clone());
                 let spec = if let Some(ref ms) = memory_scope {
                     spec.with_memory(ms)
                 } else {
