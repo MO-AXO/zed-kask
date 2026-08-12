@@ -102,7 +102,7 @@ impl CuratorDirectiveSink for BridgeCuratorDirectiveSink {
             .send(hkask_directive)
             .map_err(|e| format!("regulation loop channel closed: {:?}", e.0))?;
         tracing::info!(
-            target: "reg.curator_directive",
+            target: "reg.curator.directive",
             directive_type = %directive_type,
             "Curator directive queued for CyberneticsLoop processing"
         );
