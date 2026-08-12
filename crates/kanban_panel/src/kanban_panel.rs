@@ -442,7 +442,7 @@ impl KanbanPanel {
             },
         };
 
-        :f let Some(existing) = &self.kanban_widget {
+        :       if let Some(existing) = &self.kanban_widget {
             // Update the existing widget in-place via `set_body`, which
             // preserves pending moves, expanded descriptions, and the detail
             // panel. This avoids losing UI state on every refresh.
@@ -459,7 +459,7 @@ impl KanbanPanel {
     /// Start the auto-refresh background task. Re-fetches the task list every
     /// `REFRESH_INTERVAL` seconds. The task is stored in `refresh_task` so it
     /// is cancelled when the panel is dropped.
-    :start_refresh_task(&mut self, cx: &mut Context<Self>) {
+    fn start_refresh_task(&mut self, cx: &mut Context<Self>) {
         self.refresh_task = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(REFRESH_INTERVAL).await;
@@ -539,7 +539,7 @@ impl KanbanPanel {
     }
 
     /// Select a board by ID and fetch its tasks.
-    :select_board(&mut self, board_id: String, cx: &mut Context<Self>) {
+    fn select_board(&mut self, board_id: String, cx: &mut Context<Self>) {
         if self.selected_board_id.as_ref() == Some(&board_id) {
             return;
         }
@@ -671,7 +671,7 @@ impl KanbanPanel {
     }
 }
 
-:Render for KanbanPanel {
+impl Render for KanbanPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Check if the widget's card-detail panel was opened for a new task.
         // If so, fetch comments for that task on demand.
