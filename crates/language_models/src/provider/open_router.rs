@@ -1393,6 +1393,7 @@ mod tests {
             prompt_id: None,
             intent: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let result = into_open_router(request, &model, None).unwrap();
@@ -1532,6 +1533,7 @@ mod tests {
             prompt_id: None,
             intent: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let result = into_open_router(request, &model, None).unwrap();
@@ -1595,6 +1597,7 @@ mod tests {
             prompt_id: None,
             intent: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let result = into_open_router(request, &model, None).unwrap();
