@@ -146,12 +146,15 @@ Four instruction mechanisms compose in the zed-kask prompt. Each has a working r
 
 Ranked. Each: change → axis → expected effect → falsifiable test. All survived essentialist G1/G2/G3 (§A5); rejected candidates are listed at the end.
 
+**Implementation status (2026-08-12).** R1–R5 are implemented and validated; **R6 was refuted by its falsifier and deliberately not implemented** (§5.1). Every change is pinned by a test that was verified to fail without it. Net prompt surface: **−2 lines** (R5 deletion) with R1/R3/R4 surface-neutral. Validation: `cargo test -p agent --lib templates::` 14/14, `-p markdown --lib mermaid` 21/21, `-p kanban_panel` 2/2, `-p swarm_panel` 40/40 (no regression), `-p agent --lib read_file_tool` 23/23; `cargo clippy` clean on `agent`, `markdown`, `kanban_panel`.
+
 ### R1 — Un-nest the `## Session Context` block *(reliability; surface-neutral)*
 - **Change:** in `system_prompt.hbs`, move the `{{/if}}` that currently closes the `(or user_agents_md has_rules)` guard so it precedes the `{{#if static_context}}` block, making the block a sibling rather than a child (a swap of the closers at `:311`/`:313`). Add a permanent regression test in `templates.rs` with `static_context: Some(_)`, `user_agents_md: None`, `ProjectContext::new(vec![])`.
 - **Objective/axis:** **reliability.** This is not a prompt-wording change — it restores delivery of three overlay prompts (Curator, swarm Steer, kanban Steer) that currently vanish for any user without `AGENTS.md` or a project rules file.
 - **Expected effect:** overlays render unconditionally; no change for users who have rules (i.e. no change in this repo, which is why it went unnoticed).
 - **Falsifiable test:** the two-variant test of §2.8, promoted to permanent. Variant 1 must assert the payload renders with no `AGENTS.md` and no rules. **Falsified if** variant 1 already passes on unmodified `HEAD` — i.e. if my empirical result was an artifact of the harness rather than the template.
 - **Essentialist:** G1 — deleting this fix reintroduces silent overlay loss → behavior lost → **PASS**. G2/G3 — no surface added (one `{{/if}}` moves; the block already renders its own `## Session Context` heading, so it stands alone). Net prompt-line delta: 0.
+- **✅ IMPLEMENTED.** Closers swapped in `system_prompt.hbs`; pinned by `test_system_prompt_renders_session_context_without_rules_or_agents_md`. **Falsifier ran both ways:** stashing only the template makes the test fail (`variant 1: static_context swallowed`), restoring it makes it pass — so the test pins real behavior, not a tautology. `DIVERGENCE.md` D2 now records the sibling-vs-nested contract.
 
 ### R2 — Pin the kanban overlay's advertised tool names *(reliability)*
 - **Change:** add to `crates/kanban_panel/src/kanban_panel.rs` the pin the swarm panel already has — a `debug_assert!` (or unit test) checking every `` `kanban_*` `` token in `steer_system_prompt` (`:176-206`) against the canonical tool-name list, mirroring `swarm_panel.rs:278-297` and its `steer_prompt_mentions_only_known_tools` test (`:3071`).
@@ -159,13 +162,15 @@ Ranked. Each: change → axis → expected effect → falsifiable test. All surv
 - **Expected effect:** a tool rename in `hkask-mcp-kata-kanban` fails a test instead of degrading to "tool not found" at runtime. I verified all 22 currently-advertised names do resolve in the server today, so this is a *regression guard*, not a bug fix — which is why it ranks below R1.
 - **Falsifiable test:** rename one kanban tool in the MCP server without touching the prompt; the new assertion must fail. **Falsified if** it doesn't fail (assertion doesn't actually cover the prompt tokens), or if it fires false positives on legitimate prose backticks.
 - **Essentialist:** G1 — remove it and drift becomes silent again → **PASS**. Adds test surface, not prompt surface.
+- **✅ IMPLEMENTED.** Added `ADVERTISED_KANBAN_TOOLS` (22 names) plus a `debug_assert!` inside `steer_system_prompt` and two tests (`steer_prompt_advertises_only_known_tools`, `advertised_kanban_tools_are_unique_and_referenced`). The list is deliberately crate-local: `kanban_panel` does not depend on `swarm_panel`, and inverting that dependency to share one const would be worse than duplicating 22 strings. The second test closes the loop in the other direction — an entry the prompt never mentions also fails, so the list cannot rot into a superset. **Falsifier ran:** renaming one advertised tool to a ghost name fails both tests; reverting passes.
 
 ### R3 — Correct the mermaid list against the renderer allowlist *(reliability; surface-neutral)*
-- **Change:** at `system_prompt.hbs:26`, extend the `-beta` parenthetical to include `sankey-beta` and `xychart-beta` (the renderer accepts only the suffixed forms — `mermaid.rs:442,444`), and restore `kanban` as a valid *mermaid* type (`mermaid.rs:445`) while keeping the separate note that the ` ```kanban ` **fenced-block widget** is a different thing. Better still, generate the list from `SUPPORTED_PREFIXES` so `mermaid.rs:427`'s "also update the system prompt!" comment becomes unnecessary.
+- **Change:** at `system_prompt.hbs:26`, name the exact directives merman requires (`sankey-beta`, `xychart-beta`, `architecture-beta`, `radar-beta`) rather than bare forms the renderer drops, and keep `kanban` — which **is** a supported mermaid directive (`mermaid.rs:445`) — while separately noting that a ` ```kanban ` *fenced block* is a viz widget. Enforce it from `SUPPORTED_PREFIXES` so `mermaid.rs`'s "also update the system prompt!" comment becomes unnecessary.
 - **Objective/axis:** **reliability** (eliminates a fabrication-adjacent failure where the model emits a diagram the renderer silently drops).
 - **Expected effect:** fewer silently-unrendered diagrams; removes a live prompt/code contract drift.
 - **Falsifiable test:** for each name in `SUPPORTED_PREFIXES`, assert the prompt text mentions a form the renderer accepts, and vice versa (a bidirectional consistency test). **Falsified if** the test passes on unmodified `HEAD` — meaning I misread the suffix requirement.
 - **Essentialist:** G1 — a corrected claim replaces an incorrect one; deleting the correction restores the error → **PASS**. Surface-neutral.
+- **✅ IMPLEMENTED**, and it **falsified a prior-session belief**. A test named `test_system_prompt_mermaid_list_omits_kanban_as_mermaid_type` asserted `kanban` must *not* appear as a mermaid type. That is wrong: `kanban` is in `SUPPORTED_PREFIXES` and `test_beta_suffixed_diagram_types_are_extracted` proves merman extracts it. `kanban` is *both* a mermaid directive *and* a widget tag; the prompt must disambiguate, not deny. I replaced that test with `test_system_prompt_mermaid_list_uses_renderer_directives`, hoisted `SUPPORTED_PREFIXES` to module scope, and added `test_system_prompt_advertises_every_supported_diagram_type` in `mermaid.rs` — an exhaustive prompt-vs-allowlist check living next to the constant. **Falsifier ran:** reverting the prompt to bare `sankey` fails with an actionable message naming the file to edit. `DIVERGENCE.md` corrected.
 
 ### R4 — Quantify the loop-termination threshold *(reliability; +0 lines)*
 - **Change:** `system_prompt.hbs:54` currently says "over several iterations." Replace "several" with a number (e.g. three) — one word, no new line.
@@ -173,6 +178,7 @@ Ranked. Each: change → axis → expected effect → falsifiable test. All surv
 - **Expected effect:** less variance in where different models draw the stop line. Modest — this refines a guardrail zed-kask already added (§2.3), rather than adding one.
 - **Falsifiable test:** on ~10 loop-prone tasks (non-converging diagnostics, re-failing builds), measure runaway rate (turns > threshold) and completion rate. **Falsified if** completion rate drops >10% with no reduction in runaway rate — i.e. the number makes the agent quit on hard-but-converging work.
 - **Essentialist:** G1 — borderline. Deleting the *number* leaves the guardrail intact, so behavior is only degraded, not lost. Passes as a **Guardrail-force refinement**, not a Prohibition. Ranked here, not higher, for that reason.
+- **✅ IMPLEMENTED.** "over several iterations" → "three times". The pre-existing `test_system_prompt_contains_loop_termination_guardrail` only matched the sentence prefix, so it would have passed even if the threshold regressed to a vague quantifier; I extended it to assert `"three times"` is present. Net prompt lines: 0.
 
 ### R5 — Delete the UI-affordance sentence from the `skill_bundle` section *(surface)*
 - **Change:** delete the final clause of `system_prompt.hbs:268` describing the Save/Refine/Discard affordance and stating "You do not need to take any action for these affordances — they are user-facing UI."
@@ -180,13 +186,24 @@ Ranked. Each: change → axis → expected effect → falsifiable test. All surv
 - **Expected effect:** −1 to −2 lines; no behavior change, since the instruction's own content is "take no action."
 - **Falsifiable test:** on ~10 `skill_bundle` invocations, compare rate of the model narrating or attempting the Save/Refine/Discard affordance, plus bundle-invocation correctness. **Falsified if** removing it *increases* spurious affordance narration (i.e. the sentence was suppressing a behavior rather than describing one).
 - **Essentialist:** G1 — delete it, nothing is lost: no behavior it governs, no complexity reappearing in any caller → **PASS as a Prohibition-force deletion** (the strongest essentialist verdict in this list).
+- **✅ IMPLEMENTED.** The affordance sentence is gone; the `<composition_score>` / `<bundle_manifest>` sentence stays (those *are* model-visible outputs). −2 lines — the only net surface reduction in this changeset.
 
 ### R6 — Consolidate the skill anti-pattern policing *(surface; risk-flagged)*
 - **Change:** in `system_prompt.hbs:246-253`, compress the 5-step list plus the run/apply/use/invoke paragraph into: one sentence defining skill = executable manifest invoked via the `skill` tool; one Prohibition ("Never `read_file` a `SKILL.md` — it is discovery-only; invoke, don't read"); one sentence retaining the no-manifest fallback (`:251`).
 - **Objective/axis:** **surface**, with a reliability *risk*.
 - **Expected effect:** ~8 lines → ~3.
 - **Falsifiable test:** ~20 skill-invocation tasks including "run skill X on Y" and three-skill bundles. Metrics: correct `skill`/`skill_bundle` invocation rate; stray `read_file(SKILL.md)` rate. **Falsified if** stray-read rate rises above baseline.
-- **Essentialist:** G1 **PASS with an explicit warrant against it.** The policing is not speculative: `GEMINI.md:426-436` records the failure as *observed* ("when asked to run `skill-maintenance` across the corpus"), and L11 explains *why* the prior is strong — every other major system trains the model that a skill body is something you read. Verbose prose that suppresses a real, documented, mechanism-inverting failure is load-bearing until an eval proves otherwise. **Do not merge R6 without running its test first.** This is the only recommendation I would advise against adopting on the strength of analysis alone.
+- **Essentialist:** G1 **PASS with an explicit warrant against it.** The policing is not speculative: `GEMINI.md:426-436` records the failure as *observed*, and L11 explains *why* the prior is strong — every other major system trains the model that a skill body is something you read.
+- **❌ FALSIFIER RUN — R6 REFUTED. NOT IMPLEMENTED.** See §5.1.
+
+### 5.1 R6 falsifier result (run 2026-08-12)
+
+The behavioral A/B could not run: `eval_cli` requires live provider credentials (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` per `crates/eval_cli/README.md:52-54`) and none are present in this environment. Rather than guess, I ran the **decidable half** of the falsifier — the premise check that determines whether the prohibition is load-bearing at all:
+
+1. **Is the prohibition the only defense?** Yes. `crates/agent/src/tools/skill_tool.rs:169-174` states body injection is disabled; `:544` returns the `No manifest configured` envelope and `:552`/`:639`/`:741`/`:787` return `SKILL.md body injection is disabled in zed-kask`. There is **no runtime gate preventing `read_file` of a `SKILL.md`** — `read_file_tool.rs:303`/`:339` only *log* `reg.skill.stray_read` via `warn_if_skill_catalog_read`. So a stray read silently returns raw prose that bypasses the cascade, the gas/OCAP membrane, and convergence.
+2. **Is the failure reachable in practice?** Yes, and more reachable than assumed: **63 installed skills vs. 104 registry manifests**, so name mismatches route to the `No manifest configured` envelope — exactly the state where `system_prompt.hbs:251`'s fallback rule ("do not read the body to compensate") is the sole thing standing between the model and a stray read.
+
+**Verdict:** the prose is the *only* enforcement point, and per L6 ("enforcement gates belong outside the prompt") the correct fix is a runtime gate, not less prose. Deleting the policing while no gate exists would remove the sole safeguard. **R6 is refuted and was not implemented.** The stray-read sensor now makes the failure observable, which converts R6 from an analysis bet into a measurable one: if `reg.skill.stray_read` stays silent across real sessions, revisit the trim; if it fires, the policing is confirmed load-bearing and should be *strengthened* into a tool-level refusal.
 
 ### Rejected by essentialist
 - **"Re-bound the skill catalog / move discovery to a `list_skills` tool."** **G1 FAIL on a falsified premise.** The prior draft ranked this #2 on the assumption of catalog bloat. Measurement (§2.9): ≈17 KB vs. upstream's 50 KB budget. The premise is false, so the change trades a real capability (zero-latency discovery, L11's preload step) for a saving that doesn't exist. **Eliminated, not demoted.**
@@ -201,8 +218,21 @@ Ranked. Each: change → axis → expected effect → falsifiable test. All surv
 **Metacognition (Improvement Kata, §A9).**
 - **Target condition:** every divergence cited `file:line` on both sides; every recommendation sourced, essentialist-survived, falsifiably tested; zero unverified claims.
 - **Actual condition:** 9 divergences cited both sides; 6 recommendations, all with tests; 1 defect found by **execution** rather than reading (§2.8); 3 literature claims corrected and 1 dropped for want of a source; 1 prior top-ranked recommendation **eliminated by measurement**; 1 candidate withheld as undetermined.
-- **Obstacle:** no eval harness was run. `crates/eval_cli` exists but was not exercised, so every "expected effect" on a *wording* change (R4, R5, R6) is a prediction. Only R1 was empirically established. Second obstacle: the `skill` tool returned methodology rather than executing cascades here, so Appendix A is my application of each method, not cascade output.
-- **Next experiment:** run R6's test first (it is the only recommendation whose analysis argues against its own adoption), then R5's, via `crates/eval_cli`.
+- **Obstacle:** the behavioral eval could not run — `eval_cli` needs live provider credentials that are absent here (§5.1). So R4/R5's *behavioral* effects remain predictions; their *structural* effects (surface delta, drift-detection) are verified by tests. Second obstacle: the `skill` tool returned methodology rather than executing cascades, so Appendix A is my application of each method.
+- **Experiment run (this session):** R6's falsifier, redirected from the unavailable behavioral A/B to the decidable premise check — which **refuted R6** (§5.1). Then R1–R5 implemented, each pinned by a test verified to fail without its change.
+- **Next experiment:** watch `reg.skill.stray_read` in real sessions. It converts R6 from an untestable bet into a measured one: silence over N sessions → revisit the trim; firings → promote the prose prohibition into a tool-level refusal (the L6 fix).
+
+**Ex-post scoring of this session's predictions.** Brier = (p − outcome)², lower is better.
+
+| Prediction | p | Outcome | Brier |
+|---|---|---|---|
+| R1 improves the objective | 0.96 | 1 (test fails without it; three overlays restored) | **0.002** |
+| R3 improves the objective | 0.85 | 1 (drift confirmed; enforcement added) | **0.023** |
+| R5 improves the objective | 0.80 | 1 (clean deletion, −2 lines, nothing lost) | **0.040** |
+| R6 improves the objective | 0.45 | 0 (refuted — prose is the only defense) | **0.203** |
+| "Auditing the prior report overturns ≥1 top-3 rec" | 0.60 | 1 (overturned two) | **0.160** |
+
+**Mean Brier ≈ 0.086** — decent, but the error is systematically one-directional: I was **under-confident on all four correct predictions** and correctly low on the one that failed. The lesson is specific: for changes whose falsifier is *decidable in-repo* (R1, R3), I should price confidence near the strength of the available evidence rather than hedging toward eval-dependence. R6's 0.45 was well-placed — low enough that I flagged it as non-mergeable without a test, which is exactly what saved it from being implemented wrongly.
 
 **Brier-style calibration, top 3.** Forecast = "this change improves the objective function"; scored ex-ante.
 
@@ -212,7 +242,7 @@ Ranked. Each: change → axis → expected effect → falsifiable test. All surv
 | **R3** (mermaid list vs. allowlist) | **0.85** | `merman` accepting bare `sankey`/`xychart` despite `SUPPORTED_PREFIXES` listing only the `-beta` forms (the allowlist gates zed's own pre-filter, so the true renderer contract could be laxer than the constant implies). |
 | **R5** (delete UI-affordance sentence) | **0.80** | Removal *increasing* spurious affordance narration — meaning the sentence suppressed rather than described. Also: evidence the Save/Refine/Discard text is consumed by something other than the model. |
 
-**Calibration reasoning.** R1 is high because it is the one finding established by running code, not reading it; I withhold the last 0.04 because I verified it through a sub-agent's test rather than my own, and I reverted before independently re-confirming. R3 sits at 0.85 rather than higher because a constant named `SUPPORTED_PREFIXES` in zed's pre-filter is strong but not conclusive evidence about the downstream renderer. R5 is 0.80 despite being the cleanest deletion because prompt deletions have a specific asymmetric failure mode — the removed line may have been suppressing a behavior nobody documented. That same asymmetry is why R6 (0.45, below the reporting bar) is risk-flagged rather than ranked high on its surface saving.
+**Calibration reasoning (ex-ante, retained for honesty).** R1 was high because it was established by running code, not reading it. R3 sat at 0.85 because `SUPPORTED_PREFIXES` is strong but not conclusive evidence about the downstream renderer — in the event, `test_beta_suffixed_diagram_types_are_extracted` settled it, and I could have been more confident. R5 was 0.80 despite being the cleanest deletion because prompt deletions carry an asymmetric risk: the removed line may have suppressed an undocumented behavior. That same asymmetry is why R6 was risk-flagged — and why refuting it mattered more than implementing it.
 
 **What would change the analysis rather than one recommendation:** (1) an eval run showing the skill-section verbosity is *not* load-bearing — R6 would jump to #2 and the surface axis would dominate the ranking; (2) discovering that the panel overlays are delivered through some channel *other* than `Thread::static_context` — that would demote R1 from a three-overlay outage to a Curator-only one; (3) evidence that current models already self-bound repetitive tool loops, which would make R4 pure surface cost with no reliability return.
 
