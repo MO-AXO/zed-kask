@@ -1389,7 +1389,7 @@ impl Render for KaskExtensionsPage {
                                         ],
                                     )
                                     .style(ToggleButtonGroupStyle::Outlined)
-                                    .size(ToggleButtonGroupSize::Custom(rems_from_px(30.))) // Perfectly matches the input
+                                    .size(ToggleButtonGroupSize::Custom(rems_from_px(30.0_f32))) // Perfectly matches the input
                                     .label_size(LabelSize::Default)
                                     .auto_width()
                                     .selected_index(match self.filter {

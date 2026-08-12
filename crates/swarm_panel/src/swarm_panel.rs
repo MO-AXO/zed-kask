@@ -2357,7 +2357,7 @@ impl Render for SwarmPanel {
                                         ],
                                     )
                                     .style(ToggleButtonGroupStyle::Outlined)
-                                    .size(ToggleButtonGroupSize::Custom(rems_from_px(28.)))
+                                    .size(ToggleButtonGroupSize::Custom(rems_from_px(28.0_f32)))
                                     .label_size(LabelSize::Small)
                                     .auto_width()
                                     .selected_index(match Self::current_swarm_mode(cx) {
@@ -2424,7 +2424,7 @@ impl Render for SwarmPanel {
                                 ],
                             )
                             .style(ToggleButtonGroupStyle::Outlined)
-                            .size(ToggleButtonGroupSize::Custom(rems_from_px(30.)))
+                            .size(ToggleButtonGroupSize::Custom(rems_from_px(30.0_f32)))
                             .label_size(LabelSize::Default)
                             .auto_width()
                             .selected_index(match self.mode {
@@ -2475,7 +2475,7 @@ impl Render for SwarmPanel {
                                             ],
                                         )
                                         .style(ToggleButtonGroupStyle::Outlined)
-                                        .size(ToggleButtonGroupSize::Custom(rems_from_px(30.)))
+                                        .size(ToggleButtonGroupSize::Custom(rems_from_px(30.0_f32)))
                                         .label_size(LabelSize::Default)
                                         .auto_width()
                                         .selected_index(match self.filter {

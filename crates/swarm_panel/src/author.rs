@@ -242,7 +242,7 @@ impl SwarmPanel {
                                     ],
                                 )
                                 .style(ToggleButtonGroupStyle::Outlined)
-                                .size(ToggleButtonGroupSize::Custom(rems_from_px(28.)))
+                                .size(ToggleButtonGroupSize::Custom(rems_from_px(28.0_f32)))
                                 .label_size(LabelSize::Small)
                                 .auto_width()
                                 .selected_index(match self.author.agent_type.as_str() {
@@ -364,7 +364,7 @@ impl SwarmPanel {
                                     ],
                                 )
                                 .style(ToggleButtonGroupStyle::Outlined)
-                                .size(ToggleButtonGroupSize::Custom(rems_from_px(28.)))
+                                .size(ToggleButtonGroupSize::Custom(rems_from_px(28.0_f32)))
                                 .label_size(LabelSize::Small)
                                 .auto_width()
                                 .selected_index(match self.author.visibility.as_str() {
