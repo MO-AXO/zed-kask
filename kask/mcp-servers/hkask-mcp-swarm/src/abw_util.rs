@@ -373,18 +373,20 @@ mod tests {
             );
         }
 
-        // P1 (invariant): the slug only contains lowercase letters, digits,
-        // and underscores (ABW's slug charset). The base is alphanumeric-
-        // mapped in `swarm_create_swarm`, but `make_swarm_slug` itself only
-        // adds `_<digits>` and trims underscores — it must not introduce any
-        // other character regardless of the input.
+        // P1 (invariant): the slug always ends with `_<digits>` — the
+        // millis suffix is always present regardless of the base. This is the
+        // disambiguation contract: two same-name swarms created at different
+        // times must not collide. `make_swarm_slug` itself does NOT lowercase
+        // the base (the caller `swarm_create_swarm` does), so we test the
+        // suffix contract, not the charset.
         #[test]
-        fn make_swarm_slug_only_slug_chars(base in "[a-zA-Z0-9_]*") {
+        fn make_swarm_slug_ends_with_millis_suffix(base in any::<String>()) {
             let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
             let slug = make_swarm_slug(&base, now);
+            let suffix = slug.rsplit_once('_').map(|(_, s)| s);
             prop_assert!(
-                slug.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
-                "slug contains non-slug chars: {:?}",
+                suffix.is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())),
+                "slug must end with _<digits>, got: {:?}",
                 slug
             );
         }
@@ -412,15 +414,34 @@ mod tests {
             }
         }
 
-        // P1 (idempotency): encode(encode(x)) == encode(x). The percent-
-        // sign and hex digits produced by encoding are themselves
-        // unreserved/path-allowed, so re-encoding is a no-op. This is what
-        // makes it safe to apply at multiple layers without double-encoding.
+        // P1 (invariant): the encoded segment only contains unreserved
+        // characters (RFC 3986 §2.3: ALPHA / DIGIT / "-" / "_" / "." / "~")
+        // and well-formed percent-encoded triplets (% + two hex digits). No
+        // raw path-unsafe byte survives. This is stronger than idempotency
+        // (which does NOT hold — `%` is not unreserved, so re-encoding
+        // double-encodes `%XX` → `%25XX`; the function is a one-shot encoder).
         #[test]
-        fn url_encode_segment_is_idempotent(segment in any::<String>()) {
-            let once = url_encode_segment(&segment);
-            let twice = url_encode_segment(&once);
-            prop_assert_eq!(once, twice);
+        fn url_encode_segment_only_unreserved_and_percent_encoded(segment in any::<String>()) {
+            let encoded = url_encode_segment(&segment);
+            let mut chars = encoded.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '%' {
+                    let h1 = chars.next();
+                    let h2 = chars.next();
+                    prop_assert!(
+                        h1.is_some_and(|c| c.is_ascii_hexdigit())
+                            && h2.is_some_and(|c| c.is_ascii_hexdigit()),
+                        "invalid percent-encoding in {:?}: % not followed by two hex digits",
+                        encoded
+                    );
+                } else {
+                    prop_assert!(
+                        c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'),
+                        "non-unreserved character {:?} in encoded segment: {:?}",
+                        c, encoded
+                    );
+                }
+            }
         }
     }
 }
