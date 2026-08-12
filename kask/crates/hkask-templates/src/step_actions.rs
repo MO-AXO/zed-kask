@@ -261,7 +261,7 @@ impl StepMachine {
 
         let timeout_dur = effective_timeout(node.timeout_seconds);
 
-        let (result_text, tool_calls, cost_usd) = call_inference_stream(
+        let (result_text, tool_calls, cost_usd, finish_reason) = call_inference_stream(
             &infra.inference,
             &prompt,
             &params,
@@ -290,6 +290,23 @@ impl StepMachine {
             tool_call.args.clone()
         } else {
             if output_schema.is_some() {
+                // zed-kask: D25 — a truncated generation (finish_reason "length")
+                // never emits the structured-output tool call. Refuse to parse the
+                // partial text as JSON — surface a loud error so the regulation loop
+                // / UI can act (raise max_tokens, shrink prompt, or retry) instead of
+                // silently feeding truncated output to parse_json_response.
+                if finish_reason.as_deref() == Some("length") {
+                    tracing::warn!(
+                        target: "reg.skill.cascade.step_executed",
+                        step = node.ordinal,
+                        "Step truncated at max_tokens before emitting structured-output tool call"
+                    );
+                    return Err(TemplateError::Manifest(format!(
+                        "Step {} truncated at max_tokens before emitting the structured-output \\n                         tool call — increase max_tokens or reduce the prompt; refusing to \
+                         parse partial output",
+                        node.ordinal
+                    )));
+                }
                 tracing::warn!(
                     target: "reg.skill.cascade.step_executed",
                     step = node.ordinal,
@@ -868,7 +885,7 @@ async fn call_inference_stream(
     tools: Option<&[ChatToolDefinition]>,
     timeout: std::time::Duration,
     progress: Option<&(dyn Fn(&str) + Send + Sync)>,
-) -> Result<(String, Vec<hkask_types::StructuredToolCall>, Option<f64>)> {
+) -> Result<(String, Vec<hkask_types::StructuredToolCall>, Option<f64>, Option<String>)> {
     use futures_util::StreamExt;
 
     // Defense in depth: if a caller passes Duration::ZERO (e.g. from a
@@ -887,7 +904,7 @@ async fn call_inference_stream(
 
     let stream = inference.generate_stream(prompt, params, tools);
 
-    let (full_text, tool_calls) = match tokio::time::timeout(timeout, async {
+    let (full_text, tool_calls, finish_reason) = match tokio::time::timeout(timeout, async {
         let mut full_text = String::new();
         let mut final_chunk: Option<hkask_types::InferenceStreamChunk> = None;
         let mut stream = stream;
@@ -919,11 +936,11 @@ async fn call_inference_stream(
             tool_calls: Vec::new(),
             cost_usd: None,
         });
-        Ok::<_, TemplateError>((full_text, chunk.tool_calls))
+        Ok::<_, TemplateError>((full_text, chunk.tool_calls, chunk.finish_reason))
     })
     .await
     {
-        Ok(Ok((text, tool_calls))) => (text, tool_calls),
+        Ok(Ok((text, tool_calls, finish_reason))) => (text, tool_calls, finish_reason),
         Ok(Err(e)) => return Err(e),
         Err(_elapsed) => {
             return Err(TemplateError::Manifest(format!(
@@ -936,7 +953,7 @@ async fn call_inference_stream(
     // The streaming path does not surface cost_usd. Return None — the budget
     // tracker treats None as free (not charged). When cost tracking is needed,
     // use the non-streaming generate() path.
-    Ok((full_text, tool_calls, None))
+    Ok((full_text, tool_calls, None, finish_reason))
 }
 
 /// Check whether a JSON value references any tainted (Source) context entries.
@@ -1136,5 +1153,75 @@ mod tests {
 
         let result = effective_timeout(1);
         assert_eq!(result, std::time::Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn call_inference_stream_threads_finish_reason_length() {
+        // zed-kask: D25 — `call_inference_stream` must return the chunk's
+        // finish_reason so `execute_select` can detect truncation
+        // (finish_reason "length") and refuse to parse partial output as JSON.
+        use futures_util::Stream;
+        use hkask_types::{InferenceError, InferenceResult, InferenceStreamChunk};
+        use std::future::Future;
+        use std::pin::Pin;
+
+        struct TruncationStream {
+            finish_reason: Option<String>,
+            text: String,
+        }
+        impl InferencePort for TruncationStream {
+            fn generate(
+                &self,
+                _prompt: &str,
+                _parameters: &LLMParameters,
+                _tools: Option<&[ChatToolDefinition]>,
+            ) -> Pin<Box<dyn Future<Output = std::result::Result<InferenceResult, InferenceError> + Send + '_>> {
+                Box::pin(async {
+                    Err(InferenceError::Generation(
+                        "stream stub overrides generate_stream".into(),
+                    ))
+                })
+            }
+            fn generate_stream(
+                &self,
+                _prompt: &str,
+                _parameters: &LLMParameters,
+                _tools: Option<&[ChatToolDefinition]>,
+            ) -> Pin<Box<dyn Stream<Item = std::result::Result<InferenceStreamChunk, InferenceError> + Send + '_>> {
+                let chunk = InferenceStreamChunk {
+                    text_delta: self.text.clone(),
+                    reasoning_delta: String::new(),
+                    model: "test".into(),
+                    finish_reason: self.finish_reason.clone(),
+                    usage: None,
+                    tool_calls: Vec::new(),
+                    cost_usd: None,
+                };
+                Box::pin(stream::once(async move { Ok(chunk) }))
+            }
+        }
+
+        let inference = Arc::new(TruncationStream {
+            finish_reason: Some("length".into()),
+            text: "{\"partial\":".into(),
+        }) as Arc<dyn InferencePort>;
+        let (text, tool_calls, _cost, finish_reason) = call_inference_stream(
+            &inference,
+            "prompt",
+            &LLMParameters::default(),
+            None,
+            std::time::Duration::from_secs(30),
+            None,
+        )
+        .await
+        .expect("stream should complete");
+
+        assert_eq!(text, "{\"partial\":");
+        assert!(tool_calls.is_empty());
+        assert_eq!(
+            finish_reason.as_deref(),
+            Some("length"),
+            "finish_reason must be threaded out for execute_select truncation detection"
+        );
     }
 }
