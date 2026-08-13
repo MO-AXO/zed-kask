@@ -42,6 +42,7 @@ NAME_WEIGHT = 0.40
 DESCRIPTION_WEIGHT = 0.35
 INTENT_WEIGHT = 0.25
 CODE_TOOL_NUDGE = 0.10
+CONFIDENCE_GATE = 0.50
 NO_CONFIDENCE_FLOOR = 1
 
 STOPWORDS = {
@@ -160,6 +161,12 @@ def route(message: str, tools: list[dict], has_code_file: bool = False):
         ),
         key=lambda pair: (-pair[0], pair[1]["name"]),
     )
+    # Confidence gate: only prune when the best match is strong enough that the
+    # ranking can be trusted. A small confident selection is worse than none.
+    top_score = scored[0][0] if scored else 0.0
+    if top_score < CONFIDENCE_GATE:
+        return [t["name"] for t in tools], True
+
     selected = [t["name"] for score, t in scored[:SELECTION_BUDGET] if score >= THRESHOLD]
 
     # Empty selection is scorer failure, not a narrowing -> fail open.
@@ -283,6 +290,7 @@ def main() -> int:
             ("DESCRIPTION_WEIGHT", DESCRIPTION_WEIGHT),
             ("INTENT_WEIGHT", INTENT_WEIGHT),
             ("CODE_TOOL_NUDGE", CODE_TOOL_NUDGE),
+            ("CONFIDENCE_GATE", CONFIDENCE_GATE),
             ("NO_CONFIDENCE_FLOOR", NO_CONFIDENCE_FLOOR),
         ):
             print(f"  {name} = {value}")
