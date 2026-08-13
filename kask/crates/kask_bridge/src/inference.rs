@@ -165,8 +165,7 @@ impl LanguageModelInferencePort {
                                 text.push_str(&delta);
                             }
                             Ok(LanguageModelCompletionEvent::Thinking {
-                                text: thinking,
-                                ..
+                                text: thinking, ..
                             }) => {
                                 reasoning.push_str(&thinking);
                             }
@@ -282,8 +281,7 @@ impl LanguageModelInferencePort {
                                 }));
                             }
                             Ok(LanguageModelCompletionEvent::Thinking {
-                                text: thinking,
-                                ..
+                                text: thinking, ..
                             }) => {
                                 let _ = reply.send(Ok(InferenceStreamChunk {
                                     text_delta: String::new(),

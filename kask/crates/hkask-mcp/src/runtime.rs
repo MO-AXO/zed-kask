@@ -469,9 +469,7 @@ impl McpRuntime {
 
         let Some(running) = running else {
             let error = last_error.unwrap_or_else(|| {
-                ServerStartError::SpawnFailed(
-                    "exhausted retries without a captured error".into(),
-                )
+                ServerStartError::SpawnFailed("exhausted retries without a captured error".into())
             });
             return Err(error);
         };
