@@ -437,9 +437,9 @@ impl CondenserServer {
                 serde_json::json!({"model": effective_model.to_string(), "summary_length": summary_len}),
             );
 
-            Ok(serde_json::to_value(&output).map_err(|e| {
+            serde_json::to_value(&output).map_err(|e| {
                 McpToolError::internal(format!("ThreadSummaryOutput serialization failed: {e}"))
-            })?)
+            })
         }).await
     }
 
