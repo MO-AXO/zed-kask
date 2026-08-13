@@ -230,7 +230,7 @@ impl LazyToolRouter {
     /// the drift class that silently changed routing behaviour before; pinned by
     /// `default_thresholds_are_the_documented_values`.
     pub fn new() -> Self {
-        Self::new_with_thresholds(0.30, 9)
+        Self::new_with_thresholds(0.30, 6)
     }
 
     /// Construct with explicit thresholds. The composition root (main.rs)
@@ -744,7 +744,7 @@ mod tests {
     #[test]
     fn default_thresholds_are_the_documented_values() {
         let router = LazyToolRouter::new();
-        assert_eq!(router.complex_word_threshold, 9);
+        assert_eq!(router.complex_word_threshold, 6);
         assert!((router.threshold - 0.30).abs() < f64::EPSILON);
     }
 
