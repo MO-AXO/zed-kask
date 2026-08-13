@@ -130,7 +130,7 @@ impl TemplateRenderer {
 
         // Try the ref as-is first.
         if let Ok(c) = std::fs::read_to_string(&template_path) {
-            self.cache_template(template_ref, &template_path, c);
+            self.cache_template(template_ref, &template_path, &c);
             return Ok(c);
         }
 
@@ -140,7 +140,7 @@ impl TemplateRenderer {
             if let Some(j2_path) = safe_template_join(&self.base_path, &j2_ref)
                 && let Ok(c) = std::fs::read_to_string(&j2_path)
             {
-                self.cache_template(template_ref, &j2_path, c);
+                self.cache_template(template_ref, &j2_path, &c);
                 return Ok(c);
             }
         }
@@ -152,7 +152,7 @@ impl TemplateRenderer {
             if let Some(yaml_path) = safe_template_join(&self.base_path, &yaml_ref)
                 && let Ok(c) = std::fs::read_to_string(&yaml_path)
             {
-                self.cache_template(template_ref, &yaml_path, c);
+                self.cache_template(template_ref, &yaml_path, &c);
                 return Ok(c);
             }
         }
@@ -167,11 +167,11 @@ impl TemplateRenderer {
     }
 
     /// Cache a template's content with its file modification time.
-    fn cache_template(&self, template_ref: &str, path: &Path, content: String) {
+    fn cache_template(&self, template_ref: &str, path: &Path, content: &str) {
         if let Ok(metadata) = std::fs::metadata(path) {
             let mtime = metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
             if let Ok(mut cache) = self.disk_cache.lock() {
-                cache.insert(template_ref.to_string(), (mtime, content));
+                cache.insert(template_ref.to_string(), (mtime, content.to_string()));
             }
         }
     }
