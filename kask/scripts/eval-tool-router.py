@@ -37,7 +37,11 @@ THRESHOLD = 0.30
 COMPLEX_WORD_THRESHOLD = 9
 SELECTION_BUDGET = 40
 MATCH_SATURATION = 3.0
-CODE_TOOL_BOOST = 0.5
+NAME_MATCH_SATURATION = 2.0
+NAME_WEIGHT = 0.40
+DESCRIPTION_WEIGHT = 0.35
+INTENT_WEIGHT = 0.25
+CODE_TOOL_NUDGE = 0.10
 NO_CONFIDENCE_FLOOR = 1
 
 STOPWORDS = {
@@ -110,26 +114,36 @@ def should_activate(message: str, has_code_file: bool) -> bool:
     return False
 
 
-def score_tool(description: str, keywords: set[str], has_code_file: bool) -> float:
+def score_tool(
+    name: str, description: str, keywords: set[str], has_code_file: bool
+) -> float:
     description_lower = description.lower()
     terms = tokenize(description_lower)
+    name_terms = tokenize(name)
 
     matched = sum(1 for kw in keywords if kw.lower() in terms)
     match_evidence = min(matched / MATCH_SATURATION, 1.0)
 
+    name_matched = sum(1 for kw in keywords if kw.lower() in name_terms)
+    name_evidence = min(name_matched / NAME_MATCH_SATURATION, 1.0)
+
     intent_matched = sum(
         1 for kw in keywords if kw in INTENT_KEYWORDS and kw.lower() in terms
     )
-    score = 0.6 * match_evidence + 0.4 * min(intent_matched, 1)
+    score = (
+        NAME_WEIGHT * name_evidence
+        + DESCRIPTION_WEIGHT * match_evidence
+        + INTENT_WEIGHT * min(intent_matched, 1)
+    )
 
-    code_action_signal = any(kw in CODE_SIGNALS for kw in keywords)
-    if has_code_file or code_action_signal:
+    # Additive nudge, gated on an open code file only -- not on generic verbs.
+    if has_code_file:
         boosted = any(
             (kw in description_lower) if " " in kw else (kw in terms)
             for kw in CODE_TOOL_KEYWORDS
         )
         if boosted:
-            score = max(score, CODE_TOOL_BOOST)
+            score += CODE_TOOL_NUDGE
     return min(score, 1.0)
 
 
@@ -140,7 +154,10 @@ def route(message: str, tools: list[dict], has_code_file: bool = False):
 
     keywords = extract_context_keywords(message)
     scored = sorted(
-        ((score_tool(t["description"], keywords, has_code_file), t) for t in tools),
+        (
+            (score_tool(t["name"], t["description"], keywords, has_code_file), t)
+            for t in tools
+        ),
         key=lambda pair: (-pair[0], pair[1]["name"]),
     )
     selected = [t["name"] for score, t in scored[:SELECTION_BUDGET] if score >= THRESHOLD]
@@ -261,7 +278,11 @@ def main() -> int:
             ("COMPLEX_WORD_THRESHOLD", COMPLEX_WORD_THRESHOLD),
             ("SELECTION_BUDGET", SELECTION_BUDGET),
             ("MATCH_SATURATION", MATCH_SATURATION),
-            ("CODE_TOOL_BOOST", CODE_TOOL_BOOST),
+            ("NAME_MATCH_SATURATION", NAME_MATCH_SATURATION),
+            ("NAME_WEIGHT", NAME_WEIGHT),
+            ("DESCRIPTION_WEIGHT", DESCRIPTION_WEIGHT),
+            ("INTENT_WEIGHT", INTENT_WEIGHT),
+            ("CODE_TOOL_NUDGE", CODE_TOOL_NUDGE),
             ("NO_CONFIDENCE_FLOOR", NO_CONFIDENCE_FLOOR),
         ):
             print(f"  {name} = {value}")
