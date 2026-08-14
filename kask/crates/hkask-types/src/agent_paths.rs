@@ -276,4 +276,120 @@ mod tests {
             PathBuf::from("threads").join("threads.db")
         );
     }
+
+    // ── Property-based tests (D28) ──────────────────────────────────────────
+
+    use proptest::prelude::*;
+    proptest! {
+        /// P4 (panic freedom): `sanitize_name` never panics on any input.
+        #[test]
+        fn sanitize_name_never_panics(name in ".*") {
+            let _ = sanitize_name(&name);
+        }
+
+        /// P1 (invariant): `sanitize_name` output is never `.` or `..`.
+        #[test]
+        fn sanitize_name_never_produces_path_traversal(name in ".*") {
+            let result = sanitize_name(&name);
+            prop_assert!(
+                result != "." && result != "..",
+                "sanitize_name produced path traversal: {:?} -> {:?}",
+                name, result,
+            );
+        }
+
+        /// P1 (invariant): `sanitize_name` output contains no path separators.
+        #[test]
+        fn sanitize_name_never_contains_separators(name in ".*") {
+            let result = sanitize_name(&name);
+            prop_assert!(
+                !result.contains('/') && !result.contains('\\'),
+                "sanitize_name produced a path separator: {:?} -> {:?}",
+                name, result,
+            );
+        }
+
+        /// P1 (idempotency): `sanitize_name(sanitize_name(x)) == sanitize_name(x)`.
+        #[test]
+        fn sanitize_name_is_idempotent(name in ".*") {
+            let once = sanitize_name(&name);
+            let twice = sanitize_name(&once);
+            prop_assert!(once == twice, "not idempotent: {:?} -> {:?} -> {:?}", name, once, twice);
+        }
+
+        /// P1 (invariant): `agent_dir(name)` always starts with `AGENTS_DIR`.
+        #[test]
+        fn agent_dir_always_under_agents_dir(name in ".*") {
+            let dir = agent_dir(&name);
+            prop_assert!(dir.starts_with(AGENTS_DIR), "not under AGENTS_DIR: {:?} -> {:?}", name, dir);
+        }
+
+        /// P1 (invariant): `agent_dir(name)` second component is `sanitize_name(name)`.
+        #[test]
+        fn agent_dir_uses_sanitized_name(name in ".*") {
+            let dir = agent_dir(&name);
+            let sanitized = sanitize_name(&name);
+            let components: Vec<_> = dir.components().collect();
+            prop_assert!(
+                components.len() == 2
+                    && components[1] == std::path::Component::Normal(std::ffi::OsStr::new(&sanitized)),
+                "second component must be sanitized: {:?} -> {:?} (sanitized: {:?})",
+                name, dir, sanitized,
+            );
+        }
+
+        /// P1 (invariant): `mcp_server_db` always starts with `MCP_DIR`.
+        #[test]
+        fn mcp_server_db_always_under_mcp_dir(
+            server_id in "[a-z][a-z0-9-]*",
+            purpose in "[a-z][a-z0-9-]*",
+        ) {
+            let path = mcp_server_db(&server_id, &purpose);
+            prop_assert!(path.starts_with(MCP_DIR), "not under MCP_DIR: ({:?}, {:?}) -> {:?}", server_id, purpose, path);
+        }
+
+        /// P1 (invariant): `mcp_server_db` has exactly 3 components.
+        #[test]
+        fn mcp_server_db_has_three_components(
+            server_id in "[a-z][a-z0-9-]*",
+            purpose in "[a-z][a-z0-9-]*",
+        ) {
+            let path = mcp_server_db(&server_id, &purpose);
+            let components: Vec<_> = path.components().collect();
+            prop_assert_eq!(components.len(), 3, "not 3 components: ({:?}, {:?}) -> {:?}", server_id, purpose, path);
+        }
+
+        /// P1 (invariant): `mcp_server_db` sanitizes `server_id`.
+        #[test]
+        fn mcp_server_db_sanitizes_server_id(
+            server_id in ".*",
+            purpose in "[a-z][a-z0-9-]*",
+        ) {
+            let path = mcp_server_db(&server_id, &purpose);
+            let sanitized = sanitize_name(&server_id);
+            let components: Vec<_> = path.components().collect();
+            prop_assert!(
+                components.len() >= 2
+                    && components[1] == std::path::Component::Normal(std::ffi::OsStr::new(&sanitized)),
+                "server_id not sanitized: ({:?}, {:?}) -> {:?} (sanitized: {:?})",
+                server_id, purpose, path, sanitized,
+            );
+        }
+
+        /// P1 (invariant): `agent_db(name)` filename is `{name}.db` for sanitized names.
+        #[test]
+        fn agent_db_filename_matches_name(name in "[a-z][a-z0-9-]*") {
+            let path = agent_db(&name);
+            let expected = format!("{name}.db");
+            prop_assert_eq!(path.file_name(), Some(std::ffi::OsStr::new(&expected)), "filename mismatch: {:?} -> {:?}", name, path);
+        }
+
+        /// P1 (invariant): `agent_db(name)` is always under `agent_dir(name)`.
+        #[test]
+        fn agent_db_under_agent_dir(name in ".*") {
+            let db_path = agent_db(&name);
+            let dir = agent_dir(&name);
+            prop_assert!(db_path.starts_with(&dir), "not under agent_dir: {:?} -> {:?} (dir: {:?})", name, db_path, dir);
+        }
+    }
 }
