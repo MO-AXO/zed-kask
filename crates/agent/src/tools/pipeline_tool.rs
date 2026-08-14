@@ -140,16 +140,12 @@ impl AgentTool for PipelineTool {
             // per-project), so containment must happen here, at the per-thread
             // tool layer.
             let project = self.project.clone();
-            let abs_path = cx
-                .update(|cx| {
-                    let project = project.read(cx);
-                    project
-                        .find_project_path(&input.manifest_path, cx)
-                        .and_then(|project_path| project.absolute_path(&project_path, cx))
-                })
-                .map_err(|e| PipelineToolOutput::Error {
-                    error: format!("Failed to access project: {e}"),
-                })?;
+            let abs_path = cx.update(|cx| {
+                let project = project.read(cx);
+                project
+                    .find_project_path(&input.manifest_path, cx)
+                    .and_then(|project_path| project.absolute_path(&project_path, cx))
+            });
 
             let abs_path = abs_path.ok_or_else(|| PipelineToolOutput::Error {
                 error: format!(
