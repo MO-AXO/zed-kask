@@ -23,6 +23,11 @@ name = "swarm_live_probes"
 path = "tests/swarm_live_probes.rs"
 required-features = ["test-utils"]
 
+[[test]]
+name = "swarm_properties"
+path = "tests/swarm_properties.rs"
+required-features = ["test-utils"]
+
 [dependencies]
 hkask-mcp-server.workspace = true
 hkask-bridge-ontology.workspace = true
