@@ -1,15 +1,20 @@
 //! Filesystem path helpers for per-agent storage.
 //!
-//! Each agent (1:1 with a user) owns a directory tree under `{data_dir}/agents/{name}/`
-//! containing its pod DB, memory DB, wallet DB, sessions, artifacts, etc.
-//! These helpers compute those paths and bootstrap the directory structure.
+//! The system has three agent classes:
+//! - **User agent** — the human user. Provisioned by `provision_agent`.
+//!   Has `agents/{username}/{username}.db` (sovereign DB) + `memory.db`.
+//! - **Curator agent** — the system regulator. Has `agents/curator/curator.db`.
+//! - **Replica agents** — static memory built from a corpus. Not provisioned;
+//!   their DBs are opened from agent-provided paths, not from `agents/`.
+//!
+//! These helpers compute agent paths and bootstrap the directory structure.
 //!
 //! # Standardized Artifact Storage
 //!
 //! All persistent kask artifacts live under four class subdirs of
 //! `resolve_data_dir()` (see `kask/docs/architecture/standardized-artifact-storage.md`):
 //!
-//! - `agents/`  — per-agent files (pod DB, memory DB, etc.)
+//! - `agents/`  — per-agent files (sovereign DB, memory DB)
 //! - `mcp/`     — per-MCP-server artifacts (`mcp/{server_id}/{purpose}.db`)
 //! - `skills/`  — user skills (`skills/{skill_name}/`)
 //! - `threads/` — archived chat threads (`threads/threads.db`)
@@ -139,7 +144,8 @@ pub fn threads_db_path() -> PathBuf {
 /// is anachronistic). The on-disk filename is `{agent_name}.db` (e.g.
 /// `agents/curator/curator.db`), not `pod.db`.
 pub fn agent_db(name: &str) -> PathBuf {
-    agent_dir(name).join(format!("{name}.db"))
+    let sanitized = sanitize_name(name);
+    agent_dir(name).join(format!("{sanitized}.db"))
 }
 
 /// Memory database — episodic + semantic tool storage.
@@ -324,11 +330,13 @@ mod tests {
             prop_assert!(dir.starts_with(AGENTS_DIR), "not under AGENTS_DIR: {:?} -> {:?}", name, dir);
         }
 
-        /// P1 (invariant): `agent_dir(name)` second component is `sanitize_name(name)`.
+        /// P1 (invariant): `agent_dir(name)` second component is `sanitize_name(name)`
+        /// when the sanitized name is non-empty.
         #[test]
         fn agent_dir_uses_sanitized_name(name in ".*") {
-            let dir = agent_dir(&name);
             let sanitized = sanitize_name(&name);
+            prop_assume!(!sanitized.is_empty(), "empty sanitized name is an edge case");
+            let dir = agent_dir(&name);
             let components: Vec<_> = dir.components().collect();
             prop_assert!(
                 components.len() == 2
@@ -359,14 +367,17 @@ mod tests {
             prop_assert_eq!(components.len(), 3, "not 3 components: ({:?}, {:?}) -> {:?}", server_id, purpose, path);
         }
 
-        /// P1 (invariant): `mcp_server_db` sanitizes `server_id`.
+        /// P1 (invariant): `mcp_server_db` sanitizes `server_id` — the
+        /// output's second component is `sanitize_name(server_id)` when the
+        /// sanitized name is non-empty.
         #[test]
         fn mcp_server_db_sanitizes_server_id(
             server_id in ".*",
             purpose in "[a-z][a-z0-9-]*",
         ) {
-            let path = mcp_server_db(&server_id, &purpose);
             let sanitized = sanitize_name(&server_id);
+            prop_assume!(!sanitized.is_empty(), "empty sanitized server_id is an edge case");
+            let path = mcp_server_db(&server_id, &purpose);
             let components: Vec<_> = path.components().collect();
             prop_assert!(
                 components.len() >= 2
@@ -376,11 +387,14 @@ mod tests {
             );
         }
 
-        /// P1 (invariant): `agent_db(name)` filename is `{name}.db` for sanitized names.
+        /// P1 (invariant): `agent_db(name)` filename is `{sanitize_name(name)}.db`
+        /// for names that sanitize to non-empty.
         #[test]
-        fn agent_db_filename_matches_name(name in "[a-z][a-z0-9-]*") {
+        fn agent_db_filename_matches_sanitized_name(name in "[a-z][a-z0-9-]*") {
+            let sanitized = sanitize_name(&name);
+            prop_assume!(!sanitized.is_empty());
             let path = agent_db(&name);
-            let expected = format!("{name}.db");
+            let expected = format!("{sanitized}.db");
             prop_assert_eq!(path.file_name(), Some(std::ffi::OsStr::new(&expected)), "filename mismatch: {:?} -> {:?}", name, path);
         }
 
