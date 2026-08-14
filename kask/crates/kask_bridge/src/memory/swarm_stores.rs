@@ -85,6 +85,13 @@ impl SwarmStore {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_for_tests(&self, store: Option<Arc<MemoryStore>>) {
+        if let Ok(mut guard) = self.store.write() {
+            *guard = store;
+        }
+    }
+
     pub(crate) fn get(&self) -> Option<Arc<MemoryStore>> {
         let needs_heal = match self.store.read() {
             Ok(guard) => guard.is_none(),

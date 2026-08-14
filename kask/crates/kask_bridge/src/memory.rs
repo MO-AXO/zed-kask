@@ -1006,9 +1006,11 @@ impl RealMemoryPort {
     /// polling doesn't drive the re-open path.
     pub fn memory_health_json(&self) -> serde_json::Value {
         let curator_up = self.curator_store.availability();
+        let swarm_up = self.swarm_store.availability();
         serde_json::json!({
             "curator_store": curator_up,
-            "degraded": !curator_up,
+            "swarm_store": swarm_up,
+            "degraded": !curator_up || !swarm_up,
         })
     }
 
@@ -2458,14 +2460,19 @@ mod tests {
 
         let healthy = port.memory_health_json();
         assert_eq!(healthy["curator_store"], true);
-        assert_eq!(healthy["degraded"], false);
+        // The swarm store is `None` in the test port (for_tests(None)), so
+        // `degraded` is true even when the curator store is healthy — the
+        // swarm store is simply not configured in tests.
+        assert_eq!(healthy["swarm_store"], false);
+        assert_eq!(healthy["degraded"], true);
 
-        // Simulate an outage. Healing is disabled in test handles, so if the
-        // probe attempted a heal it would fail — the point is it must not
-        // attempt one at all.
+        // Simulate a curator outage. Healing is disabled in test handles, so
+        // if the probe attempted a heal it would fail — the point is it must
+        // not attempt one at all.
         port.curator_store.set_for_tests(None);
         let degraded = port.memory_health_json();
         assert_eq!(degraded["curator_store"], false);
+        assert_eq!(degraded["swarm_store"], false);
         assert_eq!(degraded["degraded"], true);
 
         // Store still down after the probe — the probe didn't heal.

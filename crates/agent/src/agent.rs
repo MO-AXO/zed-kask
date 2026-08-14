@@ -2216,24 +2216,42 @@ impl NativeAgent {
             let envelope = if let Some(executor) = crate::manifest_executor() {
                 let skill_name = skill.name.as_ref();
                 if executor.has_manifest(skill_name) {
+                    // Extract swarm_id before the context map is moved into
+                    // `context.extend`. Used by the cascade context provider
+                    // to determine whether to recall from the swarm store.
+                    let slash_swarm_id = slash_context
+                        .get("swarm_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
                     let mut context = std::collections::HashMap::new();
                     context.extend(slash_context);
                     context.insert(
                         "task".to_string(),
-                        serde_json::Value::String(task_text),
+                        serde_json::Value::String(task_text.clone()),
                     );
-                    // The slash-command path has no thread message snapshot
-                    // (unlike the model-invoked `skill` tool, which has
-                    // `ToolCallEventStream::thread`). Slash commands run
-                    // isolated — prior_messages and memory_snippets are empty.
-                    // This is acceptable: slash commands are typically
-                    // one-shot invocations, not conversational.
+
+                    // Gather short-term (thread) and long-term (memory)
+                    // context for the cascade — same as the model-invoked
+                    // `skill` tool path. The slash-command path has the
+                    // thread entity directly (from the session), so we
+                    // snapshot recent turns and gather memory here rather
+                    // than going through `ToolCallEventStream`.
+                    let (prior_messages, memory_snippets) =
+                        crate::tools::gather_cascade_context_from_thread(
+                            &thread,
+                            &task_text,
+                            slash_swarm_id,
+                            cx,
+                        )
+                        .await;
+
                     match executor
                         .execute_skill(
                             skill_name,
                             context,
-                            Vec::new(),
-                            Vec::new(),
+                            prior_messages,
+                            memory_snippets,
                             None,
                             None,
                         )

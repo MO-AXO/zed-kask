@@ -204,7 +204,7 @@ fn extract_yaml_scalar(frontmatter: &str, key: &str) -> Option<String> {
         let value = raw.trim();
         if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
             value[1..value.len() - 1]
-                .replace("\"", "\"")
+                .replace("\\\"", "\"")
                 .replace("\\\\", "\\")
         } else {
             value.to_string()
