@@ -813,14 +813,23 @@ fn condense_turn_text(
 
     // Truncate at the char boundary closest to max_tokens * 4, then find
     // the last whitespace to avoid cutting mid-word.
-    let char_cap = max_tokens * 4;
-    if char_cap >= condensed.len() {
+    // Use `char_indices` to find a safe UTF-8 boundary at or before the
+    // byte cap — slicing at an arbitrary byte index panics if it falls
+    // inside a multi-byte character.
+    let byte_cap = max_tokens * 4;
+    if byte_cap >= condensed.len() {
         return condensed;
     }
-    let truncated = &condensed[..char_cap];
+    let safe_boundary = condensed
+        .char_indices()
+        .take_while(|(byte_idx, _)| *byte_idx <= byte_cap)
+        .last()
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(0);
+    let truncated = &condensed[..safe_boundary];
     let last_space = truncated
         .rfind(|c: char| c.is_whitespace())
-        .unwrap_or(char_cap);
+        .unwrap_or(safe_boundary);
     format!("{}…[truncated]", &condensed[..last_space])
 }
 
