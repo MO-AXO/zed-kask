@@ -1,14 +1,6 @@
 {# goal: Refine and bound the focal question with decision relevance, time horizon, and scope boundaries. Produces a current state summary. #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- focal
-- question
-- decision
-- horizon
-- scope
-- bound
-- strategic
 contract:
   input:
     focal_question: string
@@ -20,7 +12,6 @@ contract:
     time_bound: string
     scope_boundaries: object
     current_state_summary: string
-energy_cap: 2048
 visibility: Public
 ---
 {# Template: scenario-builder/focal-question.j2 #}

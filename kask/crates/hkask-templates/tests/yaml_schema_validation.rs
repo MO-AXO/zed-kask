@@ -148,20 +148,29 @@ fn superforecasting_manifest_loads_with_compute_step() {
     let manifest = hkask_templates::load_manifest_from_yaml(&yaml)
         .unwrap_or_else(|e| panic!("Failed to load superforecasting manifest: {e}"));
 
-    // 12 select steps + 4 compute steps + 1 loop step = 17 total.
+    // 11 select steps + 6 compute steps + 1 loop step = 18 total.
+    // The combine_tree_probabilities compute step (ordinal 9) was inserted
+    // between stage_3 and stage_4 to replace the heuristic combine. The
+    // former kata.convergence_check compute step was removed — the
+    // ConvergenceTracker is the single convergence gate. The lisp.eval step
+    // (ordinal 16) remains: it computes the convergence signal that the loop
+    // step pushes via `convergence_signal:`.
     assert_eq!(
         manifest.steps.len(),
-        17,
-        "expected 17 steps after Fermi + outside-view + Bayesian + calibration compute insertions"
+        18,
+        "expected 18 steps after Fermi + outside-view + tree-combine + Bayesian + lisp.eval signal + calibration compute steps"
     );
 
-    // Four compute steps: Fermi (3), outside-view (5), Bayesian (10), calibration (16).
+    // Six compute steps: Fermi (3), outside-view (5), tree-combine (9),
+    // Bayesian (11), lisp.eval signal (16), calibration (17). The former
+    // convergence-check compute was removed — convergence is gated by the
+    // ConvergenceTracker.
     let compute_steps: Vec<_> = manifest
         .steps
         .iter()
         .filter(|s| s.action == "compute")
         .collect();
-    assert_eq!(compute_steps.len(), 4, "manifest must have 4 compute steps");
+    assert_eq!(compute_steps.len(), 6, "manifest must have 6 compute steps");
     assert_eq!(compute_steps[0].ordinal, 3, "Fermi compute at ordinal 3");
     assert_eq!(
         compute_steps[0].compute_ref.as_deref(),
@@ -176,34 +185,99 @@ fn superforecasting_manifest_loads_with_compute_step() {
         Some("outside_view_adjustment")
     );
     assert_eq!(
-        compute_steps[2].ordinal, 10,
-        "Bayesian compute at ordinal 10"
+        compute_steps[2].ordinal, 9,
+        "tree-combine compute at ordinal 9"
     );
     assert_eq!(
         compute_steps[2].compute_ref.as_deref(),
-        Some("bayesian_update")
+        Some("combine_tree_probabilities")
     );
     assert_eq!(
-        compute_steps[3].ordinal, 16,
-        "calibration feedback compute at ordinal 16"
+        compute_steps[3].ordinal, 11,
+        "Bayesian compute at ordinal 11"
     );
     assert_eq!(
         compute_steps[3].compute_ref.as_deref(),
+        Some("bayesian_update")
+    );
+    assert_eq!(
+        compute_steps[4].ordinal, 16,
+        "lisp.eval signal compute at ordinal 16"
+    );
+    assert_eq!(compute_steps[4].compute_ref.as_deref(), Some("lisp.eval"));
+    assert_eq!(
+        compute_steps[5].ordinal, 17,
+        "calibration feedback compute at ordinal 17"
+    );
+    assert_eq!(
+        compute_steps[5].compute_ref.as_deref(),
         Some("apply_calibration_adjustment")
     );
 
-    // The loop step (ordinal 17) must carry the calibration-adjusted prior.
+    // The loop step (ordinal 18) must carry the calibration-adjusted prior.
     let loop_step = manifest
         .steps
         .iter()
         .find(|s| s.action == "loop")
         .expect("manifest must have a loop step");
-    assert_eq!(loop_step.ordinal, 17, "loop step should be ordinal 17");
+    assert_eq!(loop_step.ordinal, 18, "loop step should be ordinal 18");
+}
+
+/// Verify the stage_1 and stage_3 templates declare the tree-structure
+/// contract fields in their front-matter `output` blocks. This pins the
+/// advertised invariant (`.rules`: advertised invariants need enforcement
+/// points) so a future template edit cannot silently drop the tree fields
+/// and revert to the heuristic combine.
+#[test]
+fn superforecasting_tree_contract_fields_present() {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = crate_dir.join("../..");
+    let templates_dir = workspace_root.join("registry/templates/superforecasting");
+
+    // stage_1 must declare sub_question_tree, topological_order, outcome_node_id
+    // in its output contract.
+    let stage_1 = std::fs::read_to_string(templates_dir.join("stage_1_fermi_decompose.j2"))
+        .expect("stage_1_fermi_decompose.j2 must exist");
+    assert!(
+        stage_1.contains("sub_question_tree:"),
+        "stage_1 contract must declare sub_question_tree output"
+    );
+    assert!(
+        stage_1.contains("topological_order:"),
+        "stage_1 contract must declare topological_order output"
+    );
+    assert!(
+        stage_1.contains("outcome_node_id:"),
+        "stage_1 contract must declare outcome_node_id output"
+    );
+
+    // stage_3 must declare tree_nodes in its output contract, and must NOT
+    // declare combined_probability (the compute step owns that now).
+    let stage_3 = std::fs::read_to_string(templates_dir.join("stage_3_probability_estimate.j2"))
+        .expect("stage_3_probability_estimate.j2 must exist");
+    assert!(
+        stage_3.contains("tree_nodes:"),
+        "stage_3 contract must declare tree_nodes output"
+    );
+    // The contract output block must not list combined_probability as an
+    // LLM-estimated field. (The word may still appear in explanatory prose,
+    // but not as a contract output field declaration.)
+    let stage_3_output_block = stage_3
+        .split("contract:")
+        .nth(1)
+        .and_then(|s| s.split("---").next())
+        .unwrap_or("");
+    assert!(
+        !stage_3_output_block.contains("combined_probability:"),
+        "stage_3 contract output must not declare combined_probability (the compute step owns it)"
+    );
 }
 
 /// Verify the kali-audit FlowDef manifest loads correctly with the expected
-/// PDCA structure: 4 select steps + 1 loop step, convergence field pointing
-/// at step 4, and template_refs matching the registry crate.
+/// PDCA structure after the convergence-check removal: 4 select
+/// steps + 1 loop step, with the Cauchy convergence block. The former
+/// kata.convergence_check compute step was removed — the ConvergenceTracker
+/// is the single convergence gate.
 #[test]
 fn kali_audit_manifest_loads_with_correct_structure() {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -217,11 +291,16 @@ fn kali_audit_manifest_loads_with_correct_structure() {
     let manifest = hkask_templates::load_manifest_from_yaml(&yaml)
         .unwrap_or_else(|e| panic!("Failed to load kali-audit manifest: {e}"));
 
-    // 5 select steps + 1 loop step = 6 total.
+    // 4 select steps + 1 lisp.eval compute step (signal computation) +
+    // 1 loop step = 6 total. The former kata.convergence_check compute step
+    // was removed — the ConvergenceTracker is the single convergence gate.
+    // The lisp.eval step remains: it computes the convergence signal (count
+    // of open critical/high findings) that the loop step pushes via
+    // `convergence_signal:`.
     assert_eq!(
         manifest.steps.len(),
         6,
-        "expected 6 steps: select-surface → audit → report → taxonomy-map → convergence-check → loop"
+        "expected 6 steps: select-surface → audit → report → taxonomy-map → lisp.eval (signal) → loop"
     );
 
     // Verify step ordinals are sequential starting at 1.
@@ -261,114 +340,38 @@ fn kali_audit_manifest_loads_with_correct_structure() {
         Some("kali-audit/taxonomy-map")
     );
 
-    // Verify step 5 is convergence-check.
-    assert_eq!(manifest.steps[4].action, "select");
-    assert_eq!(
-        manifest.steps[4].template_ref.as_deref(),
-        Some("kali-audit/convergence-check")
-    );
+    // Verify step 5 is the lisp.eval signal-compute step (computes the
+    // convergence signal — count of open critical/high findings — that the
+    // loop step pushes via convergence_signal:). The former
+    // kata.convergence_check compute step was removed.
+    assert_eq!(manifest.steps[4].action, "compute");
+    assert_eq!(manifest.steps[4].compute_ref.as_deref(), Some("lisp.eval"));
 
     // Verify step 6 is loop.
     assert_eq!(manifest.steps[5].action, "loop");
 
-    // Verify convergence field points at step 5 (the convergence-check step).
+    // Verify the convergence block uses the Cauchy-only model.
     assert_eq!(
-        manifest.convergence.convergence_field,
-        "step_5_result.convergence_metric"
+        manifest.convergence.convergence_mode, "cauchy",
+        "kali-audit should use the Cauchy-only convergence mode after migration"
+    );
+    assert_eq!(
+        manifest.convergence.cauchy_epsilon, 0.03,
+        "kali-audit cauchy_epsilon should be 0.03"
+    );
+    assert_eq!(
+        manifest.convergence.cauchy_window, 3,
+        "kali-audit cauchy_window should be 3"
     );
 
-    // Verify convergence threshold is 0.10 (stricter than bug-hunt's 0.25).
+    // Verify max_iterations is 10 (Cauchy model default).
     assert_eq!(
-        manifest.convergence.threshold, 0.10,
-        "kali-audit threshold should be 0.10 (security is higher-stakes than bug-hunting)"
-    );
-
-    // Verify max_iterations is 3.
-    assert_eq!(
-        manifest.convergence.max_iterations, 3,
-        "max_iterations should be 3"
+        manifest.convergence.max_iterations, 10,
+        "max_iterations should be 10 after Cauchy migration"
     );
 
     // Verify gas cap is positive.
     assert!(manifest.gas.cap > 0, "gas cap must be positive");
 
-    // Verify OCAP delegation chain is required.
-    assert!(
-        manifest.ocap.delegation_chain_required,
-        "delegation chain should be required"
-    );
-}
-
-/// Verify that every `fusion.skills` entry in every manifest deserializes
-/// successfully as a `FusionSkill` enum variant. Catches drift between the
-/// registry and the `FusionSkill` enum in `hkask-types::fusion`.
-///
-/// When a manifest specifies `fusion.skills: [some-skill]` but `some-skill`
-/// is not a `FusionSkill` variant, serde deserialization of the manifest
-/// will fail at runtime. This test catches that at test time.
-#[test]
-fn all_fusion_skill_references_are_valid() {
-    use hkask_types::fusion::FusionSkill;
-    use serde::Deserialize;
-    use std::path::Path;
-
-    #[derive(Debug, Deserialize)]
-    struct FusionBlock {
-        #[serde(default)]
-        skills: Vec<String>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct ManifestWithFusion {
-        fusion: Option<FusionBlock>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct ManifestFile {
-        manifest: ManifestWithFusion,
-    }
-
-    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let manifests_dir = workspace_root.join("registry/manifests");
-
-    if !manifests_dir.exists() {
-        eprintln!("registry/manifests/ not found — skipping");
-        return;
-    }
-
-    let mut checked = 0;
-    let mut failures = Vec::new();
-
-    for entry in std::fs::read_dir(&manifests_dir).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "yaml") {
-            let content = std::fs::read_to_string(&path).unwrap();
-            let parsed: Result<ManifestFile, _> = serde_yaml_neo::from_str(&content);
-            if let Ok(file) = parsed
-                && let Some(ref fusion) = file.manifest.fusion
-            {
-                for skill_name in &fusion.skills {
-                    checked += 1;
-                    // Try to deserialize the string as a FusionSkill variant
-                    let json_str = format!("\"{}\"", skill_name);
-                    let result: Result<FusionSkill, _> = serde_json::from_str(&json_str);
-                    if result.is_err() {
-                        failures.push(format!(
-                            "{}: fusion.skills contains '{}' which is not a valid FusionSkill variant",
-                            path.file_name().unwrap().display(),
-                            skill_name
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
-    assert!(
-        failures.is_empty(),
-        "FusionSkill drift detected (checked {} references):\n{}",
-        checked,
-        failures.join("\n")
-    );
+    // Verify steps are present.
 }

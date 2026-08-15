@@ -283,9 +283,9 @@ fn always_allow_tools(cx: &mut TestAppContext) {
 
 /// Turns terminal sandboxing off so the non-sandboxed `TerminalTool` is the
 /// variant exposed to the model as `terminal`. Tests that register
-/// `TerminalTool` directly need this because sandboxing is enabled by default
-/// for staff (and in debug builds), in which case `Thread::enabled_tools`
-/// would otherwise expose `SandboxedTerminalTool` under that name instead.
+/// `TerminalTool` directly need this because the sandboxing feature flag is
+/// enabled for all, in which case `Thread::enabled_tools` would otherwise
+/// expose `SandboxedTerminalTool` under that name instead.
 fn disable_sandboxing(cx: &mut TestAppContext) {
     cx.update(|cx| {
         let mut settings = agent_settings::AgentSettings::get_global(cx).clone();
@@ -907,9 +907,20 @@ async fn test_tool_authorization(cx: &mut TestAppContext) {
             thought_signature: None,
         },
     ));
+    fake_model.send_last_completion_stream_event(LanguageModelCompletionEvent::ToolUse(
+        LanguageModelToolUse {
+            id: "tool_id_interrupted".into(),
+            name: ToolRequiringPermission::NAME.into(),
+            raw_input: "{}".into(),
+            input: language_model::LanguageModelToolUseInput::Json(json!({})),
+            is_input_complete: true,
+            thought_signature: None,
+        },
+    ));
     fake_model.end_last_completion_stream();
     let tool_call_auth_1 = next_tool_call_authorization(&mut events).await;
     let tool_call_auth_2 = next_tool_call_authorization(&mut events).await;
+    let interrupted_tool_call_auth = next_tool_call_authorization(&mut events).await;
 
     // Approve the first - send "allow" option_id (UI transforms "once" to "allow")
     tool_call_auth_1
@@ -926,6 +937,13 @@ async fn test_tool_authorization(cx: &mut TestAppContext) {
         .response
         .send(acp_thread::SelectedPermissionOutcome::new(
             acp::PermissionOptionId::new("deny"),
+            acp::PermissionOptionKind::RejectOnce,
+        ))
+        .unwrap();
+    interrupted_tool_call_auth
+        .response
+        .send(acp_thread::SelectedPermissionOutcome::new(
+            acp::PermissionOptionId::new(FOLLOW_UP_PERMISSION_DENIED_OPTION_ID),
             acp::PermissionOptionKind::RejectOnce,
         ))
         .unwrap();
@@ -949,6 +967,13 @@ async fn test_tool_authorization(cx: &mut TestAppContext) {
                 is_error: true,
                 content: vec!["Permission to run tool denied by user".into()],
                 output: Some("Permission to run tool denied by user".into())
+            }),
+            language_model::MessageContent::ToolResult(LanguageModelToolResult {
+                tool_use_id: "tool_id_interrupted".into(),
+                tool_name: ToolRequiringPermission::NAME.into(),
+                is_error: true,
+                content: vec!["Permission denied: user sent a follow-up message instead of approving the tool call.".into()],
+                output: Some("Permission denied: user sent a follow-up message instead of approving the tool call.".into())
             })
         ]
     );
@@ -3410,6 +3435,7 @@ async fn test_truncate_first_message(cx: &mut TestAppContext) {
             output_tokens: 16_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cost: None,
         },
     ));
     cx.run_until_parked();
@@ -3471,6 +3497,7 @@ async fn test_truncate_first_message(cx: &mut TestAppContext) {
             output_tokens: 20_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cost: None,
         },
     ));
     cx.run_until_parked();
@@ -3521,6 +3548,7 @@ async fn test_latest_token_usage_counts_cached_input_tokens(cx: &mut TestAppCont
             output_tokens: 50,
             cache_creation_input_tokens: 25,
             cache_read_input_tokens: 75,
+            cost: None,
         },
     ));
     fake_model.end_last_completion_stream();
@@ -3786,6 +3814,7 @@ async fn test_truncate_second_message(cx: &mut TestAppContext) {
             output_tokens: 16_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cost: None,
         },
     ));
     fake_model.end_last_completion_stream();
@@ -3836,6 +3865,7 @@ async fn test_truncate_second_message(cx: &mut TestAppContext) {
             output_tokens: 20_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cost: None,
         },
     ));
     fake_model.end_last_completion_stream();
@@ -4702,6 +4732,192 @@ async fn test_streaming_tool_completes_when_llm_stream_ends_without_final_input(
 }
 
 #[gpui::test]
+async fn test_non_streaming_tool_partial_input_then_max_tokens_gets_canceled_message(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    always_allow_tools(cx);
+
+    let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+
+    let _events = thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["Use the echo tool"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // Send a partial tool use (is_input_complete = false) for a non-streaming
+    // tool (EchoTool does not override supports_input_streaming). The handler
+    // returns None — no tool starts, but the partial tool_use is stored in the
+    // pending message.
+    let tool_use = LanguageModelToolUse {
+        id: "tool_1".into(),
+        name: EchoTool::NAME.into(),
+        raw_input: r#"{"text": "partia"#.into(),
+        input: language_model::LanguageModelToolUseInput::Json(json!({"text": "partia"})),
+        is_input_complete: false,
+        thought_signature: None,
+    };
+    fake_model
+        .send_last_completion_stream_event(LanguageModelCompletionEvent::ToolUse(tool_use.clone()));
+    cx.run_until_parked();
+
+    // End the stream with MaxTokens WITHOUT ever sending is_input_complete = true.
+    // This simulates the model hitting the output token limit mid-tool-call.
+    fake_model.send_last_completion_stream_event(LanguageModelCompletionEvent::Stop(
+        StopReason::MaxTokens,
+    ));
+    fake_model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    // MaxTokens is not retryable (retry_strategy_for returns None for it),
+    // so the turn should end immediately.
+    thread.read_with(cx, |thread, _cx| {
+        assert!(
+            thread.is_turn_complete(),
+            "MaxTokens should end the turn without retrying",
+        );
+    });
+
+    // The partial tool_use should have been flushed with a tool result.
+    // Currently this is TOOL_CANCELED_MESSAGE ("Tool canceled by user"),
+    // which is misleading — the user didn't cancel; the stream truncated.
+    // This test pins the current behavior so a future fix that distinguishes
+    // stream-truncation from user-cancellation must update this assertion.
+    thread.update(cx, |thread, _cx| {
+        let message = thread.last_received_or_pending_message().unwrap();
+        let agent_message = message.as_agent_message().unwrap();
+
+        let tool_result = agent_message
+            .tool_results
+            .get(&tool_use.id)
+            .expect("partial tool_use should have a flushed tool result");
+        assert!(
+            tool_result.is_error,
+            "the flushed result for a stream-truncated partial tool_use should be an error",
+        );
+        let content_text = tool_result.text_contents();
+        assert_eq!(
+            content_text, "Tool call was interrupted because the model's output reached the token limit before completing the tool input. Try again with a shorter or simpler tool call.",
+            "MaxTokens-truncated partial tool_use should get the truncation-specific message, \
+             not the generic TOOL_CANCELED_MESSAGE (which means the user stopped the turn).",
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_non_streaming_tool_partial_input_then_retryable_error_flushes_canceled_message(
+    cx: &mut TestAppContext,
+) {
+    // When the stream ends with a retryable error after a partial non-streaming
+    // tool_use, flush_pending_message fires before the retry and inserts
+    // TOOL_CANCELED_MESSAGE for the partial tool_use. On retry, the model sees
+    // the partial tool_use with a "canceled" result — which is misleading
+    // (the user didn't cancel; the stream errored). This test pins the current
+    // behavior so we can detect if it changes.
+    init_test(cx);
+    always_allow_tools(cx);
+
+    let ThreadTest { model, thread, .. } = setup(cx, TestModel::Fake).await;
+    let fake_model = model.as_fake();
+
+    thread.update(cx, |thread, _cx| {
+        thread.add_tool(EchoTool);
+    });
+
+    let _events = thread
+        .update(cx, |thread, cx| {
+            thread.send(ClientUserMessageId::new(), ["Use the echo tool"], cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // Send a partial tool use (is_input_complete = false) for a non-streaming
+    // tool. No tool starts; the partial is stored in the pending message.
+    let tool_use = LanguageModelToolUse {
+        id: "tool_1".into(),
+        name: EchoTool::NAME.into(),
+        raw_input: r#"{"text": "partia"#.into(),
+        input: language_model::LanguageModelToolUseInput::Json(json!({"text": "partia"})),
+        is_input_complete: false,
+        thought_signature: None,
+    };
+    fake_model.send_last_completion_stream_event(LanguageModelCompletionEvent::ToolUse(tool_use));
+    cx.run_until_parked();
+
+    // End the stream with a retryable error (internal server error).
+    fake_model.send_last_completion_stream_error(
+        LanguageModelCompletionError::UpstreamProviderError {
+            message: "Internal server error".to_string(),
+            status: http_client::StatusCode::INTERNAL_SERVER_ERROR,
+            retry_after: None,
+        },
+    );
+    fake_model.end_last_completion_stream();
+
+    // Advance past the retry delay so run_turn_internal retries.
+    cx.executor().advance_clock(Duration::from_secs(5));
+    cx.run_until_parked();
+
+    // The retry request should contain the partial tool_use with a flushed
+    // tool result. The result should be TOOL_CANCELED_MESSAGE (not the
+    // truncation message, since this wasn't MaxTokens).
+    let completion = fake_model
+        .pending_completions()
+        .pop()
+        .expect("No running turn after retry");
+
+    // Find the tool result in the retry request messages.
+    let tool_result_message = completion
+        .messages
+        .iter()
+        .rev()
+        .find_map(|msg| {
+            if msg.role != Role::User {
+                return None;
+            }
+            msg.content.iter().find_map(|content| match content {
+                MessageContent::ToolResult(result) => Some(result),
+                _ => None,
+            })
+        })
+        .expect("retry request should contain a tool result");
+
+    assert!(
+        tool_result_message.is_error,
+        "flushed partial tool_use result should be an error",
+    );
+    let content_text: String = tool_result_message
+        .content
+        .iter()
+        .map(|c| match c {
+            LanguageModelToolResultContent::Text(t) => t.to_string(),
+            _ => String::new(),
+        })
+        .collect();
+    assert_eq!(
+        content_text, "Tool canceled by user",
+        "retryable error after partial non-streaming tool_use should flush \
+         TOOL_CANCELED_MESSAGE (not the truncation message, since this isn't MaxTokens). \
+         This is still misleading — the user didn't cancel — but it's the current behavior.",
+    );
+
+    // Finish the retry round so the turn completes cleanly.
+    fake_model.send_last_completion_stream_text_chunk("Done");
+    fake_model.end_last_completion_stream();
+    cx.run_until_parked();
+
+    thread.read_with(cx, |thread, _cx| {
+        assert!(
+            thread.is_turn_complete(),
+            "Thread should not be stuck; the turn should have completed",
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_streaming_tool_json_parse_error_is_forwarded_to_running_tool(
     cx: &mut TestAppContext,
 ) {
@@ -5103,6 +5319,7 @@ async fn test_tokens_before_message(cx: &mut TestAppContext) {
             output_tokens: 50,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cost: None,
         },
     ));
     fake_model.end_last_completion_stream();
@@ -5143,6 +5360,7 @@ async fn test_tokens_before_message(cx: &mut TestAppContext) {
             output_tokens: 75,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cost: None,
         },
     ));
     fake_model.end_last_completion_stream();
@@ -5199,6 +5417,7 @@ async fn test_tokens_before_message_after_truncate(cx: &mut TestAppContext) {
             output_tokens: 50,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cost: None,
         },
     ));
     fake_model.end_last_completion_stream();
@@ -5218,6 +5437,7 @@ async fn test_tokens_before_message_after_truncate(cx: &mut TestAppContext) {
             output_tokens: 75,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cost: None,
         },
     ));
     fake_model.end_last_completion_stream();
@@ -6627,6 +6847,7 @@ async fn test_subagent_context_window_warning(cx: &mut TestAppContext) {
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cost: None,
         },
     ));
 
@@ -6754,6 +6975,7 @@ async fn test_subagent_no_context_window_warning_when_already_at_warning(cx: &mu
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cost: None,
         },
     ));
 
@@ -6813,6 +7035,7 @@ async fn test_subagent_no_context_window_warning_when_already_at_warning(cx: &mu
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cost: None,
         },
     ));
     model.end_last_completion_stream();
@@ -7499,7 +7722,6 @@ async fn test_fetch_tool_allow_rule_skips_confirmation(cx: &mut TestAppContext) 
 /// A fetch to a host that hasn't been granted network access prompts for the
 /// shared per-host sandbox grant, even when the tool itself is allowed.
 #[gpui::test]
-#[ignore]
 async fn test_fetch_tool_prompts_for_ungranted_host(cx: &mut TestAppContext) {
     init_test(cx);
 
@@ -7587,7 +7809,6 @@ async fn test_fetch_tool_granted_host_skips_prompt(cx: &mut TestAppContext) {
 
 /// Loopback / IP-literal hosts can't be granted individually, so without
 /// unsandboxed access a fetch to them is refused with guidance to grant it.
-#[ignore]
 #[gpui::test]
 async fn test_fetch_tool_refuses_loopback_without_unsandboxed(cx: &mut TestAppContext) {
     init_test(cx);
@@ -7677,7 +7898,6 @@ async fn test_fetch_tool_unsandboxed_lifts_restrictions(cx: &mut TestAppContext)
 /// is refused just like a direct loopback fetch. This is the redirect variant of
 /// the SSRF protection — the approved domain can't be used to bounce the request
 /// onto the local machine.
-#[ignore]
 #[gpui::test]
 async fn test_fetch_tool_refuses_redirect_to_loopback(cx: &mut TestAppContext) {
     init_test(cx);
@@ -7736,7 +7956,6 @@ async fn test_fetch_tool_refuses_redirect_to_loopback(cx: &mut TestAppContext) {
 /// A granted host that redirects to a *different*, ungranted host triggers a
 /// fresh per-host authorization prompt for the redirect target — the redirect is
 /// not silently followed to a host the user never approved.
-#[ignore]
 #[gpui::test]
 async fn test_fetch_tool_reauthorizes_redirect_to_new_host(cx: &mut TestAppContext) {
     init_test(cx);

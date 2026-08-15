@@ -167,20 +167,16 @@ const CANONICAL_NAMESPACES: &[&str] = &[
     "reg.curation.matrix",
     "reg.curator",
     "reg.curator.consolidation",
+    "reg.curator.directive",
     "reg.curator.efficiency.exceeded",
     "reg.curator.metacognition",
-    // ── Meta (curator self-observation / self-management) ──
-    "reg.meta",
-    "reg.meta.circuit_breaker",
-    "reg.meta.directive",
-    "reg.meta.escalation",
-    "reg.meta.self_calibration",
     // ── Cybernetics ──
     "reg.cybernetics",
     "reg.cybernetics.backpressure",
     "reg.cybernetics.substitution",
     // ── Email (curator interaction — outbound reg.email.sent + inbound reg.email.received) ──
     "reg.email",
+    "reg.email.sent",
     // ── Deploy / Sessions ──
     "reg.deploy.backup_auto_export",
     "reg.deploy.backup_export",
@@ -192,13 +188,6 @@ const CANONICAL_NAMESPACES: &[&str] = &[
     "reg.gas.calibration",
     // ── Goal ──
     "reg.goal",
-    // ── Guard ──
-    "reg.guard",
-    "reg.guard.canary",
-    "reg.guard.input",
-    "reg.guard.output",
-    "reg.guard.runtime_policy",
-    "reg.guard.violation",
     // ── Healing ──
     "reg.heal",
     "reg.heal.attempt",
@@ -213,18 +202,20 @@ const CANONICAL_NAMESPACES: &[&str] = &[
     "reg.heal.unmatched",
     // ── Inference ──
     "reg.inference",
-    // ── Fusion (multi-model deliberation) ──
-    "reg.fusion",
     // ── Kata / Skill / Keystore ──
     "reg.kata",
     "reg.keystore",
+    // ── Ledger (governance/rollback failure signals — runtime-posture-monitor visible) ──
+    "reg.ledger",
     // ── MCP ──
     "reg.mcp",
+    "reg.mcp.cap",
     "reg.mcp.health",
     // ── MCP Media ──
     "reg.mcp.media.face",
     // ── Media / Memory ──
     "reg.media",
+    "reg.media.select",
     "reg.memory",
     "reg.memory.budget",
     "reg.memory.decay",
@@ -249,11 +240,9 @@ const CANONICAL_NAMESPACES: &[&str] = &[
     "reg.platform.metric.space.performance",
     "reg.platform.metric.space.satisfaction",
     // ── QA ──
-    "reg.qa.mutant_survived",
     "reg.qa.repair_attempted",
     "reg.qa.repair_exhausted",
     "reg.qa.repair_verified",
-    "reg.qa.bolero_failure",
     // QA routine pass — emitted by scripts/qa-mcp-servers.sh per (tool, category)
     "reg.qa.run",
     "reg.qa.run.pass",
@@ -282,6 +271,12 @@ const CANONICAL_NAMESPACES: &[&str] = &[
     "reg.skill.cascade",
     "reg.skill.cascade.step_executed",
     "reg.skill.cascade.compute",
+    "reg.skill.cascade.escalated",
+    "reg.skill.cascade.branching_misconfigured",
+    "reg.skill.cascade.choice_misconfigured",
+    "reg.skill.cascade.timeout_retry",
+    "reg.skill.cascade.gate_passed",
+    "reg.skill.cascade.gate_failed",
     // Convergence: cascade outcomes
     "reg.skill.convergence",
     "reg.skill.convergence.converged",
@@ -292,6 +287,9 @@ const CANONICAL_NAMESPACES: &[&str] = &[
     "reg.skill.budget.gas_alert",
     "reg.skill.budget.rjoule_exhausted",
     "reg.skill.budget.rjoule_alert",
+    // Provenance + profile enforcement (skill_executor / manifest executor)
+    "reg.skill.provenance",
+    "reg.skill.profile_enforcement",
     // Frontmatter: SKILL.md parse errors (F-02 fix)
     "reg.skill.frontmatter",
     "reg.skill.frontmatter.missing",
@@ -309,6 +307,9 @@ const CANONICAL_NAMESPACES: &[&str] = &[
     "reg.skill.discovery.gap_detected",
     "reg.skill.discovery.searched",
     "reg.skill.discovery.evaluated",
+    // Bundle: composition and persistence (skill bundler / post-run UI)
+    "reg.skill.bundle_compose",
+    "reg.skill.bundle_save",
     // ── SLO ──
     "reg.slo.evaluated",
     // ── Sovereignty ──
@@ -391,6 +392,7 @@ const CANONICAL_NAMESPACES: &[&str] = &[
     "reg.runtime.classify",
     "reg.runtime.regulate",
     "reg.runtime.convergence",
+    "reg.runtime.policy",
     // ── Attack taxonomy (folded into kali-audit as taxonomy_map phase) ──
     "reg.taxonomy",
     "reg.taxonomy.select",
@@ -404,6 +406,40 @@ const CANONICAL_NAMESPACES: &[&str] = &[
     "reg.lora.report",
     "reg.lora.convergence",
     "reg.lora.runtime",
+    // ── Bug hunt (exploratory testing audit — bug-hunt skill) ──
+    "reg.bughunt",
+    "reg.bughunt.charter",
+    "reg.bughunt.probe",
+    "reg.bughunt.oracle",
+    "reg.bughunt.taxonomize",
+    "reg.bughunt.report",
+    "reg.bughunt.learn",
+    // ── Code review (convergent review audit — code-review skill) ──
+    "reg.codereview",
+    "reg.codereview.scope",
+    "reg.codereview.perspectives",
+    "reg.codereview.adjudicate",
+    "reg.codereview.report",
+    "reg.codereview.implement",
+    // ── EQM (forecast-rationale quality measurement — eqm skill) ──
+    // PDCA cascade: select → score → aggregate → validate. Emits the
+    // overconfidence_bias signal that feeds superforecasting's calibration
+    // step (a real cybernetic loop, not performative telemetry).
+    "reg.eqm",
+    "reg.eqm.select",
+    "reg.eqm.score",
+    "reg.eqm.aggregate",
+    "reg.eqm.validate",
+    // ── EQM improvement (rationale improvement Kata — eqm-improvement skill) ──
+    // Improvement Kata PDCA: direction → current → target → predict → experiment.
+    // Iterates to convergence; preserves the forecast probability (alignment
+    // invariant). Sibling to metacognition's Kata loop.
+    "reg.eqm_imp",
+    "reg.eqm_imp.direction",
+    "reg.eqm_imp.current",
+    "reg.eqm_imp.target",
+    "reg.eqm_imp.predict",
+    "reg.eqm_imp.experiment",
     // ── Skill (unified cybernetic feedback — one namespace per skill) ──
     // Every skill emits reg.skill.<skill-id>.<phase> for its six PDCA phases.
     // The hierarchical is_canonical function makes reg.skill.<any-id>.* valid
@@ -423,6 +459,10 @@ const CANONICAL_NAMESPACES: &[&str] = &[
     "reg.training.provider.runpod.upload",
     // ── Training checkpoint (pod restart → Axolotl auto-resume) ──
     "reg.training.checkpoint.resume",
+    // ── Widget (viz widget render + compose-back telemetry — D18/D21 seams) ──
+    // Hierarchical: reg.widget.* children (render, disagree, graph_render,
+    // evidence_set, whatif_discarded, reask) are valid via ancestor match.
+    "reg.widget",
 ];
 
 /// Hierarchical namespace validation — a sub-namespace like
@@ -1008,16 +1048,65 @@ mod tests {
         }
 
         proptest! {
+            /// P1 invariant: a non-canonical namespace (one where neither it nor
+            /// any ancestor is in CANONICAL_NAMESPACES) must return None from
+            /// parse(). The prior version of this test only checked direct
+            /// containment, missing hierarchical ancestors like `reg.widget`
+            /// (which makes `widget.render` canonical via ancestor match).
             #[test]
             fn non_canonical_returns_none(
-                input in "\\PC*"
+                input in r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)*"
             ) {
-                prop_assume!(!CANONICAL_NAMESPACES.contains(&input.as_str()));
-                let full = format!("reg.{input}");
-                prop_assume!(!CANONICAL_NAMESPACES.contains(&full.as_str()));
+                // Skip if the input or any ancestor is canonical.
+                let mut cur = format!("reg.{input}");
+                let mut is_canonical = false;
+                while !cur.is_empty() {
+                    if CANONICAL_NAMESPACES.contains(&cur.as_str()) {
+                        is_canonical = true;
+                        break;
+                    }
+                    cur = match cur.rfind('.') {
+                        Some(i) => cur[..i].to_string(),
+                        None => break,
+                    };
+                }
+                prop_assume!(!is_canonical);
 
                 let result = SpanNamespace::parse(&input);
                 prop_assert!(result.is_none(), "non-canonical should return None: {input}");
+            }
+        }
+
+        proptest! {
+            /// P1 invariant: for any canonical namespace `ns` and any suffix of
+            /// dot-separated identifiers, `parse(ns + suffix)` returns Some.
+            /// This is the hierarchical ancestor-match property that makes
+            /// `reg.widget` cover `reg.widget.render`, `reg.widget.disagree`,
+            /// etc. without per-child registration (RR-0054).
+            #[test]
+            fn canonical_namespace_with_suffix_parses(
+                ns in canonical_namespace_str(),
+                suffix_depth in 1usize..=4,
+                suffix_parts in proptest::collection::vec(
+                    "[a-z][a-z0-9_]{0,15}",
+                    1..=4
+                )
+            ) {
+                let suffix: String = suffix_parts
+                    .into_iter()
+                    .take(suffix_depth)
+                    .map(|s| format!(".{s}"))
+                    .collect::<Vec<_>>()
+                    .join("");
+                let full = format!("{ns}{suffix}");
+                let result = SpanNamespace::parse(&full[4..]); // strip "reg."
+                prop_assert!(
+                    result.is_some(),
+                    "canonical ns + suffix should parse: {full}"
+                );
+                if let Some(parsed) = result {
+                    prop_assert_eq!(parsed.as_str(), full.as_str());
+                }
             }
         }
 

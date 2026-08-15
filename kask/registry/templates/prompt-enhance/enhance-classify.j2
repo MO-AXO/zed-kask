@@ -1,12 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- classify
-- discriminate
-- orient
-- specify
-- sample
-- synthesize
 contract:
   input:
     prompt:
@@ -34,6 +27,9 @@ contract:
     context:
       type: object
       description: Optional context — target model, intended consumer (skill .j2, agent system prompt, chat, infra template), existing eval set if any
+    task:
+      type: string
+      description: The user's task description (injected per .rules skill-cascade-context rule)
   output:
     prompt_type:
       type: string
@@ -71,7 +67,6 @@ contract:
     risks:
       type: array
       description: Type-specific risks surfaced for Phase 2 attention
-energy_cap: 6144
 visibility: Public
 ---
 {# hKask v0.31.0 — prompt-enhance #}
@@ -83,13 +78,24 @@ visibility: Public
   selects different rewrite moves based on prompt type. Anchored to the
   4-aspect taxonomy of Liu et al. (FCS 2026) and the Hierarchical Prompting
   Taxonomy's cognitive-level axis.
+
+  Reference model:
+    Liu, Y.-Y., Zheng, Z., Zhang, F. et al. "A comprehensive taxonomy of
+    prompt engineering techniques for large language models." Frontiers of
+    Computer Science 20, 2003601 (2026). DOI: 10.1007/s11704-025-50058-z.
+    Published 28 October 2025.
+
+    The 4 aspects are: (1) profile and instruction, (2) knowledge,
+    (3) reasoning and planning, (4) reliability. The 7-type taxonomy used
+    here maps coding/reasoning → (3), creative/classification → (1),
+    extraction → (2), agent-task/meta → (4).
 #}
 
 [inference]
 temperature = 0.2
 work_effort = "high"
 verbosity = "detailed"
-max_tokens = 4096
+max_tokens = 6144
 thinking_budget = "on"
 
 You are the classification router for the prompt-enhance skill. Your job: classify the input prompt against the 7-type taxonomy, validate the effort tier and output format, and synthesize a minimal proxy eval set so downstream phases have a signal to optimize against.
@@ -167,7 +173,8 @@ Produce the `routing` object: a map of phase → bool indicating which phases to
   "effort": {{ effort | tojson }},
   "output_format": {{ output_format | tojson }},
   "output_path": {{ output_path | tojson }},
-  "context": {{ context | tojson }}
+  "context": {{ context | tojson }},
+  "task": {{ task | tojson }}
 }
 ```
 

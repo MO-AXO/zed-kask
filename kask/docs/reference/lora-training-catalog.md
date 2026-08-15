@@ -1,8 +1,8 @@
 ---
 title: "LoRA Training — Method & Gate Catalog"
 audience: [developers, ml-engineers]
-last_updated: 2026-07-24
-version: "0.31.0"
+last_updated: 2026-08-04
+version: "0.32.2"
 status: "Active"
 domain: "Training"
 mds_categories: [domain, trust]
@@ -33,7 +33,7 @@ authoritative (P5.1); this document is a derived reference.
 | Prefix Tuning | (not recommended for production) | Prefix vectors | No | PEFT `PrefixTuningConfig` |
 
 New methods can be added as PEFT exposes them and literature justifies
-them (P7) — not speculatively.
+them (P7) — not speculatively.[^peft-catalog]
 
 ## Harness Capability Matrix
 
@@ -59,13 +59,11 @@ Three harnesses are supported. Each has a distinct capability profile.
 
 Harness selection is driven by the G6 gate (harness capability) in the
 `select-method` phase. The operator accepts, overrides, or rejects the
-recommendation. The runtime enforces harness-method compatibility via G-H1.
+recommendation. The runtime enforces harness-method compatibility via G-H1.[^trl-catalog][^ludwig-catalog]
 
 ## Gate Catalog
 
-17 quality gates enforced by the `audit-config` phase, plus the 8-gate
-recommendation refinement in `select-method` (G0, G-D0, G1-G6). Each gate is a
-single assertion with a citation.
+19 phase-aware contract gates enforced across the `select-method` and `audit-config` phases, plus the 8-gate recommendation refinement in `select-method` (G0, G-D0, G1-G6). Each gate is a single assertion with a citation.[^lora-contract-gates]
 
 ### Recommendation Gates (select-method phase)
 
@@ -124,10 +122,19 @@ Only apply if QLoRA mode selected (G2).
 |------|----|-----------|--------|
 | Harness-method compatibility | G-H1 | Selected harness supports the selected method/trainer. axolotl=SFT/DPO/KTO/ORPO/GRPO/GDPO/RM/FullFT (via rl:); trl=SFT/DPO/KTO/ORPO/Reward; ludwig=SFT/DPO/KTO/ORPO/GRPO + advanced PEFT initializers (PiSSA, EVA, CorDA, LoftQ). trl_trainer is TRL-specific — warn (not refuse) when set with axolotl or ludwig. | Axolotl — https://docs.axolotl.ai/docs/rlhf.html; TRL — huggingface.co/docs/trl/index; Ludwig — ludwig.ai/latest/configuration/ |
 
+### Runtime Gates (v0.32.0 — runtime alert + persistence preflight)
+
+| Gate | ID | Assertion | Source |
+|------|----|-----------|--------|
+| Runtime alert | G-R1 | Consumes `runtime_metrics` from the completion manifest (loss, grad_norm, alerts) during `training_status`. Flags loss spikes, NaN gradients, vanishing loss. `deferred` when `runtime_metrics` absent; `not_applicable` in preflight. | PEFT training diagnostics; hKask v0.32.0 |
+| Persistence preflight | G-P1 | Verifies HuggingFace artifact persistence is configured before training starts. Checks `HF_TOKEN` presence and write access to the target repo. Refuses if persistence is required but unconfigured. | HuggingFace Hub API; hKask v0.32.0 |
+
 ## Convergence Metric Weights
 
 Computed by the `convergence-check` phase. Metric ∈ [0, 1] where 0 =
-fully converged (training-ready).
+fully converged (training-ready). The convergence threshold is ≤ 0.10 with
+no hard blockers remaining; convergence is detected deterministically via
+the Cauchy criterion (iterates have stopped moving).
 
 | Dimension | Weight | Pass condition |
 |-----------|--------|----------------|
@@ -137,8 +144,33 @@ fully converged (training-ready).
 | Data/eval gate coverage | 0.10 | All 3 (G-D1..G-D3) pass = +0.00 |
 | Forgetting gate coverage | 0.10 | G-F1 planned = +0.00; G-F2 if CorDA mode |
 | Harness-method gate coverage | 0.10 | G-H1 pass = +0.00; fail/refuse = +0.10 |
+| Runtime gate coverage | — | G-R1 deferred/not_applicable in preflight; assessed during `training_status` from completion manifest metrics |
+| Persistence gate coverage | — | G-P1 pass = no blocker; fail = hard blocker (refuse training start) |
 
-Converged: metric ≤ 0.10 AND ≥5% relative improvement from previous cycle.
+> **Weight provenance:** the six weighted dimensions (0.35–0.10) are the
+> documented scoring rubric. G-R1 and G-P1 are pass/blocker gates outside
+> the weighted metric — G-R1 is `deferred` until runtime metrics exist, G-P1
+> is a preflight refuse gate. Convergence is Cauchy-detected (iterates stop
+> moving within `cauchy_epsilon: 0.03` over `cauchy_window: 3` iterations).
+
+Converged: metric ≤ 0.10 AND no hard blockers AND Cauchy criterion met.[^cauchy-convergence]
+
+## Footnotes
+
+[^peft-catalog]: Liu, Y., et al. (2024). *Parameter-Efficient Fine-Tuning (PEFT)*. Hugging Face. https://huggingface.co/docs/peft
+    Cited for the PEFT library that exposes the adapter methods the catalog tracks.
+
+[^trl-catalog]: Hugging Face. (2024). *TRL: Transformer Reinforcement Learning*. https://huggingface.co/docs/trl
+    Cited for the TRL harness the G6 gate selects when SFT/DPO/KTO/ORPO/Reward training is needed.
+
+[^ludwig-catalog]: Ludwig. (2024). *Ludwig: Declarative Deep Learning Framework*. Linux Foundation AI & Data. https://ludwig.ai/latest/
+    Cited for the Ludwig harness the G6 gate selects for declarative YAML-configured training.
+
+[^lora-contract-gates]: Hu, E. J., Shen, Y., Wallis, P., Allen-Zhu, Z., Li, Y., Wang, S., Wang, L., & Chen, W. (2021). LoRA: Low-Rank Adaptation of Large Language Models. arXiv. https://arxiv.org/abs/2106.09685
+    Cited as the primary source the math-contract gates (G-M1 through G-M5) derive their assertions from.
+
+[^cauchy-convergence]: Rudin, W. (1976). *Principles of Mathematical Analysis* (3rd ed.). McGraw-Hill.
+    Cited for the Cauchy convergence criterion the convergence-check phase uses to detect that iterates have stopped moving.
 
 ## Source References
 

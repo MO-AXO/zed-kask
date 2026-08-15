@@ -1,6 +1,6 @@
 # Runtime Posture Monitor Process Manifest
-# ℏKask v0.31.0 — Runtime security posture observation
-# Observes Regulation telemetry (hkask.* spans, reg.guard.*, reg.regulation events).
+# ℏKask v0.34.0 — Runtime security posture observation
+# Observes Regulation telemetry (reg.* canonical spans, reg.outcome events).
 
 manifest:
   id: runtime-posture-monitor
@@ -10,17 +10,19 @@ manifest:
     Runtime security posture monitoring. Observes Regulation telemetry for endpoint
     abuse, bot traffic, LLM usage anomalies, and dependency behavior.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  threshold: 0.15
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 0
-  convergence_field: step_4_result.convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
+  target_artifacts_field: "current_artifacts"
 
 gas:
   cap: 100000
@@ -38,6 +40,41 @@ inputs:
     type: array
     required: false
   - name: workspace_context
+    type: string
+    required: false
+  - name: target_signal
+    type: string
+    required: false
+  - name: discovered_signals
+    type: array
+    required: false
+  - name: existing_regressions
+    type: array
+    required: false
+  - name: userpod_host
+    type: string
+    required: false
+  - name: threats
+    type: array
+    required: false
+  - name: defense_layers_firing
+    type: array
+    required: false
+  - name: defense_layers_silent
+    type: array
+    required: false
+  - name: signal_sources
+    type: array
+    required: false
+  - name: signal
+    type: object
+    required: false
+  - name: convergence_metric
+    type: number
+    required: false
+
+ledger:
+  span_namespace: reg.skill.runtime-posture-monitor
 
 steps:
   - ordinal: 1
@@ -47,7 +84,7 @@ steps:
     renderer: minijinja
     template_ref: runtime-posture-monitor/select-signal
     gas_cap: 2048
-    timeout_seconds: 60
+    timeout_seconds: 120
   - ordinal: 2
     action: select
     description: >
@@ -55,7 +92,10 @@ steps:
     renderer: minijinja
     template_ref: runtime-posture-monitor/classify-threat
     gas_cap: 2048
-    timeout_seconds: 60
+    timeout_seconds: 120
+    input_mapping:
+      signal_sources: "{{ step_1_result.signal_sources | default(signal_sources) | default([]) }}"
+      signal: "{{ step_1_result.signal | default(signal) | default({}) }}"
   - ordinal: 3
     action: select
     description: >
@@ -63,22 +103,22 @@ steps:
     renderer: minijinja
     template_ref: runtime-posture-monitor/emit-regulation
     gas_cap: 2048
-    timeout_seconds: 60
+    timeout_seconds: 120
   - ordinal: 4
-    action: validate
+    action: loop
     description: >
-      Convergence check — evaluate posture monitoring quality and coverage.
-    renderer: minijinja
-    template_ref: runtime-posture-monitor/convergence-check
-    gas_cap: 1024
-    timeout_seconds: 30
+      Re-enter posture monitoring cycle if convergence is not met. Routes
+      back to step 1 (observe) to re-scan for threats.
+    input_mapping:
+      loop_target: "{{ 1 }}"
+      convergence_signal: "{{ step_3_result.threats | default([]) | length }}"
 
-# Registry invariant X5 (skill-maintenance): verified.
-# Manifest version: 0.31.0. Registry authoritative; SKILL.md is companion.
-# Created as audit fix A (missing manifest recovery) + C (invariant X5 enforcement).
+# Registry invariant X4 (skill-maintenance): verified.
+# Manifest version: 0.34.0. Registry authoritative; SKILL.md is companion.
+# Created as audit fix A (missing manifest recovery) + C (invariant X4 enforcement).
 # Note: Full .j2 templates in registry/templates/ (authoritative per SKILL.md).
 # Cross-artifact invariant: manifest id matches .agents/skills/ directory name.
 # Visibility: Public. Functional role: flowdef. Category: skill.
 # Energy/gas budgets: standard patterns. No invented vocabulary terms.
-# validation: invariant_x5 verified (2026-07-18, audit-cascade) — recorded as
+# validation: invariant_x4 verified (2026-07-18, audit-cascade) — recorded as
 # comment since `validation` is not a BundleManifest schema field.

@@ -69,15 +69,15 @@ impl NebiusHost {
         format!("hkask-training-{}", &job_id[..8.min(job_id.len())])
     }
 
-    async fn run_cli(&self, args: &[&str]) -> Result<String, ProviderError> {
+    async fn run_cli(&self, args: &[&str]) -> Result<String, HostProviderError> {
         let output = tokio::process::Command::new(&self.nebius_cli)
             .args(args)
             .output()
             .await
-            .map_err(|e| ProviderError::Backend(format!("Nebius CLI: {e}")))?;
+            .map_err(|e| HostProviderError::Backend(format!("Nebius CLI: {e}")))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ProviderError::Backend(format!(
+            return Err(HostProviderError::Backend(format!(
                 "Nebius CLI error: {stderr}"
             )));
         }
@@ -87,7 +87,7 @@ impl NebiusHost {
 
 #[async_trait::async_trait]
 impl TrainingHost for NebiusHost {
-    async fn submit(&self, job: &TrainingJob) -> Result<String, ProviderError> {
+    async fn submit(&self, job: &TrainingJob) -> Result<String, HostProviderError> {
         let vm_name = Self::vm_name(&job.id);
         let install_script = crate::providers::runpod::generate_install_script(
             job,
@@ -141,8 +141,9 @@ runcmd:
                 "json",
             ])
             .await?;
-        let disk_id = extract_json_field(&disk_output, "id")
-            .ok_or_else(|| ProviderError::Backend("Failed to get disk ID from Nebius".into()))?;
+        let disk_id = extract_json_field(&disk_output, "id").ok_or_else(|| {
+            HostProviderError::Backend("Failed to get disk ID from Nebius".into())
+        })?;
 
         // Step 2: Create VM with GPU, public IP, and cloud-init
         let network_spec = format!(
@@ -176,7 +177,7 @@ runcmd:
             ])
             .await?;
         let vm_id = extract_json_field(&vm_output, "id")
-            .ok_or_else(|| ProviderError::Backend("Failed to get VM ID from Nebius".into()))?;
+            .ok_or_else(|| HostProviderError::Backend("Failed to get VM ID from Nebius".into()))?;
 
         if let Ok(mut map) = self.vms.lock() {
             map.insert(job.id.clone(), vm_id.clone());
@@ -194,17 +195,21 @@ runcmd:
         Ok(vm_id)
     }
 
-    async fn status(&self, job_id: &str) -> Result<PodStatus, ProviderError> {
+    async fn status(&self, job_id: &str) -> Result<PodStatus, HostProviderError> {
         let vm_id = {
             let map = self
                 .vms
                 .lock()
-                .map_err(|e| ProviderError::Backend(format!("Lock: {e}")))?;
+                .map_err(|e| HostProviderError::Backend(format!("Lock: {e}")))?;
             map.get(job_id).cloned()
         };
         let vm_id = match vm_id {
             Some(id) => id,
-            None => return Err(ProviderError::JobFailed(format!("No VM for job {job_id}"))),
+            None => {
+                return Err(HostProviderError::JobFailed(format!(
+                    "No VM for job {job_id}"
+                )));
+            }
         };
 
         let output = self
@@ -268,12 +273,12 @@ runcmd:
         })
     }
 
-    async fn cancel(&self, job_id: &str) -> Result<(), ProviderError> {
+    async fn cancel(&self, job_id: &str) -> Result<(), HostProviderError> {
         let vm_id = {
             let map = self
                 .vms
                 .lock()
-                .map_err(|e| ProviderError::Backend(format!("Lock: {e}")))?;
+                .map_err(|e| HostProviderError::Backend(format!("Lock: {e}")))?;
             map.get(job_id).cloned()
         };
         let vm_id = match vm_id {
@@ -287,20 +292,36 @@ runcmd:
         // Delete the VM and its managed disks (stops all billing — compute + storage).
         // We use delete instead of stop because stop leaves the disk running
         // (storage charges continue). Delete cleans up everything.
-        let _ = self
+        //
+        // On failure we keep the job→VM mapping intact so a retry can re-attempt
+        // the delete; silently dropping the error would leave a billing VM
+        // running with no record that it still needs cleanup.
+        match self
             .run_cli(&["compute", "instance", "delete", "--id", &vm_id])
-            .await;
-
-        if let Ok(mut map) = self.vms.lock() {
-            map.remove(job_id);
+            .await
+        {
+            Ok(_) => {
+                if let Ok(mut map) = self.vms.lock() {
+                    map.remove(job_id);
+                }
+                tracing::info!(
+                    target: "hkask.training.nebius.cancel",
+                    job_id = %job_id, vm_id = %vm_id,
+                    "Nebius VM deleted (all billing stopped)"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.training.nebius.cancel",
+                    error = %e, vm_id = %vm_id,
+                    "Nebius VM delete failed — VM may still be billing. Keeping mapping for retry."
+                );
+                Err(HostProviderError::Backend(format!(
+                    "Failed to delete Nebius VM: {e}"
+                )))
+            }
         }
-
-        tracing::info!(
-            target: "hkask.training.nebius.cancel",
-            job_id = %job_id, vm_id = %vm_id,
-            "Nebius VM deleted (all billing stopped)"
-        );
-        Ok(())
     }
 }
 

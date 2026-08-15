@@ -1,20 +1,17 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
+#![warn(clippy::let_underscore_future)]
 //! hKask Regulation — Cybernetic Nervous System
 //!
-//! Homeostatic self-regulation: variety sensing, algedonic alerts, energy budgets,
-//! OCAP governance, sovereignty enforcement. Per Ashby's Law of Requisite Variety.
-
-#![allow(unused_crate_dependencies)] // hkask-storage used in wallet_manager.rs #[cfg(test)]
+//! Homeostatic self-regulation: variety sensing, algedonic alerts, per-agent
+//! tool-call caps, OCAP governance, sovereignty enforcement. Per Ashby's Law
+//! of Requisite Variety.
 
 pub(crate) mod algedonic; // Loop 6 subloop 6.4 — algedonic signal channel
 pub mod cybernetics_loop; // Loop 6
 pub(crate) mod dampener; // Loop 6 — regulation
-pub mod energy; // Loop 6 — energy budgets (hJoules)
-pub mod energy_budget_management; // Loop 6 — energy budget registration/reservation/settlement
-pub mod energy_estimator; // Loop 6 — tool cost estimation trait
+pub mod energy; // Loop 6 — per-agent tool-call caps
 
 pub mod infra_span;
-pub mod meta_span;
 pub mod metacognition;
 pub mod qa_span;
 pub(crate) mod regulation_policy; // Loop 6 — per-metric regulation rules
@@ -25,19 +22,15 @@ pub mod sensor_provider; // Pluggable metric sensors (Fermi Extractor pattern) �
 pub(crate) mod strategy_evaluator; // Loop 6 — multi-model strategy selection (Fermi improvement-loop pattern)
 pub(crate) mod system_simulator; // Loop 6 — predictive regulation via digital twin (Fermi dynamics pattern)
 pub(crate) mod tool_stats; // Loop 6 — statistical learning for MCP tool costs and reliability
-pub mod types; // Loop 6 → Inference energy estimation
+pub mod types; // Loop 6 — regulation loop types
 
-pub mod agent_wallet_store;
 pub mod runtime; // Loop 6 — runtime
-pub mod runtime_policy; // Layer 6 — runtime action policy (VeriGuard + AgentGuard)
-pub mod wallet_budget; // Loop 6 — wallet-backed energy budgets (Phase 5)
-pub mod wallet_manager;
-pub mod well;
-pub use algedonic::{AlertEmailSink, RuntimeAlert};
+pub use algedonic::{AlertEmailSink, AlertEscalationSink, RuntimeAlert};
 pub use cybernetics_loop::CyberneticsLoop;
-pub use energy::{AgentGasStatus, DEFAULT_GAS_ALERT_THRESHOLD, GasBudget, GasCost, GasError};
-pub use energy_budget_management::GasBudgetManager;
-pub use energy_estimator::EnergyEstimator;
+pub use energy::{
+    AgentCallCapStatus, CallCap, CallCapError, CallCapManager, CallMeterOutcome,
+    DEFAULT_CALL_CAP_ALERT_THRESHOLD, DEFAULT_RUNAWAY_CALL_CEILING,
+};
 pub use metacognition::{
     AlertEvent, AlertSink, EscalationAlert, EscalationTrigger, HealthSnapshot, MetacognitionConfig,
     MetacognitionLoop,
@@ -46,14 +39,11 @@ pub use metacognition::{
 pub use hkask_types::regulation::QueueDepth;
 pub use infra_span::InfraSpan;
 pub use qa_span::QaSpan;
-pub use runtime::LedgerSink;
 pub use runtime::NoopEventSink;
 pub use runtime::RegulationLedger;
 pub use runtime::StoredSkillSpan;
-pub use runtime_policy::{DefaultPolicy, PolicyConfig, PolicyVerdict, RuntimePolicy};
 pub use sensor_provider::{
     EnergyBudgetSensor, Sensor, SensorBus, SensorRegistry, ToolReliabilitySensor, VarietySensor,
-    WalletBalanceRatioSensor, WalletKeyHealthSensor,
 };
 pub use set_points::{
     DEFAULT_COMMUNICATION_BACKPRESSURE_THRESHOLD, DEFAULT_CONNECTOR_LATENCY_MAX_SECS,
@@ -63,5 +53,4 @@ pub use set_points::{
 };
 pub use skill_span::SkillFeedbackSpan;
 pub use tool_stats::ToolStats;
-pub use types::loops::{CurationInput, ExperienceClassification, RegulationLoop, RegulatoryAction};
-pub use wallet_budget::WalletBackedBudget;
+pub use types::loops::{CurationInput, ExperienceClassification, RegulatoryAction};

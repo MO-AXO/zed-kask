@@ -985,7 +985,8 @@ impl LlamaCppEventMapper {
                 output_tokens: usage.completion_tokens,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
-            })));
+                cost: None,
+            })))
         }
 
         if let Some(choice) = event.choices.into_iter().next() {
@@ -1994,6 +1995,7 @@ mod tests {
                     output_tokens: 7,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
+                    ..
                 })),
                 Ok(LanguageModelCompletionEvent::Stop(StopReason::EndTurn)),
             ]
@@ -2037,6 +2039,7 @@ mod tests {
                     output_tokens: 5,
                     cache_creation_input_tokens: 0,
                     cache_read_input_tokens: 0,
+                    ..
                 })),
                 Ok(LanguageModelCompletionEvent::ToolUse(LanguageModelToolUse {
                     id,

@@ -1,5 +1,5 @@
 # Pragmatic Semantics Process Manifest
-# ℏKask v0.31.0 — Epistemic classification as convergent PDCA
+# ℏKask v0.34.0 — Epistemic classification as convergent PDCA
 # EXTENDED: Wired provenance-trace and conflict-resolve templates (previously orphaned).
 
 manifest:
@@ -12,16 +12,16 @@ manifest:
     and iterates until certainty/provenance classification is stable for decision
     support.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  threshold: 0.25
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: step_4_result.convergence_metric
+  convergence_mode: ""
+  # No convergence-check compute step: the loop runs N iterations then escalates.
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
 
 gas:
@@ -38,10 +38,13 @@ rjoule:
 inputs:
   - name: statement
     type: string
-    required: true
+    required: false
   - name: system_context
     type: string
     required: false
+
+ledger:
+  span_namespace: reg.skill.pragmatic-semantics
 
 steps:
   - ordinal: 1
@@ -52,7 +55,7 @@ steps:
     gas_cap: 5000
     timeout_seconds: 45
     input_mapping:
-      statement: "{{ statement }}"
+      statement: "{{ task | default(statement) }}"
       system_context: "{{ system_context | default('') }}"
 
   - ordinal: 2
@@ -61,7 +64,7 @@ steps:
     renderer: minijinja
     template_ref: pragmatic-semantics/semantics-provenance-trace
     gas_cap: 4000
-    timeout_seconds: 45
+    timeout_seconds: 150
     input_mapping:
       classification_result: "{{ step_1_result }}"
       statement: "{{ statement }}"
@@ -73,8 +76,8 @@ steps:
     renderer: minijinja
     template_ref: pragmatic-semantics/semantics-conflict-resolve
     gas_cap: 4000
-    timeout_seconds: 45
-    condition: "step_2_result.conflicts_detected | default(false) == true"
+    timeout_seconds: 150
+    condition: "{{ step_2_result.conflicts_detected | default(false) == true }}"
     # When condition is false, step_3_result is undefined. Downstream steps
     # must use `step_3_result | default({})` to handle the skipped case.
     input_mapping:
@@ -82,25 +85,13 @@ steps:
       classification_result: "{{ step_1_result }}"
 
   - ordinal: 4
-    action: select
-    description: Compute normalized convergence metric for semantics cycle.
-    renderer: minijinja
-    template_ref: shared/convergence-check
-    gas_cap: 2000
-    timeout_seconds: 30
-    input_mapping:
-      primary_result:
-        classification: "{{ step_1_result }}"
-        provenance: "{{ step_2_result }}"
-        conflict_resolution: "{{ step_3_result | default({}) }}"
-      convergence_description: "classification is stable, provenance is verified, and conflicts are resolved"
-      include_blockers: true
-
-  - ordinal: 5
     action: loop
     description: Re-enter semantics cycle if convergence is not met.
     input_mapping:
       loop_target: "{{ 1 }}"
+      # Push the provenance-chain length into convergence_signal so the Cauchy
+      # criterion can detect when the classification has stopped moving.
+      convergence_signal: "{{ step_2_result.provenance_chain | default([]) | length }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -108,30 +99,3 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: pragmatic-semantics/semantics-classify-statement
-      gas_budget: 5000
-    - resource: template
-      action: render
-      template_id: pragmatic-semantics/semantics-provenance-trace
-      gas_budget: 4000
-    - resource: template
-      action: render
-      template_id: pragmatic-semantics/semantics-conflict-resolve
-      gas_budget: 4000
-    - resource: template
-      action: render
-      template_id: shared/convergence-check
-      gas_budget: 2000
-    - resource: manifest
-      action: execute
-      template_id: pragmatic-semantics
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true

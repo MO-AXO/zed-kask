@@ -1,11 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- trace
-- detect
-- assess
-- verify
-- evaluate
 contract:
   input:
     classification_result: object
@@ -16,8 +10,7 @@ contract:
     confidence_level: string
     conflicts_detected: boolean
     recommendations_for_verification: array
-  energy_cap: 4096
-  visibility: Public
+visibility: Public
 ---
 {# Template: pragmatic-semantics/semantics-provenance-trace.j2 #}
 {# KnowAct — Trace provenance of a claim through hKask data layers including ontology anchoring #}
@@ -38,7 +31,7 @@ You are a provenance tracer. Trace a claim back through hKask's data layers to d
 | Layer | What Lives Here | Authority |
 |-------|-----------------|-----------|
 | **Specification** | `docs/architecture/PRINCIPLES.md`, `MDS.md`, `TESTING_STANDARDS.md` | Highest — normative |
-| **Ontology tier** | Domain anchoring — FIBO (+0.10), CogAT (-0.10), GOLEM/ML-Schema/OMC (±0.00) | Confidence modifier — adjusts claim precision based on ontology adoption and mapping fidelity |
+| **Ontology tier** | Domain anchoring — FIBO (+0.10), SUMO (+0.05), GOLEM/ML-Schema/OMC (±0.00) | Confidence modifier — adjusts claim precision based on ontology adoption and mapping fidelity |
 | **Design** | `docs/architecture/hKask-architecture-master.md`, ERDs, interface specs | High — authoritative for structure |
 | **Implementation** | `crates/*/src/**/*.rs`, `Cargo.toml`, `build.rs` | Direct — what actually runs |
 | **Runtime observation** | Regulation spans (`reg.*`), variety counters, algedonic alerts | Empirical — what actually happens |

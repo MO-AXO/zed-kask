@@ -1,8 +1,8 @@
 ---
-title: "Cognition and Replica — Fusion Design, Scenario Forecasting, Nu-Event Semantics, Companies Server"
+title: "Cognition and Replica — Scenario Forecasting, Nu-Event Semantics, Companies Server"
 audience: [architects, developers, operators, agents]
-last_updated: 2026-07-24
-version: "0.31.0"
+last_updated: 2026-08-14
+version: "0.34.0"
 status: "Active"
 domain: "Cross-cutting"
 mds_categories: [domain, composition, lifecycle, curation]
@@ -10,83 +10,13 @@ mds_categories: [domain, composition, lifecycle, curation]
 
 # Cognition and Replica
 
-This document consolidates four topics that share a single theme: how hKask represents, processes, and forecasts cognitive artifacts inside zed-kask. The fusion system design recommendations govern multi-model deliberation quality. The scenario forecasting pipeline integrates three research frameworks to build, forecast, and evaluate futures. The ν-event semantics define the atomic unit of observability that feeds the Regulation. The Companies MCP server provides the investment research tooling that operationalizes forecasting and valuation. Together, they form the cognition layer — the mechanisms by which hKask agents perceive, reason about, and predict the world.
+This document consolidates three topics that share a single theme: how hKask represents, processes, and forecasts cognitive artifacts inside zed-kask. The scenario forecasting pipeline integrates three research frameworks to build, forecast, and evaluate futures. The ν-event semantics define the atomic unit of observability that feeds the Regulation. The Companies MCP server provides the investment research tooling that operationalizes forecasting and valuation. Together, they form the cognition layer — the mechanisms by which hKask agents perceive, reason about, and predict the world.
 
-All four subsystems run in-process inside zed-kask: fusion is driven by `hkask-inference`'s `FusionOrchestrator` (wired through the guard layer, D4), the scenarios and companies MCP servers are registered as builtin in-process MCP servers (D1–D3), and ν-events flow through the in-process `RegulationSink`. The standalone `kask` CLI, HTTP API server, and Matrix transport have been removed; the Curator is a native agent inside zed-kask (D2) that evaluates in-process agent events rather than Matrix messages. See the [zed-kask Host Architecture Plan](../architecture/zed-host-architecture-plan.md) for the D1–D10 integration seams.
-
----
-
-## 1. Fusion System Design Recommendations
-
-### Statement
-
-The fusion system enables multi-model deliberation: N panel models generate perspectives, a judge model synthesizes them into a single output. This design exists because single-model outputs are subject to the blind spots of one model; multi-model deliberation with a judge produces higher-quality outputs for generative analysis tasks. The recommendations below were derived through a structured design process using pragmatic-laziness, essentialist, grill-me, and coding-guidelines skills, and each recommendation is marked ADD, DON'T, or DEFER based on whether it adds capability or merely adds complexity.
-
-### Evidence
-
-The fusion system is configured per-manifest via a `FusionConfig` block with 5 fields. The executor sets `params.fusion_config` from `manifest.fusion`, the router checks `params.fusion_config` before falling back to global config, and the orchestrator dispatches to panel + judge. The per-manifest fusion config was verified end-to-end with 6 tests (3 router-level, 3 executor-level) covering the manifest → executor → router → orchestrator routing path.
-
-Five design questions were evaluated:
-
-**Q1: Should per-manifest FusionConfig support partial inheritance?** (Should `judge: null` mean "inherit global judge" while overriding only the panel?) — **DON'T.** The current all-or-nothing config is simpler. Partial inheritance adds a new concept (field-level null = inherit) that increases total system action. If a skill wants to inherit the global judge but customize the panel, the manifest author can read the global env vars and copy the values. Deletion test: delete partial inheritance → nothing breaks → do not add it.
-
-**Q2: Should "fusion mode" be a first-class manifest concept?** (Should there be a top-level `fusion_mode: synthesis | critique | deliberation | best-of-n | pi | disabled` shorthand?) — **DON'T.** The `fusion:` block already IS the concept. Adding a shorthand `fusion_mode: synthesis` would duplicate what `fusion: { mode: synthesis }` already does. Two ways to say the same thing is more total action, not less. The full `FusionConfig` block is already minimal (5 fields, YAML-clean).
-
-**Q3: How does the algo / no-judge path relate to fusion?** — The algo / no-judge path (`judge: "algo"`) **is** a fusion path. Setting the judge to `"algo"` routes panel responses through a deterministic, algorithmic merge instead of an LLM judge call. No separate `FusionMode` variant, no new `FusionConfig` fields — the existing 5-field config with a special judge value. The judge IS the strategy. The corpus pipeline routes through the same fusion orchestrator. The architecture anticipates additional algo / no-judge methods beyond the current recursive JSON merge (e.g., set intersection, vote/tally, schema-validated merge), to be added as sub-selectors on the `algo` judge value when needed.
-
-**Q4: Should the scenario-builder quality gate skip implications when it fails?** — **ADD (implemented).** The `condition:` field already exists on `BundleManifestStep`. Adding `condition: "step_5_result.gate_pass"` to the implications step is zero new code — it uses an existing primitive. This is the path of least action: no new mechanism, just wiring an existing one. One-line change to one manifest, ~5000 gas saved per failed gate iteration.
-
-**Q5: Should the superforecasting loop target be conditional?** (Should the loop restart at different steps depending on what the convergence check diagnoses?) — **DEFER.** The current fixed `loop_target: 2` (Fermi) is simpler. Conditional loop targets require the flow engine to evaluate conditions on the loop step, which is a new mechanism. The PDCA loop + `max_iterations` + `on_not_reached: escalate` handles the edge cases. Revisit if measured iteration waste justifies the complexity.
-
-#### Follow-up Verifications
-
-**Custom-judge unavailability:** `call_judge()` calls `router.resolve(judge_model)` → if the model's provider is not configured, returns `Err(InferenceError::Connection)` → the orchestrator propagates this → the executor receives `TemplateError::Inference(e)` → the flow engine treats it as a step failure. If panel models succeed but the judge fails, the panel results are lost — a fusion run without a judge is meaningless. Graceful error handling is already in place.
-
-**Fusion for other skills:** Skills with generative analysis (diagnosis, design, critique) are effort hotspots where fusion's multi-model deliberation adds the most value per unit of cost. Skills with deterministic rubric evaluation are NOT hotspots — fusion adds noise without adding signal.
-
-| Skill type | Fusion benefit | Examples |
-|------------|---------------|----------|
-| Generative analysis | High — diverse perspectives improve quality | diagnose, review, self-critique-revision, metacognition, improve-codebase-architecture, bug-hunt, idiomatic-rust, deep-module, refactor-service-layer |
-| Deterministic rubric | Low — rubric evaluation does not benefit from multiple opinions | goal-analysis, skill-logic-audit, semantic-graph-audit, magna-carta-verifier |
-| Interactive/dialogue | Medium — depends on use case | kata-coaching, grill-me, improv, essentialist, pragmatic-laziness |
-| Infrastructure | None — not agent-facing | qa-*, regulation-gas-tracking, bootstrap-sequence, dispatch |
-
-#### Dead Field Cleanup
-
-`improvement_ratio` exists in 49 manifests. ALL use `improvement_gate: threshold_only`, which means the field is never consulted by the executor's `check_convergence()` function. This is a Prohibition #3 violation (hidden parameter — the field is declared but unused). Recommendation: DELETE from all 49 manifests — the executor ignores it when `improvement_gate: threshold_only`.
-
-### Diagram
-
-```mermaid
-flowchart TD
-    MANIFEST["manifest.yaml\nfusion: { mode, panel, judge, ... }"]
-    EXEC["ManifestExecutor\nsets params.fusion_config"]
-    GUARD["GuardedInferencePort\n(D4) wraps LanguageModelInferencePort\n(D8) — scan_input / scan_output\nat every LLM boundary"]
-    ROUTER["LanguageModelInferencePort\nresolves fusion_config before\nglobal LanguageModelRegistry"]
-    ORCH["FusionOrchestrator"]
-    PANEL["Panel Models\n(N parallel)"]
-    JUDGE["Judge Model\nsynthesis"]
-    OUTPUT["Fused output"]
-
-    MANIFEST --> EXEC --> GUARD --> ROUTER --> ORCH
-    ORCH -->|"dispatch N models"| PANEL
-    PANEL -->|"N perspectives"| JUDGE
-    JUDGE -->|"synthesis"| OUTPUT
-```
-<!-- DIAGRAM_ALIGNMENT
-id: DIAG-COG-001
-verified_date: 2026-07-24
-verified_against: crates/hkask-types/src/event.rs, crates/hkask-memory/src/lib.rs, kask/crates/kask_bridge/src/inference_port.rs (LanguageModelInferencePort over zed LanguageModel, D8), kask/crates/hkask-guard/src/guarded_inference.rs (GuardedInferencePort wraps InferencePort, D4)
-status: VERIFIED (v2 — InferenceRouter node replaced by GuardedInferencePort over LanguageModelInferencePort; reflects in-process guard-layer routing, not the old standalone InferenceRouter)
--->
-
-### Implications
-
-The fusion design recommendations are an exercise in essentialist discipline — most proposed additions fail the deletion test. The system already has the concepts it needs (the `fusion:` block, the `condition:` field); adding shorthands, unified abstractions, or conditional routing would increase complexity without adding capability. The one addition that passed (Q4: conditional skip of implications on gate failure) is a one-line configuration change using an existing primitive — zero new code. This is the loom-and-thread philosophy applied to feature design: the loom (existing Rust primitives) constrains what the thread (YAML configuration) can express, and the right answer is usually to use the existing primitive rather than add a new one.
+All three subsystems run inside zed-kask: the scenarios and companies MCP servers are registered as builtin context servers launched as child processes over stdio (D1–D3), and ν-events flow through the in-process `RegulationSink`. The standalone `kask` CLI, HTTP API server, and Matrix transport have been removed; the Curator is a native agent inside zed-kask (D2) that evaluates in-process agent events rather than Matrix messages. See the [zed-kask Host Architecture Plan](../architecture/zed-host-architecture-plan.md) for the D1–D28 integration seams.
 
 ---
 
-## 2. Scenario Forecasting and Planning
+## 1. Scenario Forecasting and Planning
 
 ### Statement
 
@@ -96,11 +26,11 @@ The `hkask-mcp-scenarios` server integrates three complementary research framewo
 
 #### Theoretical Foundations
 
-| Framework | Author | Core Question | Tool Stage |
-|-----------|--------|---------------|------------|
-| **Schwartz Method** | Peter Schwartz, *The Art of the Long View* (1991) | "What could happen?" | `scenario-builder` skill's 2×2 pipeline; companies 2×2 bridge |
-| **Superforecasting** | Philip Tetlock, *Superforecasting* (2015) | "How likely is each event?" | `scenario_calibrate`, `scenario_update`, `scenario_score`, `scenario_synthesize`, `scenario_calibration` |
-| **Performance-Based Scenario System** | Thomas Chermack, *Scenario Planning in Organizations* (2011) | "Did the project improve decision quality?" | `scenario_frame`, `scenario_assess` |
+| Framework                             | Author                                                       | Core Question                               | Tool Stage                                                                                               |
+| ------------------------------------- | ------------------------------------------------------------ | ------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **Schwartz Method**                   | Peter Schwartz, _The Art of the Long View_ (1991)            | "What could happen?"                        | `scenario-builder` skill's 2×2 pipeline; companies 2×2 bridge                                            |
+| **Superforecasting**                  | Philip Tetlock, _Superforecasting_ (2015)                    | "How likely is each event?"                 | `scenario_calibrate`, `scenario_update`, `scenario_score`, `scenario_synthesize`, `scenario_calibration` |
+| **Performance-Based Scenario System** | Thomas Chermack, _Scenario Planning in Organizations_ (2011) | "Did the project improve decision quality?" | `scenario_frame`, `scenario_assess`                                                                      |
 
 Schwartz developed his method at Royal Dutch Shell, anticipating the 1973 oil crisis, 1986 price collapse, and Soviet collapse — not by predicting any of them, but by having strategies ready for worlds where they could happen. Key concepts: focal question, driving forces (STEEP: Society, Technology, Economy, Environment, Politics), critical uncertainties (importance × uncertainty → 2×2 matrix), scenario narratives, robust strategies, early-warning indicators.
 
@@ -118,15 +48,15 @@ The `scenario_frame` tool is designed to invite rather than interrogate. Most sc
 
 **Behavioral Psychology**: Foot-in-the-door (Cialdini), curiosity gap (Loewenstein), loss aversion (Kahneman), social proof (Cialdini), peak-end rule (Kahneman), processing fluency, IKEA effect (Norton, Mochon, Ariely).
 
-| Turn | Opening | Improv Mode | Psychology | What it captures |
-|------|---------|-------------|------------|------------------|
-| 1 | "So — tell me a bit about what's on your mind." | Plussing | Foot-in-the-door | Subject, context, emotional stakes |
-| 2 | "If you had a clearer picture, what would you actually do differently?" | Yes, And | Curiosity gap | Decision at stake, focal question |
-| 3 | "When do you actually need to make this call?" | Coaching | Temporal anchoring | Time horizon, action deadline |
-| 4 | "Let's start with what's definitely NOT on the table." | Yes, But | Loss aversion | Out-of-scope, then in-scope |
-| 5 | "Who else has skin in this game?" | Plussing | Social proof + contrarian | Stakeholders and perspectives |
-| 6 | "What does 'good enough' look like?" | Yes, And | Peak-end begins | Success criteria, use case |
-| 7 | "What are we assuming that might be completely wrong?" | Yes, But | Peak-end closes | Assumptions, constraints |
+| Turn | Opening                                                                 | Improv Mode | Psychology                | What it captures                   |
+| ---- | ----------------------------------------------------------------------- | ----------- | ------------------------- | ---------------------------------- |
+| 1    | "So — tell me a bit about what's on your mind."                         | Plussing    | Foot-in-the-door          | Subject, context, emotional stakes |
+| 2    | "If you had a clearer picture, what would you actually do differently?" | Yes, And    | Curiosity gap             | Decision at stake, focal question  |
+| 3    | "When do you actually need to make this call?"                          | Coaching    | Temporal anchoring        | Time horizon, action deadline      |
+| 4    | "Let's start with what's definitely NOT on the table."                  | Yes, But    | Loss aversion             | Out-of-scope, then in-scope        |
+| 5    | "Who else has skin in this game?"                                       | Plussing    | Social proof + contrarian | Stakeholders and perspectives      |
+| 6    | "What does 'good enough' look like?"                                    | Yes, And    | Peak-end begins           | Success criteria, use case         |
+| 7    | "What are we assuming that might be completely wrong?"                  | Yes, But    | Peak-end closes           | Assumptions, constraints           |
 
 #### The Integrated Pipeline
 
@@ -163,8 +93,9 @@ mcp-servers/hkask-mcp-scenarios/
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs             # Binary entrypoint (bootstrap + run)
-│   ├── lib.rs              # Server struct, 18 MCP tools, request types
+│   ├── hkask_mcp_scenarios.rs # Server struct, 21 MCP tools, request types
 │   ├── types.rs            # Core data model (events, trees, forecasts, assessment)
+│   ├── templates.rs        # Prompt/document templates
 │   └── superforecast.rs    # Computation engine (Fermi, Bayes, Brier, trees, assessment)
 ```
 
@@ -187,11 +118,12 @@ flowchart TD
     SYNTH --> TRACK
     TRACK --> ASSESS
 ```
+
 <!-- DIAGRAM_ALIGNMENT
 id: DIAG-COG-002
-verified_date: 2026-07-12
-verified_against: crates/hkask-types/src/event.rs, crates/hkask-memory/src/lib.rs
-status: VERIFIED
+verified_date: 2026-08-05
+verified_against: mcp-servers/hkask-mcp-scenarios/src/hkask_mcp_scenarios.rs (21 tool routers), mcp-servers/hkask-mcp-scenarios/src/superforecast.rs (engine functions)
+status: VERIFIED (v3 — corrected tool count to 21 and directory sketch to the post-split layout per 2026-08-05 audit)
 -->
 
 ### Implications
@@ -202,7 +134,7 @@ The conversational design of `scenario_frame` is noteworthy — it applies hKask
 
 ---
 
-## 3. Nu-Event Semantics
+## 2. Nu-Event Semantics
 
 ### Statement
 
@@ -210,7 +142,7 @@ A ν-event (nu-event) is a thin domain event — a timestamped, attributed, name
 
 ### Evidence
 
-The `RegulationRecord` struct at `crates/hkask-types/src/event.rs:16` carries:
+The `RegulationRecord` struct at `crates/hkask-types/src/event.rs` carries:
 
 - `id: EventID` — unique identifier
 - `timestamp: DateTime<Utc>` — when the event occurred
@@ -226,11 +158,11 @@ The `RegulationRecord` struct at `crates/hkask-types/src/event.rs:16` carries:
 
 #### ObservableSpan vs RegulationRecord
 
-This distinction is crucial. `ObservableSpan` (at `crates/hkask-types/src/observable_span.rs:56`) is a trait that typed span enums implement — it produces a canonical dot-separated namespace string like `"reg.tool.web_search"`. `RegulationSpan` is the primary implementor, but the trait is designed to be domain-extensible: `WalletSpan`, and other domain span enums can implement it. A span is a **trace** — it marks where in the system something happened.
+This distinction is crucial. `ObservableSpan` (at `crates/hkask-types/src/observable_span.rs`) is a trait that typed span enums implement — it produces a canonical dot-separated namespace string like `"reg.tool.web_search"`. `RegulationSpan` is the primary implementor, but the trait is designed to be domain-extensible: `InfraSpan`, `QaSpan`, and other domain span enums can implement it. A span is a **trace** — it marks where in the system something happened.
 
 A `RegulationRecord` contains a `Span`, but it adds: who, when, what, which phase, and what was the regulatory outcome. A span says "tool invoked"; a ν-event says "Agent A invoked the web_search tool in the Sense phase, observing {server, tool, estimated_cost}, with no regulation applied, at recursion depth 0."
 
-The bridging function is `SpanNamespace::from_observable()` — it takes any `impl ObservableSpan`, validates against the canonical namespace set in `CANONICAL_NAMESPACES` (139 entries at v0.31.0), and produces a validated `SpanNamespace` for `RegulationRecord` construction. This design decouples domain span definitions from namespace validation: domain crates define their spans; the event system validates.
+The bridging function is `SpanNamespace::from_observable()` — it takes any `impl ObservableSpan`, validates against the canonical namespace set in `CANONICAL_NAMESPACES` (262 entries at v0.32.0), and produces a validated `SpanNamespace` for `RegulationRecord` construction. This design decouples domain span definitions from namespace validation: domain crates define their spans; the event system validates.
 
 #### The Emission Contract
 
@@ -238,31 +170,30 @@ The emission contract has three participants:
 
 - **Emitter** — Any system component that creates a `RegulationRecord`. `McpRuntime::invoke()` is the canonical emitter for tool invocations; `CyberneticsLoop` emits regulation spans; the Curator emits curation spans. The emitter constructs the event with `RegulationRecord::new(observer_webid, span, phase, observation, recursion_depth)`, optionally chaining `.with_outcome()`, `.with_regulation()`, `.with_parent()`, and `.with_visibility()`.
 
-- **Sink** — `RegulationSink` (line 640) is the persistence trait. It has a single method: `fn persist(&self, event: &RegulationRecord) -> Result<(), InfrastructureError>`. The production implementation is `RegulationArchive` in `hkask-storage`. The sink is the durable boundary — once persisted, the event is available for Regulation sensing, Curator review, and forensic audit.
+- **Sink** — `RegulationSink` is the persistence trait. It has a single method: `fn persist(&self, event: &RegulationRecord) -> Result<(), InfrastructureError>`. The production implementation is `RegulationArchive` in `hkask-storage`. The sink is the durable boundary — once persisted, the event is available for Regulation sensing, Curator review, and forensic audit.
 
-- **Observer** — The Regulation itself. `CurationLoop::sense()` reads algedonic-significant events from the store using cursor-based review. `CyberneticsLoop::sense()` reads via sensor providers (`Sensor` trait). Events are also replayed with decay weighting via `LedgerStoragePort::replay_weighted()`.
+- **Observer** — The Regulation itself. `CurationLoop::sense()` reads algedonic-significant events from the store using cursor-based review. `CyberneticsLoop::sense()` reads via sensor providers (`Sensor` trait). Events are also replayed with decay weighting via `RegulationArchive::replay_weighted()`.
 
 #### Regulation Span Namespaces
 
-The `RegulationSpan` enum at `crates/hkask-types/src/regulation.rs:111` defines the core span identifiers:
+The `RegulationSpan` enum at `crates/hkask-types/src/regulation.rs` defines the core span identifiers:
 
-| Variant | Namespace | Purpose |
-|---------|-----------|---------|
-| `Tool { subsystem }` | `reg.tool.{subsystem}` | MCP subsystems for the 10 on-disk servers (codegraph, companies, condenser, corpus, curator, kata-kanban, media, research, scenarios, training) plus legacy `ToolSubsystem` variants (`communication`, `filesystem`, `memory`, `registry`, `wallet`, `web_search`) retained in the enum for span-name stability. The deleted `communication`, `filesystem`, `memory`, `skill`, and `regulation` MCP servers no longer emit spans. |
-| `Inference` | `reg.inference` | LLM request/response |
-| `AgentPod` | `reg.agent_pod` | Pod lifecycle events |
-| `Gas` | `reg.gas` | Energy consumption tracking |
-| `Curation` | `reg.curation` | Registry sync, pod sync, directive issuance |
-| `SelfHeal` | `reg.heal` | Self-healing operations |
-| `MemoryEncode` | `reg.memory.encode` | Memory encoding events |
+| Variant              | Namespace              | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| -------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Tool { subsystem }` | `reg.tool.{subsystem}` | MCP subsystems for the 13 on-disk servers (codegraph, companies, condenser, corpus, curator, kata-kanban, media, portfolio, prediction-markets, research, scenarios, swarm, training) plus legacy `ToolSubsystem` variants (`communication`, `filesystem`, `memory`, `registry`, `wallet`, `web_search`) retained in the enum for span-name stability. The deleted `communication`, `filesystem`, `memory`, `skill`, and `regulation` MCP servers no longer emit spans. `codegraph`, `portfolio`, and `prediction-markets` route through `ToolSubsystem::Other` (no dedicated variant). |
+| `Inference`          | `reg.inference`        | LLM request/response                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `Gas`                | `reg.gas`              | Energy consumption tracking                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `Curation`           | `reg.curation`         | Registry sync, pod sync, directive issuance                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `SelfHeal`           | `reg.heal`             | Self-healing operations                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `MemoryEncode`       | `reg.memory.encode`    | Memory encoding events                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
-The `SpanKind` enum at `event.rs:523` provides typed construction for common spans, eliminating string typos: `ToolInvoked`, `ToolCompleted`, `GasReserved`, `GasSettled`, `GasDepleted`, `CurationDirectiveAcknowledged`, `CurationEscalation`, `AgentPodRegistered`, `AgentPodActivated`, `VarietyAlgedonicAlert`, and the v0.31.0 regulation spans (`ImpactVerified`, `ActionSubstituted`, `ActionBlocked`, `RegulatoryPlateauDetected`, `LoopMetricsTelemetry`).
+The `SpanKind` enum at `event.rs` provides typed construction for common spans, eliminating string typos: `ToolInvoked`, `ToolCompleted`, `ToolError`, `GasReserved`, `GasSettled`, `GasDepleted`, `CurationDirectiveAcknowledged`, `CurationEscalation`, `VarietyAlgedonicAlert`, `DepositCredited`, and the v0.31.0 regulation spans (`ImpactVerified`, `ActionSubstituted`, `ActionBlocked`, `RegulatoryPlateauDetected`, `LoopMetricsTelemetry`).
 
-Beyond `RegulationSpan`, the `CANONICAL_NAMESPACES` array registers 139 namespace strings spanning architecture seams, chat, CI, classification, condenser, consent, consolidation, contracts, curation, cybernetics, deploy, gas, guard, healing, inference, kata, MCP media, memory, multi-agent, platform metrics (11 spans for PaaP/DORA/SPACE/Loyalty), QA (4 spans), regulation, userpod, semantic, skills, SLOs, sovereignty (5 spans), specs, storage, tools, variety, and wallet (10 sub-spans).
+Beyond `RegulationSpan`, the `CANONICAL_NAMESPACES` array registers 262 namespace strings spanning architecture seams, chat, CI, classification, condenser, consent, consolidation, contracts, curation, cybernetics, deploy, gas, guard, healing, inference, kata, MCP media, memory, multi-agent, platform metrics (11 spans for PaaP/DORA/SPACE/Loyalty), QA, regulation, semantic, skills, SLOs, sovereignty, specs, storage, tools, variety, wallet, well, pipeline, supply chain, runtime posture, attack taxonomy, LoRA training, template, and training providers.
 
 #### How ν-Events Feed the Regulation Homeostatic Loop
 
-The Regulation loop is sense → compare → compute → act → verify. ν-events enter at sense — they are the afferent signals. `CyberneticsLoop::sense()` (at `cybernetics_loop.rs:733`) reads via pluggable `Sensor` implementations: `EnergyBudgetSensor`, `VarietySensor`, `WalletKeyHealthSensor`. Each sensor queries the ν-event store for relevant events and produces `Signal` values with metrics and set-points.
+The Regulation loop is sense → compare → compute → act → verify. ν-events enter at sense — they are the afferent signals. `CyberneticsLoop::sense()` reads via pluggable `Sensor` implementations: `EnergyBudgetSensor`, `VarietySensor`. Each sensor queries the ν-event store for relevant events and produces `Signal` values with metrics and set-points.
 
 In the compare phase, signals are measured against set-points to produce `Deviation` values with direction (`AboveSetPoint` / `BelowSetPoint`). In compute, deviations map to `RegulatoryAction` with action types like `Calibrate`, `Escalate`, `Throttle`, `Notify`. In act, actions are executed. In verify_impact, the `ImpactReport` records whether actions were effective.
 
@@ -270,9 +201,9 @@ The `parent_event` field creates causal chains: the `reg.tool.completed` event h
 
 #### WeightedEvent and Decay
 
-Events do not persist at full weight forever. `WeightedEvent` at `crates/hkask-types/src/regulation.rs:106` pairs a `RegulationRecord` with a `weight: f64`. `DecayConfig` (line 116) defines per-category exponential decay constants: cybernetics has a 5-minute half-life, curation 15 minutes, inference 2 minutes, episodic 10 minutes. Events below `weight_threshold` (default 0.001) are not replayed. This implements episodic memory — recent events matter more than ancient ones — and prevents the Regulation from drowning in historical noise.
+Events do not persist at full weight forever. `WeightedEvent` at `crates/hkask-types/src/ports/regulation.rs` pairs a `RegulationRecord` with a `weight: f64`. `DecayConfig` (same file) defines per-category exponential decay constants: cybernetics has a 5-minute half-life, curation 15 minutes, inference 2 minutes, episodic 10 minutes. Events below `weight_threshold` (default 0.001) are not replayed. This implements episodic memory — recent events matter more than ancient ones — and prevents the Regulation from drowning in historical noise.
 
-The `LedgerStoragePort::replay_weighted()` method provides time-decayed event replay, enabling the Regulation to reconstruct system state from recent history without loading the entire event store. This is the computational expression of the least-action principle applied to observability: only the computationally cheapest (most recent, most salient) events factor into regulation decisions.
+The `RegulationArchive::replay_weighted()` method provides time-decayed event replay, enabling the Regulation to reconstruct system state from recent history without loading the entire event store. This is the computational expression of the least-action principle applied to observability: only the computationally cheapest (most recent, most salient) events factor into regulation decisions.
 
 ### Diagram
 
@@ -294,24 +225,25 @@ flowchart TD
     STORE -->|"algedonic events"| CURATOR
     STORE -->|"replay_weighted()"| Regulation
 ```
+
 <!-- DIAGRAM_ALIGNMENT
 id: DIAG-COG-003
-verified_date: 2026-07-12
-verified_against: crates/hkask-types/src/event.rs, crates/hkask-memory/src/lib.rs
-status: VERIFIED
+verified_date: 2026-07-29
+verified_against: crates/hkask-types/src/event.rs (RegulationRecord, Span, SpanNamespace, CANONICAL_NAMESPACES — 262 entries), crates/hkask-types/src/regulation.rs (RegulationSpan enum), crates/hkask-types/src/observable_span.rs (ObservableSpan trait), crates/hkask-regulation/src/cybernetics_loop.rs (CyberneticsLoop::sense, Sensor implementations)
+status: VERIFIED (v3 — corrected CANONICAL_NAMESPACES count to 262 per 2026-08-04 audit; fixed WeightedEvent/DecayConfig file path to ports/regulation.rs; removed stale hkask-memory/src/lib.rs reference)
 -->
 
 ### Implications
 
-The ν-event design is the Good Regulator theorem applied to observability: the Regulation's internal model of the system is built from ν-events, and the model's fidelity depends on the events' structure. A raw log line ("tool invoked at 14:32") is a poor model — it lacks who, what phase, what outcome, and what regulation was applied. A ν-event is a rich model — it carries all of these in a typed, queryable, replayable format. The 139-entry `CANONICAL_NAMESPACES` registry ensures that every namespace is validated against a known set — a typo in a span namespace is caught at construction time, not discovered during debugging. The decay-weighted replay is the least-action principle in action: the Regulation does not need to load the entire event store to regulate the system; it needs only the recent, salient events. This is what makes cybernetic regulation computationally feasible — the regulator's model is bounded by decay, not by the full history of the system.
+The ν-event design is the Good Regulator theorem applied to observability: the Regulation's internal model of the system is built from ν-events, and the model's fidelity depends on the events' structure. A raw log line ("tool invoked at 14:32") is a poor model — it lacks who, what phase, what outcome, and what regulation was applied. A ν-event is a rich model — it carries all of these in a typed, queryable, replayable format. The 262-entry `CANONICAL_NAMESPACES` registry ensures that every namespace is validated against a known set — a typo in a span namespace is caught at construction time, not discovered during debugging. The decay-weighted replay is the least-action principle in action: the Regulation does not need to load the entire event store to regulate the system; it needs only the recent, salient events. This is what makes cybernetic regulation computationally feasible — the regulator's model is bounded by decay, not by the full history of the system.
 
 ---
 
-## 4. Companies MCP Server — Investment Research
+## 3. Companies MCP Server — Investment Research
 
 ### Statement
 
-The `hkask-mcp-companies` server provides 41 tools for retrieving company data, calculating valuations, researching claims, maintaining durable forecast feedback, and managing a local investment ledger. It is the operational toolset that connects the scenario forecasting pipeline to real market data — the forecasting pipeline produces probabilities; the companies server provides the financial data that grounds those probabilities in reality.
+The `hkask-mcp-companies` server provides 44 tools for retrieving company data, calculating valuations, researching claims, maintaining durable forecast feedback, and managing a local investment ledger. It is the operational toolset that connects the scenario forecasting pipeline to real market data — the forecasting pipeline produces probabilities; the companies server provides the financial data that grounds those probabilities in reality.
 
 ### Evidence
 
@@ -365,7 +297,7 @@ The active DCF model uses a Gordon-growth terminal value and subtracts net debt 
   "forecast_date": "2025-01-01",
   "horizon": "1yr",
   "forecast_multiple": 30.0,
-  "forecast_price_change": 0.10,
+  "forecast_price_change": 0.1,
   "outcome_date": "2026-01-01",
   "actual_multiple": 28.0,
   "actual_price_change": 0.03,
@@ -418,11 +350,12 @@ flowchart TD
     REQ -->|"ledger_import"| LEDGER
     LEDGER -->|"portfolio_returns,\nattribution"| REQ
 ```
+
 <!-- DIAGRAM_ALIGNMENT
 id: DIAG-COG-004
-verified_date: 2026-07-12
-verified_against: crates/hkask-types/src/event.rs, crates/hkask-memory/src/lib.rs
-status: VERIFIED
+verified_date: 2026-08-05
+verified_against: mcp-servers/hkask-mcp-companies/src/hkask_mcp_companies.rs (CompaniesServer struct, run factory), mcp-servers/hkask-mcp-companies/src/providers.rs (companies_get, emit_provider_reg), mcp-servers/hkask-mcp-companies/src/portfolio.rs (PortfolioManager), mcp-servers/hkask-mcp-companies/src/tools/ (42 tool methods across 7 tool modules)
+status: VERIFIED (v3 — corrected tool count to 42 per 2026-08-05 audit)
 -->
 
 ### Implications
@@ -435,23 +368,23 @@ The owner-scoped portfolio storage is P1 (User Sovereignty) and P12 (Authenticat
 
 ## References
 
-[^schwartz]: Schwartz, P. (1991). *The Art of the Long View: Planning for the Future in an Uncertain World*. Currency Doubleday.
+[^schwartz]: Schwartz, P. (1991). _The Art of the Long View: Planning for the Future in an Uncertain World_. Currency Doubleday.
 
-[^tetlock]: Tetlock, P. E., & Gardner, D. (2015). *Superforecasting: The Art and Science of Prediction*. Crown.
+[^tetlock]: Tetlock, P. E., & Gardner, D. (2015). _Superforecasting: The Art and Science of Prediction_. Crown.
 
-[^chermack]: Chermack, T. J. (2011). *Scenario Planning in Organizations: How to Create, Use, and Assess Scenarios*. Berrett-Koehler.
+[^chermack]: Chermack, T. J. (2011). _Scenario Planning in Organizations: How to Create, Use, and Assess Scenarios_. Berrett-Koehler.
 
-- Brier, G. W. (1950). "Verification of forecasts expressed in terms of probability." *Monthly Weather Review*, 78(1), 1–3.
-- Murphy, A. H. (1973). "A New Vector Partition of the Probability Score." *Journal of Applied Meteorology*, 12(4), 595–600.
-- Cialdini, R. B. (2007). *Influence: The Psychology of Persuasion*. HarperCollins. (Foot-in-the-door, social proof)
-- Loewenstein, G. (1994). "The Psychology of Curiosity: A Review and Reinterpretation." *Psychological Bulletin*, 116(1), 75–98.
-- Kahneman, D. (2011). *Thinking, Fast and Slow*. Farrar, Straus and Giroux. (Loss aversion, peak-end rule)
-- Norton, M. I., Mochon, D., & Ariely, D. (2012). "The IKEA effect: When labor leads to love." *Journal of Consumer Psychology*, 22(3), 453–460.
+- Brier, G. W. (1950). "Verification of forecasts expressed in terms of probability." _Monthly Weather Review_, 78(1), 1–3.
+- Murphy, A. H. (1973). "A New Vector Partition of the Probability Score." _Journal of Applied Meteorology_, 12(4), 595–600.
+- Cialdini, R. B. (2007). _Influence: The Psychology of Persuasion_. HarperCollins. (Foot-in-the-door, social proof)
+- Loewenstein, G. (1994). "The Psychology of Curiosity: A Review and Reinterpretation." _Psychological Bulletin_, 116(1), 75–98.
+- Kahneman, D. (2011). _Thinking, Fast and Slow_. Farrar, Straus and Giroux. (Loss aversion, peak-end rule)
+- Norton, M. I., Mochon, D., & Ariely, D. (2012). "The IKEA effect: When labor leads to love." _Journal of Consumer Psychology_, 22(3), 453–460.
 - Companies MCP Server Reference at `docs/reference/mcp-servers/README.md` (Companies MCP Server section)
+
 ---
 
 ## Embedding Architecture (Merged from EMBEDDING_ARCHITECTURE.md)
-
 
 # Embedding Architecture — QA Pipeline
 
@@ -459,33 +392,33 @@ The owner-scoped portfolio storage is P1 (User Sovereignty) and P12 (Authenticat
 
 ## Current State
 
-| Component | Uses Embeddings? | How |
-|-----------|-----------------|-----|
-| `corpus_embed` | ✅ Produces | Embeds 20K+ chunks → EmbeddingStore |
-| `corpus_salience` | ❌ No | Graph-centrality only |
-| `build-prompts` | ❌ No | Salience + concepts only |
-| `generate-qa` | ❌ No | Raw text → LLM |
-| `ingest-qa` | ✅ Produces | Embeds QAs AFTER generation |
-| `corpus_build_persona` | ✅ Produces | Embeds corpus for persona centroids |
+| Component              | Uses Embeddings? | How                                 |
+| ---------------------- | ---------------- | ----------------------------------- |
+| `corpus_embed`         | ✅ Produces      | Embeds 20K+ chunks → EmbeddingStore |
+| `corpus_salience`      | ❌ No            | Graph-centrality only               |
+| `build-prompts`        | ❌ No            | Salience + concepts only            |
+| `generate-qa`          | ❌ No            | Raw text → LLM                      |
+| `ingest-qa`            | ✅ Produces      | Embeds QAs AFTER generation         |
+| `corpus_build_persona` | ✅ Produces      | Embeds corpus for persona centroids |
 
 ## Gap: Embeddings Not Used in QA Generation
 
-| Opportunity | Impact | Difficulty |
-|-------------|--------|------------|
-| **Chunk dedup** (cosine >0.95) | −15% inference cost | Medium — needs DB access in build-prompts |
-| **MMR selection** (salience + diversity) | Fewer redundant QAs | Medium — needs vec0 KNN queries |
-| **Semantic cross-ref** (embedding groups) | Better synthesis QAs | Hard — O(n²) without index |
-| **QA-chunk alignment** (cosine validation) | Catch hallucinations | Easy — already have both embeddings |
+| Opportunity                                | Impact               | Difficulty                                |
+| ------------------------------------------ | -------------------- | ----------------------------------------- |
+| **Chunk dedup** (cosine >0.95)             | −15% inference cost  | Medium — needs DB access in build-prompts |
+| **MMR selection** (salience + diversity)   | Fewer redundant QAs  | Medium — needs vec0 KNN queries           |
+| **Semantic cross-ref** (embedding groups)  | Better synthesis QAs | Hard — O(n²) without index                |
+| **QA-chunk alignment** (cosine validation) | Catch hallucinations | Easy — already have both embeddings       |
 
 ## Why Keep Qwen3-Embedding-0.6B
 
-| Factor | Analysis |
-|--------|----------|
-| MTEB retrieval | ~60% (adequate for dedup at 0.95 threshold) |
-| Upgrade cost | Re-embed 20K chunks + 7K QAs → 4+ hours |
-| Dim compatibility | 1024 matches EMBEDDING_DIM hardcoded everywhere |
+| Factor             | Analysis                                                                                     |
+| ------------------ | -------------------------------------------------------------------------------------------- |
+| MTEB retrieval     | ~60% (adequate for dedup at 0.95 threshold)                                                  |
+| Upgrade cost       | Re-embed 20K chunks + 7K QAs → 4+ hours                                                      |
+| Dim compatibility  | 1024 matches EMBEDDING_DIM hardcoded everywhere                                              |
 | Academic consensus | Simple embeddings beat complex methods for data selection (Large-Scale Data Selection, 2025) |
-| DEITA threshold | 0.9-0.95 for Repr Filter on OpenHermes/Tulu3 pools |
+| DEITA threshold    | 0.9-0.95 for Repr Filter on OpenHermes/Tulu3 pools                                           |
 
 ## Upgrade Path (when justified)
 
@@ -497,6 +430,7 @@ The owner-scoped portfolio storage is P1 (User Sovereignty) and P12 (Authenticat
 ## Ontological Anchoring
 
 The `concepts` field in tagged_chunks.jsonl serves as a lightweight investment ontology:
+
 - Competitive positioning: `competitive advantage`, `moat`, `barriers to entry`
 - Valuation: `discounted cash flow`, `DCF`, `multiples`, `intrinsic value`
 - Return analysis: `return on capital`, `ROIC`, `ROE`, `economic profit`
@@ -513,31 +447,35 @@ The following Mermaid diagrams were inlined from the former `docs/diagrams/` dir
 
 ### Memory Pipeline — Episodic → Semantic
 
-*Inlined from `docs/diagrams/sequence-memory-pipeline.md`*
+> **Superseded (2026-08-10):** The diagram and description below referenced the
+> deleted `EpisodicMemory` / `SemanticMemory` / `ConsentManager` /
+> `ConsolidationBridge` / `generate_narrative` architecture from the standalone
+> daemon era. The current memory system is a simpler vector + relational
+> lookup design. See:
+>
+> - [Memory System Specification](../architecture/memory-system-specification.md) — the current architecture
+> - [Memory System — Why It Works This Way](./memory-system.md) — the explanation
+> - [Memory Ingest Sequence](../diagrams/sequence-memory-ingest.md) — the write-side diagram
+> - [Memory Recall Flow](../diagrams/flowchart-memory-recall.md) — the read-side diagram
+> - [Memory Store ERD](../diagrams/erd-memory-store.md) — the storage schema
+>
+> The stale diagram is retained below for historical reference only.
 
+### Visibility and Perspective Rules (current)
 
-# Memory Pipeline — Episodic → Semantic with Visibility Gating
+| Store                       | `visibility` | `perspective`         | Who can read?              |
+| --------------------------- | ------------ | --------------------- | -------------------------- |
+| Episodic (user `memory.db`) | `Private`    | `Some(user_webid)`    | Only owning user           |
+| Episodic (curator `curator.db`) | `Private`    | `Some(curator_webid)` | Only curator               |
+| Semantic (curator `curator.db`) | `Shared`     | `Some(curator_webid)` | Curator + user recall path |
 
-## Description
+### Consolidation Rules (current)
 
-The hKask memory pipeline implements a two-layer (episodic + semantic) psycho-cybernetic memory architecture. Tool call experiences enter through `record_experience()` into the private episodic store, scoped to the agent's `perspective` (WebID). Every 10 experiences, a narrative generation loop (`generate_narrative()`) triggers the `ConsolidationBridge` to promote episodic hMems into the shared semantic store. The consolidation is one-way and irreversible: episodic perspective is stripped, confidence is decayed via the Wozniak-Gorzelanczyk forgetting curve, and hMems are either Bayesian-combined with existing semantic matches or seeded as new entries. A `ConsentManager` gates visibility transitions: episodic stays private (sovereign), semantic requires Public/Shared visibility.
-
-**Key source:** `crates/hkask-memory/src/episodic.rs:51-220` (`EpisodicMemory`), `crates/hkask-memory/src/semantic.rs:61-130` (`SemanticMemory`), `crates/hkask-memory/src/consolidation.rs:26-168` (`ConsolidationBridge`), `crates/hkask-memory/src/consolidation_service.rs:10-100` (`ConsolidationService`). In zed-kask, experience recording is driven in-process by the thread→memory bridge (D6) and the `ToolSpanGuard` experience callback; the former `daemon_impl::store_experience` / `generate_narrative` functions were removed when the standalone daemon was deleted.
-
-### Visibility and Perspective Rules
-
-| Store | `visibility` | `perspective` | Who can read? |
-|-------|-------------|--------------|---------------|
-| Episodic | `Private` only | `Some(agent_webid)` | Only owning agent |
-| Semantic | `Shared` / `Public` | `None` | Any agent with capability token |
-
-### Consolidation Rules
-
-| Scenario | Action | Confidence |
-|----------|--------|------------|
-| EAV match in semantic | Bayesian combine | `combine_confidences(existing, episodic_decayed)` |
-| No EAV match | Seed new semantic hMem | Decayed episodic confidence |
-| Episodic hMem expired | Soft-delete via `valid_to` | Source removed from episodic |
+| Scenario              | Action                     | Confidence                                        |
+| --------------------- | -------------------------- | ------------------------------------------------- |
+| EAV match in semantic | Bayesian combine           | `combine_confidences(existing, episodic_decayed)` |
+| No EAV match          | Seed new semantic hMem     | Decayed episodic confidence                       |
+| Episodic hMem expired | Soft-delete via `valid_to` | Source removed from episodic                      |
 
 ```mermaid
 sequenceDiagram
@@ -555,7 +493,7 @@ sequenceDiagram
     rect rgb(245, 248, 252)
         Note over Tool,Epi: Phase 1 — Tool Call Experience → Episodic Store
 
-        Tool->>+Bridge: store_experience(userpod, entity, attribute, value, confidence)
+        Tool->>+Bridge: store_experience(webid, entity, attribute, value, confidence)
         Note over Tool: e.g., "moat_check"<br/>outcome="success"<br/>confidence=0.85
         Bridge->>+Epi: record_experience() → store(h_mem)
         Note over Epi: access.visibility = Private<br/>access.perspective = Some(agent_webid)
@@ -573,10 +511,10 @@ sequenceDiagram
 
             Epi->>+Epi: storage_usage(perspective)
             opt usage > 80% of budget
-                Note over Epi: EpisodicLoop produces<br/>Throttle action (self-targeted)
+                Note over Epi: (EpisodicLoop removed —<br/>budget throttling was aspirational)
             end
             opt usage > 100% of budget
-                Note over Epi: EpisodicLoop escalates to Curation
+                Note over Epi: (EpisodicLoop removed —<br/>escalation was aspirational)
             end
         end
     end
@@ -601,7 +539,7 @@ sequenceDiagram
     rect rgb(255, 252, 240)
         Note over Epi,Svc: Phase 3 — Consolidation Bridge (Episodic → Semantic)
 
-        Note over Bridge: Triggered by EpisodicLoop.act()<br/>when budget pressure detected
+        Note over Bridge: Triggered by consolidation schedule<br/>(EpisodicLoop removed — was aspirational)
         Bridge->>+Epi: consolidation_candidates(perspective, limit)
         Note over Epi: Selects oldest/lowest<br/>effective-confidence hMems
         Epi-->>-Bridge: Vec<hMem> (candidates)
@@ -680,11 +618,12 @@ sequenceDiagram
         Note over Sem: recall_dedup::dedup_h_mems(filtered)
     end
 ```
+
 <!-- DIAGRAM_ALIGNMENT
 id: DIAG-COG-005
 verified_date: 2026-07-24
 verified_against: crates/hkask-memory/src/episodic.rs, crates/hkask-memory/src/consolidation_service.rs, crates/hkask-mcp-server/src/server/tool_span.rs (in-process experience callback, D6)
-status: VERIFIED
+status: SUPERSEDED 2026-08-10 — references deleted EpisodicMemory/SemanticMemory/ConsentManager/ConsolidationBridge. See ../architecture/memory-system-specification.md for the current architecture.
 -->
 
 ## Confidence Flow Through Pipeline
@@ -717,15 +656,16 @@ sequenceDiagram
         Bridge->>+Sem: store_consolidated(episodic_c)
     end
 ```
+
 ## Per-Agent SQLCipher Isolation
 
-| Dimension | Episodic | Semantic |
-|-----------|----------|----------|
-| Filter column | `perspective = agent_webid` | `visibility IN (Shared, Public)` |
-| Encryption | Per-agent SQLCipher key | Shared encryption key |
-| Dedup strategy | `recall_dedup::dedup_h_mems()` | `recall_dedup::dedup_h_mems()` |
-| Confidence at read | Wozniak-Gorzelanczyk decay applied | Wozniak-Gorzelanczyk decay applied |
-| Budget enforcement | `EpisodicLoop` (80%/100% thresholds) | `ConsolidationService` (confidence floor + max count) |
+| Dimension          | Episodic                              | Semantic                                              |
+| ------------------ | ------------------------------------- | ----------------------------------------------------- |
+| Filter column      | `perspective = agent_webid`           | `visibility IN (Shared, Public)`                      |
+| Encryption         | Per-agent SQLCipher key               | Shared encryption key                                 |
+| Dedup strategy     | `recall_dedup::dedup_h_mems()`        | `recall_dedup::dedup_h_mems()`                        |
+| Confidence at read | Wozniak-Gorzelanczyk decay applied    | Wozniak-Gorzelanczyk decay applied                    |
+| Budget enforcement | (EpisodicLoop removed — aspirational) | `ConsolidationService` (confidence floor + max count) |
 
 ---
 
@@ -734,45 +674,42 @@ id: DIAG-PL-003
 verified_date: 2026-07-02
 verified_against: >
   crates/hkask-memory/src/episodic.rs:51-220 (EpisodicMemory, store, query_for_deduped, storage_usage),
-  crates/hkask-memory/src/episodic_loop.rs:26-80 (EpisodicLoop, budget enforcement),
+  (episodic_loop.rs removed — EpisodicLoop was aspirational, never constructed),
   crates/hkask-memory/src/semantic.rs:61-175 (SemanticMemory, store, query_deduped with decay, store_consolidated),
   crates/hkask-memory/src/consolidation.rs:26-179 (ConsolidationBridge, consolidate with dual-decay Bayesian combine),
   crates/hkask-memory/src/consolidation_service.rs:10-100 (ConsolidationService, consolidate, cleanup),
   crates/hkask-memory/src/recall_dedup.rs:10-57 (eav_hash, dedup_h_mems, BLAKE3),
-  crates/hkask-memory/src/ports.rs:1-216 (EpisodicStoragePort, SemanticStoragePort, StorageRequest, RecallRequest),
-  crates/hkask-mcp-server/src/server/tool_span.rs:78-84 (ExperienceCallback, record_experience trigger)
+  (ports.rs removed — EpisodicStoragePort/SemanticStoragePort were aspirational),
+  (ExperienceCallback removed — record_experience trigger was unwired)
 status: VERIFIED
 -->
 
 ## Cross-Reference
 
-| Reference | Description |
-|-----------|-------------|
-| [`EpisodicMemory`](crates/hkask-memory/src/episodic.rs:51-220) | Private, perspective-scoped memory with confidence decay |
-| [`SemanticMemory`](crates/hkask-memory/src/semantic.rs:61-175) | Shared, public memory with confidence decay and similarity-augmented recall |
-| [`ConsolidationBridge`](crates/hkask-memory/src/consolidation.rs:26-168) | One-way episodic→semantic promotion with Bayesian combination |
-| [`ConsolidationService`](crates/hkask-memory/src/consolidation_service.rs:10-100) | Combined consolidation + semantic cleanup |
-| [`EpisodicLoop`](crates/hkask-memory/src/episodic_loop.rs:26-80) | Cybernetic loop with budget regulation |
-| [`recall_dedup`](crates/hkask-memory/src/recall_dedup.rs:10-57) | BLAKE3 EAV-hash deduplication layer |
-| [`MemoryPorts`](crates/hkask-memory/src/ports.rs:1-216) | Episodic and Semantic storage port traits |
-| [`store_experience` / `generate_narrative`](crates/hkask-mcp-server/src/server/tool_span.rs:78-84) | In-process experience recording (thread→memory bridge, D6) and narrative generation; the former daemon-based implementations were removed |
-| [`ToolSpanGuard` experience callback](crates/hkask-mcp-server/src/server/tool_span.rs:78-84) | Experience callback wiring for tool span guards |
-| [Magna Carta P1](../reference/magna-carta.md#p1-user-sovereignty) | User Sovereignty — episodic memory as sovereign first-person |
-| Consent flow sequence (inlined in `sovereignty-and-ocap.md`) | Consent flow for visibility gating (DIAG-TO-006-CM) |
-| Regulation span emission sequence (inlined in `regulation-and-loops.md`) | Regulation span emission for memory encode spans (DIAG-TO-004) |
+| Reference                                                                                           | Description                                                                                                                               |
+| --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| [`EpisodicMemory`](crates/hkask-memory/src/episodic.rs:51-220)                                      | Private, perspective-scoped memory with confidence decay                                                                                  |
+| [`SemanticMemory`](crates/hkask-memory/src/semantic.rs:61-175)                                      | Shared, public memory with confidence decay and similarity-augmented recall                                                               |
+| [`ConsolidationBridge`](crates/hkask-memory/src/consolidation.rs:26-168)                            | One-way episodic→semantic promotion with Bayesian combination                                                                             |
+| [`ConsolidationService`](crates/hkask-memory/src/consolidation_service.rs:10-100)                   | Combined consolidation + semantic cleanup                                                                                                 |
+| ~~`EpisodicLoop`~~ (removed — aspirational, never constructed)                                      | Cybernetic loop with budget regulation — was never constructed; budget enforcement moved to `ConsolidationService`                        |
+| [`recall_dedup`](crates/hkask-memory/src/recall_dedup.rs:10-57)                                     | BLAKE3 EAV-hash deduplication layer                                                                                                       |
+| ~~`MemoryPorts`~~ (removed — aspirational)                                                          | Episodic and Semantic storage port traits (`EpisodicStoragePort`/`SemanticStoragePort`) were aspirational and removed                     |
+| [`store_experience` / `generate_narrative`](crates/hkask-mcp-server/src/server/tool_span.rs:78-84)  | In-process experience recording (thread→memory bridge, D6) and narrative generation; the former daemon-based implementations were removed |
+| [`ToolSpanGuard` experience callback](crates/hkask-mcp-server/src/server/tool_span.rs:78-84)        | Experience callback wiring for tool span guards                                                                                           |
+| [Magna Carta P1](../reference/magna-carta.md#p1-user-sovereignty)                                   | User Sovereignty — episodic memory as sovereign first-person                                                                              |
+| Consent flow sequence (deleted — `sovereignty-and-ocap.md` removed 2026-07-24; recoverable via git) | Consent flow for visibility gating (DIAG-TO-006-CM)                                                                                       |
+| Regulation span emission sequence (inlined in `regulation-and-loops.md`)                            | Regulation span emission for memory encode spans (DIAG-TO-004)                                                                            |
 
+### Memory Remember — Template Cascade
 
-### Memory Remember — Algo / No-Judge Template Cascade
+_Inlined from `docs/diagrams/flowchart-memory-remember.md`_
 
-*Inlined from `docs/diagrams/flowchart-memory-remember.md`*
+# Memory Remember — Template Cascade
 
-
-# Memory Remember — Algo / No-Judge Template Cascade
-
-FlowDef manifest for agent memory formation. Three-step cascade with algo /
-no-judge rendering on every step. The `operation-selector.j2` classifies and
-routes to episodic or semantic extraction. The fusion panel renders the same
-template in parallel; outputs are merged via `merge_json_values()`.
+FlowDef manifest for agent memory formation. Three-step cascade. The
+`operation-selector.j2` classifies and routes to episodic or semantic
+extraction; each step runs a single-model extraction pass.
 
 Related: `registry/manifests/memory_remember.yaml`, `crates/hkask-templates/src/executor.rs`
 
@@ -782,49 +719,28 @@ flowchart TD
     OS{operation-selector.j2\nClassify + Route}
     EP["remember-episodic.j2\nFirst-Person Extraction"]
     SE["remember-semantic.j2\nThird-Person Extraction"]
-    MAE["Panel Model 1\nQwen3-235B-A22B"]
-    MBE["Panel Model 2\nGemma 4"]
-    MAS["Panel Model 1\nQwen3-235B-A22B"]
-    MBS["Panel Model 2\nGemma 4"]
-    ME["merge_json_values\nUnion + Dedup"]
-    MS["merge_json_values\nUnion + Dedup"]
     EM[("Episodic Memory\nPrivate, Agent-Scoped")]
     SM[("Semantic Memory\nShared, Cross-Agent")]
 
     OP --> OS
     OS -->|episodic| EP
     OS -->|semantic| SE
-
-    EP --> MAE
-    EP --> MBE
-    MAE --> ME
-    MBE --> ME
-    ME --> EM
-
-    SE --> MAS
-    SE --> MBS
-    MAS --> MS
-    MBS --> MS
-    MS --> SM
+    EP --> EM
+    SE --> SM
 
     subgraph "Step 1: Classify"
         OS
     end
 
-    subgraph "Step 2: Episodic (fusion: true)"
+    subgraph "Step 2: Episodic Extraction"
         EP
-        MAE
-        MBE
-        ME
     end
 
-    subgraph "Step 3: Semantic (fusion: true)"
+    subgraph "Step 3: Semantic Extraction"
         SE
-        MAS
-        MBS
-        MS
     end
 ```
+
 <!-- DIAGRAM_ALIGNMENT
 id: DIAG-COG-007
 verified_date: 2026-07-12
@@ -832,122 +748,82 @@ verified_against: crates/hkask-types/src/event.rs, crates/hkask-memory/src/lib.r
 status: VERIFIED
 -->
 
-
 ### Classification-to-Memory Sequence
 
-*Inlined from `docs/diagrams/sequence-classify-to-memory.md`*
-
+_Inlined from `docs/diagrams/sequence-classify-to-memory.md`_
 
 # Classification-to-Memory Sequence
 
-Full flow from source text through algo / no-judge classification, guard scanning,
-integration, and shared memory storage. All guard checks are mandatory;
-the algo / no-judge path (`judge: algo`) runs the fusion panel in parallel and
-merges responses algorithmically — no LLM judge call.
+Full flow from source text through single-model classification, semantic
+extraction, and shared memory storage. (The former `ContentGuard` input/output
+scanning steps were removed with the `hkask-guard` crate on 2026-08-10;
+provider-side safety and refusal fallbacks remain.)
 
-Related: `crates/hkask-inference/src/fusion_orchestrator.rs` (algo_merge)
+Related: `mcp-servers/hkask-mcp-corpus/src/corpus/embed/service.rs`
 
 ```mermaid
 sequenceDiagram
     participant S as Source
-    participant G as ContentGuard
-    participant MA as Panel Model 1 (Qwen3-235B)
-    participant MB as Panel Model 2 (Gemma 4)
-    participant I as Merge Integrator
+    participant M as Model (classifier)
+    participant I as Integrator
     participant Regulation as Regulation Spans
-    participant M as Shared Memory
+    participant Memory as Shared Memory
 
-    S->>G: scan_input(text)
-    alt blocked
-        G-->>Regulation: reg.guard.violation (input_refused)
-        G-->>S: Refuse
-    else passed
-        par Parallel Classification
-            MA->>MA: extract_triples_one(text)
-            MA-->>I: TripleExtraction A
-        and
-            MB->>MB: extract_triples_one(text)
-            MB-->>I: TripleExtraction B
-        end
-
-        I->>I: algo_merge(panel_responses)
-        I->>I: algo-style merge (union, dedup, annotate)
-
-        I->>G: scan_output(merged)
-        alt secrets detected
-            G-->>Regulation: reg.guard.violation (output)
-            G-->>I: Sanitized output
-        else clean
-            G-->>I: Pass
-        end
-
-        I->>M: store_passage_h_mems()
-    end
+    S->>M: classify_batch(texts)
+    M-->>I: ClassifyResult (section_type)
+    Note over I: normalize (dedup, annotate)
+    I->>I: extract semantic h_mems
+    I->>Regulation: reg.tool span (cost posted to ledger)
+    I->>Memory: store_passage_h_mems()
 ```
+
 <!-- DIAGRAM_ALIGNMENT
 id: DIAG-COG-008
-verified_date: 2026-07-12
-verified_against: crates/hkask-types/src/event.rs, crates/hkask-memory/src/lib.rs
+verified_date: 2026-08-14
+verified_against: kask/mcp-servers/hkask-mcp-corpus/src/corpus/embed/service.rs (classify_and_extract, classify_batch, store_passage_h_mems)
 status: VERIFIED
 -->
 
+### Classification Flow
 
-### Algo / No-Judge Classification Flow
+_Inlined from `docs/diagrams/flowchart-algo-classification.md`_
 
-*Inlined from `docs/diagrams/flowchart-algo-classification.md`*
+# Classification Flow
 
+How classification operates as a single-model extraction: the model's JSON
+extraction is normalized (dedup, diverging fields annotated) before storage.
+(The former guard input/output scans were removed with `hkask-guard` on
+2026-08-10.)
 
-# Algo / No-Judge Classification Flow
-
-How classification operates via the algo / no-judge fusion path (`judge: algo`).
-The fusion panel runs in parallel; `algo_merge()` folds the panelists' JSON
-extractions into a single result (union, dedup, diverging fields annotated
-`[A:... B:...]`) — no LLM judge call.
-
-Related: `crates/hkask-inference/src/fusion_orchestrator.rs` (algo_merge), `crates/hkask-services-corpus/src/embed/service.rs`
+Related: `mcp-servers/hkask-mcp-corpus/src/corpus/embed/service.rs`
 
 ```mermaid
 flowchart TD
     S([Source Text])
-    G{Guard Input Scan}
-    R[Refuse + Regulation Alert]
-    P1[Panel Model 1\nKC/qwen3-235b]
-    P2[Panel Model 2\nDI/gemma-4]
-    R1[Response 1 (JSON)]
-    R2[Response 2 (JSON)]
-    I[algo_merge]
-    GO{Guard Output Scan}
-    RS[Strip Secrets\n+ Regulation Alert]
+    P[Model classifier]
+    R1[Response JSON]
+    I[Normalize dedup annotate]
     ST[Store in Shared Memory]
     M[Memory]
 
-    S --> G
-    G -->|pass| P1
-    G -->|pass| P2
-    G -->|block| R
-    P1 --> R1
-    P2 --> R2
+    S --> P
+    P --> R1
     R1 --> I
-    R2 --> I
-    I --> GO
-    GO -->|pass| ST
-    GO -->|violation| RS
-    RS --> ST
+    I --> ST
     ST --> M
 
-    subgraph "Fusion Panel (parallel)"
-        P1
-        P2
+    subgraph "Single-Model Extraction"
+        P
     end
 
     subgraph "Epistemic Integration"
         I
     end
 ```
+
 <!-- DIAGRAM_ALIGNMENT
 id: DIAG-COG-009
-verified_date: 2026-07-12
-verified_against: crates/hkask-types/src/event.rs, crates/hkask-memory/src/lib.rs
+verified_date: 2026-08-14
+verified_against: kask/mcp-servers/hkask-mcp-corpus/src/corpus/embed/service.rs (classify_and_extract, store_passage_h_mems)
 status: VERIFIED
 -->
-

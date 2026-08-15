@@ -1,12 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- scaffold
-- generate
-- manifest
-- template
-- flowdef
-- build
 contract:
   input:
     skill_spec: object
@@ -16,7 +9,6 @@ contract:
     process_manifest: string
     skill_md: string
     delegate_notes: string
-energy_cap: 8192
 visibility: Public
 ---
 {# Template: create-skill/create-skill-scaffold.j2 #}
@@ -61,18 +53,19 @@ templates:
     name: "<phase description>"
     path: <phase-1>.j2
     type: KnowAct
-    lexicon_terms: [<relevant terms>]
     description: >
       <phase description>
     generates_spans:
       - reg.<skill_name>.<phase-1>
+    # NOTE: these per-template spans use the ontology-derived short name
+    # (e.g. reg.bughunt.oracle), NOT the ledger namespace. The ledger
+    # span_namespace (reg.skill.<id>) lives in the process manifest below.
   # ... one entry per phase ...
   # Reference documents (RenderAct type) if any:
   - id: <skill_name>/<reference-name>
     name: "Reference: <description>"
     path: <reference-name>.yaml
     type: RenderAct
-    lexicon_terms: [<terms>]
     description: >
       <reference description>
 ```
@@ -82,17 +75,14 @@ templates:
 For each PDCA phase, generate a .j2 template with:
 
 ```
+{% raw %}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- <term>
-- <term>
 contract:
   input:
     <field>: <type>
   output:
     <field>: <type>
-energy_cap: <2048-8192>
 visibility: Public
 ---
 {# Template: <skill_name>/<phase>.j2 #}
@@ -121,6 +111,7 @@ thinking_budget = "full"
 ## Output
 
 Produce a JSON object with: <output fields>.
+{% endraw %}
 ```
 
 For reference documents (RenderAct), generate .yaml files (no [inference] frontmatter).
@@ -130,6 +121,7 @@ For reference documents (RenderAct), generate .yaml files (no [inference] frontm
 Generate the process manifest (`kask/registry/manifests/<name>.yaml`):
 
 ```yaml
+{% raw %}
 manifest:
   id: <skill_name>
   category: skill
@@ -172,17 +164,6 @@ inputs:
     description: >
       Output of a previous iteration. Closes the feedback loop.
 
-fusion:
-  judge: deepseek-v4-pro
-  panel:
-    - Kimi2.7
-    - Qwen3.7 Max
-    - GLM5.2
-  mode: best-of-n
-  skills:
-    - <delegate skill>
-  max_rounds: 3
-
 steps:
   - ordinal: 1
     action: select
@@ -206,7 +187,6 @@ steps:
     timeout_seconds: 30
     input_mapping:
       primary_result: "{{ step_(N-1)_result }}"
-    fusion: false
   - ordinal: N+1
     action: loop
     description: >
@@ -226,21 +206,17 @@ error_handling:
   retry_backoff_seconds: 1
   on_validation_failure: abort
 
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: <skill_name>/<phase-1>
-      gas_budget: <gas_cap>
-    # ... one entry per template ...
-    - resource: manifest
-      action: execute
-      template_id: <skill_name>
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true
+ledger:
+  emit_spans: true
+  # MANDATORY: must be reg.skill.<manifest.id> (CI-enforced by
+  # scripts/check-skill-span-namespace.sh). Any other form fails the gate.
+  # The abolished `spans:` list MUST NOT appear here.
+  span_namespace: reg.skill.<skill_name>
+  telemetry_namespace: hkask.template.<skill_name>
+  variety_monitoring: true
+  algedonic_threshold: 100
+  escalation_target: Curator
+{% endraw %}
 ```
 
 ## Step 4 — Generate SKILL.md Companion

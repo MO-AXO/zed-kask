@@ -1,13 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- simplify
-- extract
-- deepen
-- verify
-- regulate
-- trace
-- constrain
 contract:
   input:
     crate_scope: string
@@ -18,8 +10,7 @@ contract:
     each_step_passes: boolean
     contract_changes: array
     simplification_notes: array
-  energy_cap: 6144
-  visibility: Public
+visibility: Public
 ---
 {# Template: tdd/tdd-refactor.j2 #}
 {# Functional Role: KnowAct — Refactor while GREEN: extract, deepen, simplify #}

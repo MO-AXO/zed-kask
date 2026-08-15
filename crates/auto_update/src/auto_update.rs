@@ -135,6 +135,14 @@ pub enum AutoUpdateStatus {
     Updated {
         version: Version,
     },
+    /// zed-kask: D18 — a manual check completed and the installed version is
+    /// already the latest. Distinct from `Idle` (the quiet / no-check state)
+    /// so the UI can surface positive feedback instead of silently reverting
+    /// to `Idle`, which looked like "nothing happened". Only set for manual
+    /// checks; automatic polls that find no update stay `Idle`.
+    UpToDate {
+        version: Version,
+    },
     Errored {
         error: Arc<anyhow::Error>,
     },
@@ -158,6 +166,10 @@ impl PartialEq for AutoUpdateStatus {
             (
                 AutoUpdateStatus::Updated { version: v1 },
                 AutoUpdateStatus::Updated { version: v2 },
+            ) => v1 == v2,
+            (
+                AutoUpdateStatus::UpToDate { version: v1 },
+                AutoUpdateStatus::UpToDate { version: v2 },
             ) => v1 == v2,
             (AutoUpdateStatus::Errored { error: e1 }, AutoUpdateStatus::Errored { error: e2 }) => {
                 e1.to_string() == e2.to_string()
@@ -512,9 +524,16 @@ impl AutoUpdater {
                                 error: Arc::new(error),
                             }
                         }
-                        // Be quiet if the check was automated (e.g. when offline)
+                        // Keep the user-facing status quiet on automated checks
+                        // (a transient network blip shouldn't surface an error
+                        // toast), but log at warn so an operator can distinguish
+                        // a genuinely up-to-date system (`Idle` with no warn)
+                        // from a check that failed and was masked as `Idle`.
                         UpdateCheckType::Automatic => {
-                            log::info!("auto-update check failed: error:{:?}", error);
+                            log::warn!(
+                                "auto-update check failed (masked as Idle): error:{:?}",
+                                error
+                            );
                             AutoUpdateStatus::Idle
                         }
                         UpdateCheckType::Manual => {
@@ -703,13 +722,14 @@ impl AutoUpdater {
     }
 
     async fn update(this: Entity<Self>, cx: &mut AsyncApp) -> Result<()> {
-        let (client, installed_version, previous_status, release_channel) =
-            this.read_with(cx, |this, cx| {
+        let (client, installed_version, previous_status, release_channel, check_type) = this
+            .read_with(cx, |this, cx| {
                 (
                     this.client.http_client(),
                     this.current_version.clone(),
                     this.status.clone(),
                     ReleaseChannel::try_global(cx).unwrap_or(ReleaseChannel::Stable),
+                    this.update_check_type,
                 )
             });
 
@@ -737,6 +757,9 @@ impl AutoUpdater {
             this.update(cx, |this, cx| {
                 let status = match previous_status {
                     AutoUpdateStatus::Updated { .. } => previous_status,
+                    _ if check_type.is_manual() => AutoUpdateStatus::UpToDate {
+                        version: this.current_version.clone(),
+                    },
                     _ => AutoUpdateStatus::Idle,
                 };
                 this.status = status;
@@ -900,6 +923,8 @@ impl AutoUpdater {
         channel: &str,
         background_executor: BackgroundExecutor,
     ) -> Result<Option<PathBuf>> {
+        ensure_in_app_install_allowed()?;
+
         match OS {
             "macos" => {
                 install_release_macos(
@@ -1031,6 +1056,14 @@ async fn cleanup_remote_server_cache(
         }
     }
 
+    Ok(())
+}
+
+fn ensure_in_app_install_allowed() -> Result<()> {
+    anyhow::ensure!(
+        paths::APP_NAME != "Zed-Kask",
+        "in-app installation is disabled in zed-kask because Zed's updater writes to Zed-owned application paths; use kask/scripts/build/install-binary.sh"
+    );
     Ok(())
 }
 
@@ -1321,8 +1354,9 @@ pub async fn finalize_auto_update_on_quit() {
 mod tests {
     use client::Client;
     use clock::FakeSystemClock;
+    use db::AppDatabase;
     use futures::channel::oneshot;
-    use gpui::TestAppContext;
+    use gpui::{TestAppContext, UpdateGlobal};
     use http_client::{FakeHttpClient, Response};
     use settings::default_settings;
     use std::{
@@ -1345,7 +1379,13 @@ mod tests {
     impl Global for InstallOverride {}
 
     #[gpui::test]
-    fn test_auto_update_defaults_to_true(cx: &mut TestAppContext) {
+    fn test_auto_update_defaults_to_false(cx: &mut TestAppContext) {
+        // zed-kask: auto_update is disabled by default in
+        // `assets/settings/default.json`. Auto-update from Zed's release feed
+        // would replace the zed-kask binary with upstream Zed, losing the
+        // fork. zed-kask is built from source; re-run the install script to
+        // update. This test pins the divergence from upstream (which defaults
+        // to true).
         cx.update(|cx| {
             let mut store = SettingsStore::new(cx, &settings::default_settings());
             store
@@ -1355,7 +1395,7 @@ mod tests {
                 .set_user_settings("{}", cx)
                 .expect("Unable to set user settings");
             cx.set_global(store);
-            assert!(AutoUpdateSetting::get_global(cx).0);
+            assert!(!AutoUpdateSetting::get_global(cx).0);
         });
     }
 
@@ -1369,6 +1409,27 @@ mod tests {
 
         cx.update(|cx| {
             settings::init(cx);
+
+            // zed-kask: `auto_update` defaults to `false` in
+            // `assets/settings/default.json` (auto-update from Zed's release
+            // feed would replace the zed-kask binary with upstream Zed,
+            // losing the fork). This test exercises the download path, so it
+            // must opt back in — otherwise `crate::init` reads
+            // `AutoUpdateSetting::get_global(cx).0 == false`, never calls
+            // `start_polling`, and the test's `loop` waiting for
+            // `status != Idle` spins until the 60s timeout. This pins the
+            // divergence: production defaults off, tests that need it opt in.
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.auto_update = Some(true);
+                });
+            });
+
+            // The auto-updater persists update-notification state in the KV
+            // store (`KeyValueStore::global` → `Database::global`). Use an
+            // isolated test DB so the test doesn't hit the
+            // `panic!("database not initialized")` path in `Database::global`.
+            cx.set_global(AppDatabase::test_new());
 
             let current_version = semver::Version::new(0, 100, 0);
             release_channel::init_test(current_version, ReleaseChannel::Stable, cx);
@@ -1841,6 +1902,17 @@ mod tests {
         assert_eq!(
             newer_version.unwrap(),
             Some(fetched_version.parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn zed_kask_cannot_use_upstream_in_app_installer() {
+        let error = ensure_in_app_install_allowed()
+            .expect_err("zed-kask must reject upstream Zed's destructive in-app installer");
+        assert!(
+            error
+                .to_string()
+                .contains("in-app installation is disabled in zed-kask")
         );
     }
 }

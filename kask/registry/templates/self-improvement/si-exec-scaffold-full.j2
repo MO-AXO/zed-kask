@@ -1,11 +1,6 @@
 [inference]
+max_tokens = 2048
 template_type: WordAct
-lexicon_terms:
-- declare
-- target
-- measure
-- plan
-- explore
 contract:
   input:
     improvement_plan: object
@@ -13,7 +8,6 @@ contract:
     context: object
   output:
     response: string
-energy_cap: 8000
 visibility: Public
 ---
 {# goal: Execute Scaffolding Improvement via Full Scaffolding (§6.4) — treat the entire scaffold as a mutable program, generate candidate patches via the agent-as-improver, gate through verifier checks. #}

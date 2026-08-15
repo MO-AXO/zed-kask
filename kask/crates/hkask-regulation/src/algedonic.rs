@@ -54,7 +54,40 @@ pub struct RuntimeAlert {
 pub trait AlertEmailSink: Send + Sync + std::fmt::Debug {
     /// Send an alert email. Non-blocking — implementations should spawn
     /// async work rather than blocking the caller.
+    ///
+    /// Implementations should store a `tokio::runtime::Handle` and use
+    /// `handle.spawn(...)` rather than bare `tokio::spawn(...)`, so the
+    /// method is safe to call from any thread (including the GPUI
+    /// foreground thread, which has no tokio reactor). The sole caller is
+    /// `CyberneticsLoop::tick()`, which runs inside `Tokio::spawn`, but
+    /// the `Send + Sync` bound on this trait means a future caller could
+    /// invoke it from a non-tokio context.
     fn send_alert_email(&self, alert: &RuntimeAlert);
+}
+
+/// Sink for persisting algedonic alerts to the reviewable escalation queue.
+///
+/// This is the primary durable path for alert review: every escalated alert
+/// is written here unconditionally (not just as a fallback), so the Curator
+/// and user can review pending alerts via the `curator_escalations` MCP tool
+/// and resolve/dismiss them with an audit trail. The `RegulationArchive`
+/// (`RegulationSink`) remains as a secondary fallback for restart durability
+/// when this queue is unavailable.
+///
+/// Implementations must be non-blocking and best-effort — a failing or missing
+/// sink never breaks the regulation loop. The sole caller is
+/// `CyberneticsLoop::act` / `verify_impact`, which runs inside `Tokio::spawn`.
+pub trait AlertEscalationSink: Send + Sync {
+    /// Persist an alert to the reviewable escalation queue.
+    ///
+    /// `output` is the human-readable alert message; `error_context` is a
+    /// serialized JSON blob carrying the structured alert fields (domain,
+    /// deficit, threshold, severity) for later triage. `confidence` is 1.0
+    /// for Critical, 0.5 for Warning.
+    ///
+    /// Errors are logged by the caller and never propagated — alert
+    /// persistence is best-effort, never a correctness path.
+    fn persist_alert(&self, output: &str, confidence: f64, error_context: &str);
 }
 
 impl RuntimeAlert {

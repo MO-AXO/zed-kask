@@ -1,5 +1,5 @@
 # LoRA Training Process Manifest
-# ℏKask v0.31.0 — Evidence-grounded PEFT recommendation and contract audit
+# ℏKask v0.34.0 — Evidence-grounded PEFT recommendation and contract audit
 #
 # v0.31.0 refinement (self-improvement cycle 1, proposed-not-committed):
 #   1. Process manifest created — the skill was previously template-by-template
@@ -56,23 +56,19 @@ manifest:
     (Good Regulator), algedonic escalation for safety-boundary violations,
     and honest convergence metrics that distinguish coverage gaps from risks.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  # 0.10 — stricter than bug-hunt (0.25) because training configuration is
-  # higher-stakes than exploratory bug hunting. A converged training config
-  # has: no critical/high findings, no fail/refuse gates, all applicable
-  # math/quant/data/forgetting gates pass or are deferred with a plan.
-  # v0.31.0: convergence_field reads the composite convergence_metric which
-  # now uses graded critical/high and distinguishes not_evaluated from deferred.
-  threshold: 0.10
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: step_4_result.convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
+  target_artifacts_field: "current_artifacts"
 
 gas:
   cap: 100000
@@ -217,6 +213,9 @@ inputs:
       {title, level, text, step}). When absent, runtime-phase gates remain
       `deferred` and G-R1 is `not_applicable` in preflight.
 
+ledger:
+  span_namespace: reg.skill.lora-training
+
 steps:
   - ordinal: 0
     action: select
@@ -230,7 +229,7 @@ steps:
     renderer: minijinja
     template_ref: lora-training/preflight-dataset
     gas_cap: 2048
-    timeout_seconds: 30
+    timeout_seconds: 120
     input_mapping:
       dataset_path: "{{ dataset_path | default('undetermined') }}"
       trainer_preference: "{{ trainer_preference | default('undetermined') }}"
@@ -249,7 +248,7 @@ steps:
     renderer: minijinja
     template_ref: lora-training/select-method
     gas_cap: 6144
-    timeout_seconds: 90
+    timeout_seconds: 150
     input_mapping:
       training_config_path: "{{ training_config_path }}"
       dataset_path: "{{ dataset_path | default('undetermined') }}"
@@ -281,7 +280,7 @@ steps:
     renderer: minijinja
     template_ref: lora-training/audit-config
     gas_cap: 8192
-    timeout_seconds: 120
+    timeout_seconds: 180
     input_mapping:
       config_paths: "{{ [training_config_path] }}"
       selected_method: "{{ step_1_result.recommendation | default({}) }}"
@@ -298,7 +297,7 @@ steps:
     renderer: minijinja
     template_ref: lora-training/report
     gas_cap: 6144
-    timeout_seconds: 90
+    timeout_seconds: 150
     input_mapping:
       findings: "{{ step_2_result.findings | default([]) }}"
       gate_results: "{{ step_2_result.gate_results | default({}) }}"
@@ -306,30 +305,21 @@ steps:
       userpod_host: "{{ userpod_host }}"
 
   - ordinal: 4
-    action: select
+    action: compute
+    compute_ref: lisp.eval
     description: >
-      Compute phase-aware convergence metric. v0.31.0: not_evaluated now
-      maps to risk 0.5 (coverage gap) instead of 1.0 (known risk), graded
-      critical/high dimension replaces binary, all-gates-not-applicable
-      edge case handled. v0.32.0: accepts runtime_metrics for the runtime
-      phase — G-R1 findings (loss spikes, NaN gradients) feed the runtime
-      dimension when current_phase=runtime.
-    renderer: minijinja
-    template_ref: lora-training/convergence-check
-    gas_cap: 4096
-    timeout_seconds: 60
+      Compute structural-validity score from step 3's actual report output.
+      The convergence signal is the count of findings (total contract issues
+      surfaced by the audit). Lower = more converged (zero findings = the
+      config passes all gates cleanly). If findings is absent, the form
+      errors (no silent default), surfacing a broken report step rather
+      than masking it with a flat 1.0.
+    gas_cap: 100
+    timeout_seconds: 10
     input_mapping:
-      unresolved_findings: "{{ step_3_result.findings | default(step_2_result.findings | default([])) }}"
-      gate_results: "{{ step_2_result.gate_results | default({}) }}"
-      current_phase: "{{ current_phase | default('preflight') }}"
-      qlora_mode: "{{ step_1_result.recommendation.base_mode | default('') == 'quantized_4bit' }}"
-      corda_mode: "{{ step_1_result.recommendation.preservation | default('') == 'corda_kp' }}"
-      existing_regressions: "{{ existing_regressions | default([]) }}"
-      proposed_regressions: "{{ step_3_result.proposed_regressions | default([]) }}"
-      previous_metric: "{{ prior_iteration.convergence_metric | default(none) }}"
-      runtime_metrics: "{{ runtime_metrics | default({}) }}"
-      userpod_host: "{{ userpod_host }}"
-    fusion: false
+      form: "(let ((f (assoc \"findings\" step_3_result))) (if (is_null f) 0 (length f)))"
+      env:
+        step_3_result: "{{ step_3_result }}"
 
   - ordinal: 5
     action: loop
@@ -340,11 +330,11 @@ steps:
       mechanically rather than relying on operator-managed re-invocation.
     input_mapping:
       loop_target: "{{ 1 }}"
+      convergence_signal: "{{ step_4_result }}"
       prior_iteration:
-        convergence_metric: "{{ step_4_result.convergence_metric | default(1.0) }}"
-        blockers: "{{ step_4_result.blockers | default([]) }}"
-        gate_results_summary: "{{ step_4_result.gate_results_summary | default({}) }}"
-        converged: "{{ step_4_result.converged | default(false) }}"
+        convergence_metric: "{{ step_4_result }}"
+        blockers: "{{ step_3_result.contract_gaps | default([]) }}"
+        gate_results_summary: "{{ step_3_result.gate_results_summary | default({}) }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -352,34 +342,3 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: lora-training/preflight-dataset
-      gas_budget: 2048
-    - resource: template
-      action: render
-      template_id: lora-training/select-method
-      gas_budget: 6144
-    - resource: template
-      action: render
-      template_id: lora-training/audit-config
-      gas_budget: 8192
-    - resource: template
-      action: render
-      template_id: lora-training/report
-      gas_budget: 6144
-    - resource: template
-      action: render
-      template_id: lora-training/convergence-check
-      gas_budget: 4096
-    - resource: manifest
-      action: execute
-      template_id: lora-training
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true

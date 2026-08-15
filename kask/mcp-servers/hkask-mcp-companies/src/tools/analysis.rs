@@ -4,7 +4,7 @@ use crate::{
     types::{self, SymbolLimitRequest, SymbolRequest},
     validate_symbol,
 };
-use hkask_mcp_server::server::{McpToolError, execute_tool};
+use hkask_mcp_server::server::{McpToolError, execute_tool_semantic};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 fn parse_screener_response(
@@ -31,63 +31,68 @@ impl CompaniesServer {
         &self,
         Parameters(SymbolRequest { symbol }): Parameters<SymbolRequest>,
     ) -> String {
-        execute_tool(self, "moat_check", async {
-            validate_symbol(&symbol)?;
+        execute_tool_semantic(
+            self,
+            "moat_check",
+            Self::ontology_anchor("moat_check"),
+            async {
+                validate_symbol(&symbol)?;
 
-            // Fetch 10 years of key metrics for gross margin stability analysis
-            let limit = "10";
-            let metrics_result = self
-                .fetch("key_metrics", &symbol, &[("limit", limit)])
-                .await;
+                // Fetch 10 years of key metrics for gross margin stability analysis
+                let limit = "10";
+                let metrics_result = self
+                    .fetch("key_metrics", &symbol, &[("limit", limit)])
+                    .await;
 
-            let metrics = match metrics_result {
-                Ok(v) => v,
-                Err(e) => {
-                    return Err(e);
+                let metrics = match metrics_result {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err(e);
+                    }
+                };
+
+                let gross_margins = analysis::extract_gross_margins(&metrics);
+                if gross_margins.is_empty() {
+                    let output = serde_json::json!({
+                        "symbol": symbol,
+                        "moat": "insufficient_data",
+                        "reason": "No gross margin data available for this symbol",
+                    });
+                    return Ok(output);
                 }
-            };
 
-            let gross_margins = analysis::extract_gross_margins(&metrics);
-            if gross_margins.is_empty() {
+                let margin_values: Vec<f64> = gross_margins.iter().map(|(_, m)| *m).collect();
+                let stability = analysis::gross_margin_stability(&margin_values);
+
+                let wc_data = analysis::extract_wc_days(&metrics);
+                let (wc_spread, dpo, dso) = match wc_data {
+                    Some((dpo_val, dso_val)) => (
+                        analysis::working_capital_spread(dpo_val, dso_val),
+                        Some(dpo_val),
+                        Some(dso_val),
+                    ),
+                    None => (0.0, None, None),
+                };
+
+                let wc_label = analysis::wc_signal_label(wc_spread);
+                let moat = analysis::classify_moat(stability, wc_spread, gross_margins.len());
+
                 let output = serde_json::json!({
                     "symbol": symbol,
-                    "moat": "insufficient_data",
-                    "reason": "No gross margin data available for this symbol",
+                    "moat": moat,
+                    "margin_stability": stability,
+                    "gross_margins": gross_margins,
+                    "working_capital": {
+                        "spread_days": wc_spread,
+                        "dpo": dpo,
+                        "dso": dso,
+                        "signal": wc_label,
+                    },
+                    "data_periods": gross_margins.len(),
                 });
-                return Ok(output);
-            }
-
-            let margin_values: Vec<f64> = gross_margins.iter().map(|(_, m)| *m).collect();
-            let stability = analysis::gross_margin_stability(&margin_values);
-
-            let wc_data = analysis::extract_wc_days(&metrics);
-            let (wc_spread, dpo, dso) = match wc_data {
-                Some((dpo_val, dso_val)) => (
-                    analysis::working_capital_spread(dpo_val, dso_val),
-                    Some(dpo_val),
-                    Some(dso_val),
-                ),
-                None => (0.0, None, None),
-            };
-
-            let wc_label = analysis::wc_signal_label(wc_spread);
-            let moat = analysis::classify_moat(stability, wc_spread, gross_margins.len());
-
-            let output = serde_json::json!({
-                "symbol": symbol,
-                "moat": moat,
-                "margin_stability": stability,
-                "gross_margins": gross_margins,
-                "working_capital": {
-                    "spread_days": wc_spread,
-                    "dpo": dpo,
-                    "dso": dso,
-                    "signal": wc_label,
-                },
-                "data_periods": gross_margins.len(),
-            });
-            Ok(output)
-        })
+                Ok(fibo::enrich_with_ontology(output, "moat_check"))
+            },
+        )
         .await
     }
 
@@ -98,7 +103,7 @@ impl CompaniesServer {
         &self,
         Parameters(SymbolRequest { symbol }): Parameters<SymbolRequest>,
     ) -> String {
-        execute_tool(self, "management_scorecard", async {
+        execute_tool_semantic(self, "management_scorecard", Self::ontology_anchor("management_scorecard"), async {
             validate_symbol(&symbol)?;
 
             let limit = "10";
@@ -126,7 +131,7 @@ impl CompaniesServer {
             let roic_values = analysis::extract_roic(&metrics);
             let capital_values = analysis::extract_invested_capital(&balance_sheets);
 
-            // Align ROIC and invested capital by calendar year — they come from
+            // Align ROIC and invested capital by calendar year - they come from
             // different API endpoints and may have different year ranges.
             use std::collections::HashMap;
             let roic_by_year: HashMap<&str, f64> = roic_values
@@ -153,7 +158,7 @@ impl CompaniesServer {
                 "data_periods": roic_nums.len(),
                 "framework": "MAIA: Good = decreasing capital with improving returns, OR increasing capital with improving returns. Bad = increasing capital with decreasing returns.",
             });
-            Ok(output)
+            Ok(fibo::enrich_with_ontology(output, "management_scorecard"))
         }).await
     }
 
@@ -164,7 +169,7 @@ impl CompaniesServer {
         &self,
         Parameters(SymbolLimitRequest { symbol, limit }): Parameters<SymbolLimitRequest>,
     ) -> String {
-        execute_tool(self, "working_capital_cycle", async {
+        execute_tool_semantic(self, "working_capital_cycle", Self::ontology_anchor("working_capital_cycle"), async {
             validate_symbol(&symbol)?;
             let limit_str = (limit.unwrap_or(10) as usize).min(40).to_string();
 
@@ -241,7 +246,7 @@ impl CompaniesServer {
                 "data_points": periods.len(),
                 "framework": "MAIA CFO scorecard: stability of working capital management through economic conditions. The level is structural; consistency is management skill.",
             });
-            Ok(output)
+            Ok(fibo::enrich_with_ontology(output, "working_capital_cycle"))
         }).await
     }
 
@@ -252,7 +257,7 @@ impl CompaniesServer {
         &self,
         Parameters(req): Parameters<types::ScreenerRequest>,
     ) -> String {
-        execute_tool(self, "company_screener", async {
+        execute_tool_semantic(self, "company_screener", Self::ontology_anchor("company_screener"), async {
             // Parse the prompt
             let mut criteria = screener::parse_screening_prompt(&req.prompt);
 
@@ -303,13 +308,17 @@ impl CompaniesServer {
                 )
                 .send()
                 .await
-                .map_err(|e| McpToolError::internal(e.to_string()))?;
+                .map_err(|e| {
+                    McpToolError::unavailable(format!("FMP screener request failed: {e}"))
+                })?;
 
             let status = response.status();
             let body = response
                 .text()
                 .await
-                .map_err(|e| McpToolError::internal(e.to_string()))?;
+                .map_err(|e| {
+                    McpToolError::unavailable(format!("FMP screener body read failed: {e}"))
+                })?;
 
             let results = parse_screener_response(status, &body)?;
 
@@ -329,7 +338,7 @@ impl CompaniesServer {
                 "framework": "FMP Stock Screener. Parses natural language screening prompts into FMP screener API parameters. Use criteria_overrides to adjust parsed criteria. Reply with a modified prompt or criteria_overrides to refine results."
             });
 
-            Ok(output)
+            Ok(fibo::enrich_with_ontology(output, "company_screener"))
         })
         .await
     }
@@ -341,7 +350,7 @@ impl CompaniesServer {
         &self,
         Parameters(req): Parameters<types::ResearchSearchRequest>,
     ) -> String {
-        execute_tool(self, "research_search", async {
+        execute_tool_semantic(self, "research_search", Self::ontology_anchor("research_search"), async {
             // 1. Fetch company profile for name
             let profile_result = self.fetch("company_profile", &req.symbol, &[]).await;
             let profile = profile_result?;
@@ -390,7 +399,7 @@ impl CompaniesServer {
                 "framework": "Multi-provider fundamental research search (Exa, Tavily, Brave). Claims are classified by category and numeric values extracted. Use with thesis_test, scenario_weight, or guidance_check skills for structured financial analysis mapping claims to DCF assumptions."
             });
 
-            Ok(output)
+            Ok(fibo::enrich_with_ontology(output, "research_search"))
         }).await
     }
 

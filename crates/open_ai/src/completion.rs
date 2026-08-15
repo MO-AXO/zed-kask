@@ -258,6 +258,7 @@ pub fn into_open_ai_response(
         thinking_effort,
         speed,
         compact_at_tokens,
+        max_tokens: _,
     } = request;
 
     let service_tier = service_tier_for(speed);
@@ -748,6 +749,10 @@ impl OpenAiEventMapper {
                 output_tokens: completion_tokens,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
+                // zed-kask D20: observed per-call USD cost from the provider's
+                // `usage` object. Prefer `market_cost` (real compute energy,
+                // reflects BYOK/cache discounts) over `cost`/`estimated_cost`.
+                cost: usage.market_cost.or(usage.cost).or(usage.estimated_cost),
             })));
         }
 
@@ -838,6 +843,15 @@ impl OpenAiEventMapper {
 
                 events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::ToolUse)));
             }
+            // zed-kask: D25 — Chat Completions reports output truncation as
+            // finish_reason "length". Map to MaxTokens, mirroring the Responses
+            // API path's "max_tokens" handling, so truncated output isn't
+            // silently treated as a clean finish.
+            Some("length") => {
+                events.push(Ok(LanguageModelCompletionEvent::Stop(
+                    StopReason::MaxTokens,
+                )));
+            }
             Some(stop_reason) => {
                 log::error!("Unexpected OpenAI stop_reason: {stop_reason:?}",);
                 events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::EndTurn)));
@@ -875,6 +889,7 @@ pub struct OpenAiResponseEventMapper {
     function_calls_by_item: HashMap<String, PendingResponseFunctionCall>,
     custom_tool_calls_by_item: HashMap<String, PendingResponseCustomToolCall>,
     reasoning_items: Vec<ResponseReasoningInputItem>,
+    current_reasoning_summary_part: Option<(String, usize)>,
     current_message_phase: Option<String>,
     pending_stop_reason: Option<StopReason>,
     pending_compaction_items: usize,
@@ -900,6 +915,7 @@ impl OpenAiResponseEventMapper {
             function_calls_by_item: HashMap::default(),
             custom_tool_calls_by_item: HashMap::default(),
             reasoning_items: Vec::new(),
+            current_reasoning_summary_part: None,
             current_message_phase: None,
             pending_stop_reason: None,
             pending_compaction_items: 0,
@@ -980,8 +996,24 @@ impl OpenAiResponseEventMapper {
                 }
                 events
             }
-            ResponsesStreamEvent::ReasoningSummaryTextDelta { delta, .. }
-            | ResponsesStreamEvent::ReasoningDelta { delta, .. } => {
+            ResponsesStreamEvent::ReasoningSummaryTextDelta {
+                item_id,
+                summary_index,
+                delta,
+                ..
+            } => {
+                if delta.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut events = self.begin_reasoning_summary_part(&item_id, summary_index);
+                    events.push(Ok(LanguageModelCompletionEvent::Thinking {
+                        text: delta,
+                        signature: None,
+                    }));
+                    events
+                }
+            }
+            ResponsesStreamEvent::ReasoningDelta { delta, .. } => {
                 if delta.is_empty() {
                     Vec::new()
                 } else {
@@ -1134,16 +1166,11 @@ impl OpenAiResponseEventMapper {
                 let error = error.into_response_error();
                 vec![Err(completion_error_from_response_error(&error))]
             }
-            ResponsesStreamEvent::ReasoningSummaryPartAdded { summary_index, .. } => {
-                if summary_index > 0 {
-                    vec![Ok(LanguageModelCompletionEvent::Thinking {
-                        text: "\n\n".to_string(),
-                        signature: None,
-                    })]
-                } else {
-                    Vec::new()
-                }
-            }
+            ResponsesStreamEvent::ReasoningSummaryPartAdded {
+                item_id,
+                summary_index,
+                ..
+            } => self.begin_reasoning_summary_part(&item_id, summary_index),
             ResponsesStreamEvent::OutputItemDone { item, .. } => match item {
                 ResponseOutputItem::Reasoning(reasoning) => self.capture_reasoning_item(&reasoning),
                 ResponseOutputItem::Message(message) => self.capture_message_phase(&message),
@@ -1181,6 +1208,27 @@ impl OpenAiResponseEventMapper {
             | ResponsesStreamEvent::Created { .. }
             | ResponsesStreamEvent::InProgress { .. }
             | ResponsesStreamEvent::Unknown => Vec::new(),
+        }
+    }
+
+    fn begin_reasoning_summary_part(
+        &mut self,
+        item_id: &str,
+        summary_index: usize,
+    ) -> Vec<Result<LanguageModelCompletionEvent, LanguageModelCompletionError>> {
+        let part = (item_id.to_string(), summary_index);
+        if self.current_reasoning_summary_part.as_ref() == Some(&part) {
+            return Vec::new();
+        }
+
+        let separator = self.current_reasoning_summary_part.replace(part).is_some();
+        if separator {
+            vec![Ok(LanguageModelCompletionEvent::Thinking {
+                text: "\n\n".to_string(),
+                signature: None,
+            })]
+        } else {
+            Vec::new()
         }
     }
 
@@ -1497,6 +1545,7 @@ pub fn token_usage_from_response_usage(usage: &ResponsesUsage) -> TokenUsage {
         output_tokens: usage.output_tokens.unwrap_or_default(),
         cache_creation_input_tokens: 0,
         cache_read_input_tokens,
+        cost: None,
     }
 }
 
@@ -1707,6 +1756,7 @@ mod tests {
                 output_tokens: 3,
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 2,
+                cost: None,
             }
         );
 
@@ -1878,6 +1928,7 @@ mod tests {
             thinking_effort: Some("high".into()),
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let response = into_open_ai_response(
@@ -2064,6 +2115,7 @@ mod tests {
             thinking_effort: None,
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let response = into_open_ai_response(
@@ -2165,6 +2217,7 @@ mod tests {
             thinking_effort: None,
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let response = into_open_ai_response(
@@ -2250,6 +2303,7 @@ mod tests {
             thinking_effort: None,
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let response = into_open_ai_response(
@@ -2316,6 +2370,7 @@ mod tests {
             thinking_effort: Some("high".into()),
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let response = into_open_ai_response(
@@ -2362,6 +2417,7 @@ mod tests {
                 thinking_effort: None,
                 speed,
                 compact_at_tokens: None,
+                max_tokens: None,
             };
 
             let response = into_open_ai_response(
@@ -2414,6 +2470,7 @@ mod tests {
                 thinking_effort: None,
                 speed,
                 compact_at_tokens: None,
+                max_tokens: None,
             };
 
             let chat = into_open_ai(
@@ -2459,6 +2516,7 @@ mod tests {
             thinking_effort: None,
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let chat = into_open_ai(
@@ -2498,6 +2556,7 @@ mod tests {
             thinking_effort: Some("high".into()),
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let response = into_open_ai_response(
@@ -2539,6 +2598,7 @@ mod tests {
             thinking_effort: Some("none".into()),
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let response = into_open_ai_response(
@@ -2592,6 +2652,7 @@ mod tests {
             thinking_effort: None,
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let response = into_open_ai_response(
@@ -2684,6 +2745,7 @@ mod tests {
             thinking_effort: None,
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let response = into_open_ai_response(
@@ -2774,6 +2836,7 @@ mod tests {
             thinking_effort: None,
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let response = into_open_ai_response(
@@ -3442,11 +3505,13 @@ mod tests {
             ResponsesStreamEvent::ReasoningSummaryTextDelta {
                 item_id: "rs_123".into(),
                 output_index: 0,
+                summary_index: 0,
                 delta: "Thinking about".into(),
             },
             ResponsesStreamEvent::ReasoningSummaryTextDelta {
                 item_id: "rs_123".into(),
                 output_index: 0,
+                summary_index: 0,
                 delta: " the answer".into(),
             },
             ResponsesStreamEvent::ReasoningSummaryTextDone {
@@ -3459,14 +3524,10 @@ mod tests {
                 output_index: 0,
                 summary_index: 0,
             },
-            ResponsesStreamEvent::ReasoningSummaryPartAdded {
-                item_id: "rs_123".into(),
-                output_index: 0,
-                summary_index: 1,
-            },
             ResponsesStreamEvent::ReasoningSummaryTextDelta {
                 item_id: "rs_123".into(),
                 output_index: 0,
+                summary_index: 1,
                 delta: "Second part".into(),
             },
             ResponsesStreamEvent::ReasoningSummaryTextDone {
@@ -3541,6 +3602,65 @@ mod tests {
         assert!(mapped.iter().any(
             |e| matches!(e, LanguageModelCompletionEvent::Text(t) if t == "The answer is 42")
         ));
+    }
+
+    #[test]
+    fn responses_stream_separates_reasoning_summary_items() {
+        let events = vec![
+            ResponsesStreamEvent::OutputItemAdded {
+                output_index: 0,
+                sequence_number: None,
+                item: ResponseOutputItem::Reasoning(response_reasoning_item(
+                    "rs_1",
+                    vec![],
+                    None,
+                    None,
+                )),
+            },
+            ResponsesStreamEvent::ReasoningSummaryPartAdded {
+                item_id: "rs_1".into(),
+                output_index: 0,
+                summary_index: 0,
+            },
+            ResponsesStreamEvent::ReasoningSummaryTextDelta {
+                item_id: "rs_1".into(),
+                output_index: 0,
+                summary_index: 0,
+                delta: "**First item**".into(),
+            },
+            ResponsesStreamEvent::OutputItemAdded {
+                output_index: 1,
+                sequence_number: None,
+                item: ResponseOutputItem::Reasoning(response_reasoning_item(
+                    "rs_2",
+                    vec![],
+                    None,
+                    None,
+                )),
+            },
+            ResponsesStreamEvent::ReasoningSummaryPartAdded {
+                item_id: "rs_2".into(),
+                output_index: 1,
+                summary_index: 0,
+            },
+            ResponsesStreamEvent::ReasoningSummaryTextDelta {
+                item_id: "rs_2".into(),
+                output_index: 1,
+                summary_index: 0,
+                delta: "**Second item**".into(),
+            },
+        ];
+
+        let mapped = map_response_events(events);
+        let thinking = mapped
+            .into_iter()
+            .filter_map(|event| match event {
+                LanguageModelCompletionEvent::Thinking { text, signature: _ } => Some(text),
+                _ => None,
+            })
+            .collect::<String>();
+
+        assert_eq!(thinking, "**First item**\n\n**Second item**");
     }
 
     #[test]
@@ -3887,6 +4007,7 @@ mod tests {
             thinking_effort: None,
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let result = into_open_ai(
@@ -4703,6 +4824,92 @@ mod tests {
                     )
                 )),
             ]
+        );
+    }
+
+    /// D20: the chat-completions event mapper surfaces the provider's reported USD
+    /// cost into `TokenUsage.cost`, preferring `market_cost` (real compute energy)
+    /// over `cost`/`estimated_cost`. kask's rJoule budget charges this observed
+    /// (not operator-configured) cost via `kask_bridge`.
+    #[test]
+    fn test_map_event_populates_cost_from_usage() {
+        let usage_with_cost =
+            |cost: Option<f64>, est: Option<f64>, market: Option<f64>| crate::Usage {
+                prompt_tokens: Some(10),
+                completion_tokens: Some(5),
+                total_tokens: Some(15),
+                cost,
+                estimated_cost: est,
+                market_cost: market,
+            };
+        let event_with = |usage| ResponseStreamEvent {
+            choices: vec![],
+            usage: Some(usage),
+        };
+        let cost_of = |events: Vec<LanguageModelCompletionEvent>| {
+            events.into_iter().find_map(|e| match e {
+                LanguageModelCompletionEvent::UsageUpdate(u) => Some(u.cost),
+                _ => None,
+            })
+        };
+
+        // OpenRouter: `usage.cost`.
+        assert_eq!(
+            cost_of(map_completion_events(vec![event_with(usage_with_cost(
+                Some(0.001),
+                None,
+                None
+            ))])),
+            Some(Some(0.001))
+        );
+        // DeepInfra: `usage.estimated_cost` (different key, same meaning).
+        assert_eq!(
+            cost_of(map_completion_events(vec![event_with(usage_with_cost(
+                None,
+                Some(0.002),
+                None
+            ))])),
+            Some(Some(0.002))
+        );
+        // BYOK: `market_cost` wins over `cost == 0` (real compute energy).
+        assert_eq!(
+            cost_of(map_completion_events(vec![event_with(usage_with_cost(
+                Some(0.0),
+                None,
+                Some(0.003)
+            ))])),
+            Some(Some(0.003))
+        );
+        // Providers that report no cost (Anthropic, Ollama, local) -> `None`.
+        assert_eq!(
+            cost_of(map_completion_events(vec![event_with(usage_with_cost(
+                None, None, None
+            ))])),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn stream_maps_length_finish_reason_to_max_tokens() {
+        // zed-kask: D25 — Chat Completions reports output truncation as
+        // finish_reason "length". It must map to StopReason::MaxTokens,
+        // mirroring the Responses API path's "max_tokens" handling, not be
+        // logged as "Unexpected" and collapsed to EndTurn.
+        let events = map_completion_events(vec![ResponseStreamEvent {
+            choices: vec![ChoiceDelta {
+                index: 0,
+                delta: None,
+                finish_reason: Some("length".into()),
+            }],
+            usage: None,
+        }]);
+
+        assert!(
+            matches!(
+                events.last(),
+                Some(LanguageModelCompletionEvent::Stop(StopReason::MaxTokens))
+            ),
+            "finish_reason \"length\" must map to MaxTokens, got {events:?}"
         );
     }
 }

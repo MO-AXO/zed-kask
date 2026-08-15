@@ -9,9 +9,9 @@ no HTTP, no async.
 | Module | Role |
 |--------|------|
 | `algorithms` | Three compression algorithms (`rtk_style`, `word_rank`, `flashrank`) with domain-aware scoring |
-| `ontology_graph` | Cross-domain concept relationship index (FIBO, CogAT, GOLEM, ML-Schema, OMC, PKO, DC+BIBO) |
+| `ontology_graph` | Cross-domain concept relationship index (FIBO, SUMO, GOLEM, ML-Schema, OMC, PKO, DC+BIBO) |
 | `types` | `OntologyAnchor`, `Profile`, `ContextCategory`, `CompressedOutput`, health signals |
-| `engine` | `CondenserEngine` — stateful compression dispatch, profile management, compression history, algorithm learning, profile suggestion |
+| `engine` | `CondenserEngine` — compression dispatch and profile management |
 | `inference` | Prompt formatting and token estimation for LLM thread summarization |
 | `saliency` | Persona word-overlap scoring, memory query-word extraction, memory result scoring |
 
@@ -58,7 +58,7 @@ are needed.
 | Tool prefix | Ontology tier | Domain bridge |
 |-------------|--------------|---------------|
 | `company_*`, `stock_*`, `dcf_*`, `portfolio_*` | Domain supplement | FIBO |
-| `memory_*`, `episodic_*`, `semantic_*` | Domain supplement | CogAT |
+| `memory_*`, `episodic_*`, `semantic_*` | Domain supplement | SUMO |
 | `replica_*`, `author_*` | Domain supplement | GOLEM |
 | `training_*`, `adapter_*`, `sweep_*` | Domain supplement | ML-Schema |
 | `generate_*`, `video_*`, `image_*`, `gallery_*` | Domain supplement | OMC |
@@ -78,21 +78,11 @@ The `reg.condenser` tracing spans are **diagnostic logging** for human inspectio
 |------|--------|------|
 | `reg.condenser` compress | `algorithm`, `category`, `tool_name`, `ontology_tier` | Every compression |
 | `reg.condenser` compression_ratio | `reduction_pct`, `original_bytes`, `compressed_bytes`, `latency_ms` | Every compression |
-| `reg.condenser` health | `total_compressions`, `health_signal_count` | Health check |
-
-## Learning
-
-`CondenserEngine` learns which algorithm performs best per category:
-- Records each compression as a `CompressionRecord` in a bounded ring buffer (200 max)
-- After 10+ observations per category, `recommend_algorithm()` returns the best-performing algorithm
-- `compress()` auto-selects the recommended algorithm when sufficient data exists
-- `suggest_profile()` recommends a more aggressive profile when health checks flag degradation
-- `compression_stats()` returns per-algorithm and per-category compression ratio summaries
 
 ## Consumers
 
-- `hkask-mcp-condenser` — MCP server: thin wrapper exposing `/condenser/compress` etc.
-- `hkask-services-chat` — `ChatService::condense_history`: two-phase auto-condensation (CPU pre-compress + LLM summarize)
+- `kask_bridge` — `BridgeThreadCondenser`: the runtime tool-result compression path wired into the agent turn loop via `agent::set_thread_condenser` (gated on `kask.condenser.auto_compress_tool_results`, default off)
+- `hkask-mcp-condenser` — MCP server exposing `condenser_ping`, `condenser_persist`, `condenser_thread_summary`, `condenser_score_saliency`
 
 ## Saliency Architecture
 

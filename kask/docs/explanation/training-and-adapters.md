@@ -1,8 +1,8 @@
 ---
 title: "Training and Adapters"
 audience: [operators, developers, ml-engineers]
-last_updated: 2026-07-24
-version: "0.31.0"
+last_updated: 2026-08-04
+version: "0.34.0"
 status: "Active"
 domain: "Training"
 mds_categories: [domain, lifecycle]
@@ -10,13 +10,13 @@ mds_categories: [domain, lifecycle]
 
 # Training and Adapters
 
-Fine-tune LoRA adapters for Qwen3.6-27B on RunPod with Unsloth, evaluate them, and manage the adapter lifecycle through the in-process training MCP server. hKask provides standalone RunPod/Unsloth training scripts that are verified on H100 NVL and A100 80GB GPUs. The former `kask adapter` CLI commands have been removed; adapter management is now performed in-process via the training MCP server (one of the 11 builtin in-process MCP servers registered inside zed-kask, D1–D3).
+Fine-tune LoRA adapters for Qwen3.6-27B on RunPod with Unsloth, evaluate them, and manage the adapter lifecycle through the training MCP server (a child process over stdio). hKask provides standalone RunPod/Unsloth training scripts that are verified on H100 NVL and A100 80GB GPUs. The former `kask adapter` CLI commands have been removed; adapter management is now performed via the training MCP server (one of the 13 builtin MCP servers registered inside zed-kask as child processes over stdio, D1–D3).
 
 ---
 
 ## Training Overview
 
-hKask's training path uses shell scripts hosted on HuggingFace (`Axolotl-Partners/rust-adapter-scripts`) that launch RunPod pods, execute Unsloth/Axolotl-based fine-tuning, and auto-upload LoRA adapters to HuggingFace. The scripts are not in the hKask repo — hKask is a Rust project and Python is not an acceptable dependency. The MCP submission path (`hkask-mcp-training`) provides job submission, status tracking, and adapter lifecycle management, but the end-to-end contract for dataset transfer, training execution, artifact recovery, and adapter registration has not been verified through an automated integration test.
+hKask's training path uses shell scripts hosted on HuggingFace (`Axolotl-Partners/rust-adapter-scripts`) that launch RunPod pods, execute Unsloth/Axolotl-based fine-tuning, and auto-upload LoRA adapters to HuggingFace. The scripts are not in the hKask repo — hKask is a Rust project and Python is not an acceptable dependency. The MCP submission path (`hkask-mcp-training`) provides job submission, status tracking, and adapter lifecycle management, but the end-to-end contract for dataset transfer, training execution, artifact recovery, and adapter registration has not been verified through an automated integration test.[^lora-paper][^peft-lib]
 
 ### Training Scripts (on HuggingFace)
 
@@ -31,13 +31,13 @@ All training scripts live in the HuggingFace repo `Axolotl-Partners/rust-adapter
 
 ### Current Limitations
 
-The generic CLI commands `kask docproc ingest`, `kask training create-dataset`, `kask training start`, and `kask training status` were **not implemented CLI commands** and have been removed entirely. Training is driven by the HF-hosted scripts (curl-piped to RunPod pods) and the in-process training MCP server for adapter lifecycle management (described below).
+The generic CLI commands `kask docproc ingest`, `kask training create-dataset`, `kask training start`, and `kask training status` were **not implemented CLI commands** and have been removed entirely. Training is driven by the HF-hosted scripts (curl-piped to RunPod pods) and the training MCP server (child process over stdio) for adapter lifecycle management (described below).
 
 ---
 
 ## Train Rust Adapters on RunPod with Unsloth
 
-Train LoRA adapters for Qwen3.6-27B specialized for Rust programming:
+Train LoRA adapters for Qwen3.6-27B specialized for Rust programming:[^unsloth-lib][^axolotl-lib]
 
 | Mode | Dataset | Size | Focus | HF Repo |
 |------|---------|------|-------|---------|
@@ -172,45 +172,59 @@ On failure:
 
 ## Adapter Lifecycle via the Training MCP Server
 
-Adapter deployment and lifecycle management is performed in-process through the **training** MCP server (one of the 11 builtin in-process MCP servers, D1–D3). The former `kask adapter list/deploy/status/teardown` CLI commands have been removed; invoke the equivalent MCP tools from the zed-kask agent panel or kask panel (D10).
+The training MCP server (`hkask-mcp-training`) exposes 8 tools for the training and adapter lifecycle. The former `kask adapter list/deploy/status/teardown` CLI commands have been removed. The `AdapterRouter` (in `mcp-servers/hkask-mcp-training/src/adapter/adapter_router/mod.rs`) implements the `AdapterPort` trait internally — endpoint deployment, status, and teardown are exposed through the `training_status` tool's auto-registration path and the `training_submit` retrain mode, not as standalone `adapter_*` MCP tools. The server's `run()` comment explicitly notes: "deployment, status, teardown — the MCP server no longer wraps these."[^mcp-spec-training]
 
-### List Trained Adapters
+### Training Tools
 
-Invoke the adapter-listing tool from the agent panel:
+| Tool | Purpose |
+|------|---------|
+| `training_submit` | Submit a LoRA fine-tuning job (Axolotl YAML, TRL Python, or Ludwig YAML harness). Supports retrain mode with `feedback_path`. |
+| `training_status` | Check job status; auto-registers the adapter from the HuggingFace completion manifest when training completes. |
+| `training_cancel` | Cancel a running or queued training job. |
+| `training_validate_config` | Validate training params against the lora-training skill's math-contract gates (G-M1 through G-H1). |
+| `training_ingest_qa` | Ingest QA pairs into semantic memory for future dataset assembly. |
+| `training_assemble_dataset` | Assemble stored QA pairs into a ChatML JSONL training dataset. |
+| `training_ingest_dataset` | Ingest a raw dataset file (ChatML, ShareGPT, Alpaca, DPO/KTO/ORPO preference) into the normalized cache. |
+| `training_evaluate` | Evaluate a trained adapter against a test dataset (exact_match, contains, semantic, benchmark). |
 
-```
-tool: adapter_list
-arguments: {"skill": "<optional-skill-name>"}
-```
-
-### Deploy an Adapter
-
-Deploy an adapter to a cloud inference provider:
-
-```
-tool: adapter_deploy
-arguments: {"adapter_name": "<adapter-name>", "provider": "together"}
-```
-
-The `provider` field accepts `together` (default) or `runpod`.
-
-### Check Deployment Status
+### Submit a Training Job
 
 ```
-tool: adapter_status
-arguments: {"deployment_id": "<deployment_id>"}
+tool: training_submit
+arguments: {
+  "dataset_path": "<path-or-hf-repo>",
+  "base_model": "unsloth/Qwen3.6-27B",
+  "params": { "lora_r": 16, "lora_alpha": 32, "harness": "axolotl" }
+}
 ```
 
-Use the deployment ID returned by the `adapter_deploy` tool.
+The harness is selected via `params.harness` (operator-accepted from the lora-training skill's G6 gate): `axolotl` (default, SFT only), `trl` (SFT, DPO, KTO, ORPO, Reward), or `ludwig` (SFT, DPO, KTO, ORPO, GRPO).
 
-### Tear Down a Deployed Endpoint
+### Check Job Status and Auto-Registration
 
 ```
-tool: adapter_teardown
-arguments: {"deployment_id": "<deployment_id>"}
+tool: training_status
+arguments: {"job_id": "<job-id>"}
 ```
 
-This removes the deployed inference endpoint and releases associated resources.
+When training completes (detected via the HuggingFace completion manifest), `training_status` automatically registers the adapter with metadata from the manifest (adapter name, base model, repository, path). The `adapter_registered` field in the response indicates whether registration succeeded.
+
+### Validate Before Submitting
+
+```
+tool: training_validate_config
+arguments: {
+  "params": { "lora_r": 16, "lora_alpha": 32, "harness": "axolotl" },
+  "base_model": "unsloth/Qwen3.6-27B",
+  "dataset_path": "<optional-path>"
+}
+```
+
+This is the runtime enforcement point for the lora-training skill's audit-config phase. It checks gates G-M1 (no-op-at-init), G-M2 (merge equivalence), G-M3 (scaling form), G-M4 (rank budget), G-Q1 through G-Q5 (quantization), G-H1 (harness-method compatibility), G-D0 (dataset format), and G-D1 (dataset size). Emits `reg.lora.audit` spans.
+
+### Adapter Routing (Internal)
+
+The `AdapterRouter` is constructed inside the training server's `run()` when a database passphrase is available. It implements `AdapterPort` for adapter composition (selecting providers, creating endpoints, draining billable endpoints). This is consumed internally by the training server and the broader hKask inference path — it is not exposed as standalone MCP tools. The `EndpointGuard` (RAII) tears down endpoints on drop to prevent billing leaks.
 
 ---
 
@@ -220,7 +234,7 @@ This removes the deployed inference endpoint and releases associated resources.
 - [Unsloth Qwen3.5 Fine-tuning Guide](https://unsloth.ai/docs/models/qwen3.5/fine-tune) — QLoRA not recommended for Qwen3.5/3.6
 - [QwenLM Qwen3 Training with Unsloth](https://github.com/QwenLM/Qwen3/blob/main/docs/source/training/unsloth.md) — 75% reasoning / 25% non-reasoning dataset ratio
 - [Qwen3.6 Training Reference](#qwen36-training-hyperparameters-merged-from-qwen36-training-hyperparametersmd) — Full hyperparameter rationale and literature survey
-- [zed-kask Host Architecture Plan](../architecture/zed-host-architecture-plan.md) — D1–D3 in-process MCP server registration (training server)
+- [zed-kask Host Architecture Plan](../architecture/zed-host-architecture-plan.md) — D1–D3 builtin MCP server registration (training server, child process over stdio)
 ---
 
 ## Qwen3.6 Training Hyperparameters
@@ -261,7 +275,7 @@ verified_against: corpus/chunks/chunks.jsonl; corpus/chunks/tagged_chunks.jsonl;
 status: VERIFIED
 -->
 
-The operational assessment and remediation sequence is documented in the [zed-kask Host Architecture Plan](../architecture/zed-host-architecture-plan.md) (D1–D10 integration seams).
+The operational assessment and remediation sequence is documented in the [zed-kask Host Architecture Plan](../architecture/zed-host-architecture-plan.md) (D1–D28 integration seams).
 
 
 ### Replica Pipeline Dispatch
@@ -271,7 +285,7 @@ The operational assessment and remediation sequence is documented in the [zed-ka
 
 # Corpus Pipeline Dispatch Flowchart
 
-> **Note:** `corpus_pipeline_run` was removed when the replica and docproc servers merged into `hkask-mcp-corpus`. The unified corpus server makes the manifest executor unnecessary — all corpus tools (`docproc_*` and `replica_*`) are now in-process. Pipeline manifests are orchestrated via the in-process corpus MCP server (D1–D3), invoked from the agent panel or kask panel (D10). The former `kask mcp invoke` CLI has been removed.
+> **Note:** `corpus_pipeline_run` was removed when the replica and docproc servers merged into `hkask-mcp-corpus`. The unified corpus server makes the manifest executor unnecessary — all corpus tools (`docproc_*` and `replica_*`) are now in-process. Pipeline manifests are orchestrated via the in-process corpus MCP server (D1–D3), invoked from the agent panel. The former `kask mcp invoke` CLI has been removed.
 
 The historical flowchart below is retained for reference. It shows the former executable boundary of `corpus_pipeline_run`.
 
@@ -297,7 +311,7 @@ flowchart TD
     O -->|Yes| D
     O -->|No| P([Return pipeline result])
 ```
-`execute_tool` wraps the MCP call with a tool span and records success or error against the caller's WebID. That is observability, not authorization: per [P4 — Clear Boundaries](../architecture/core/PRINCIPLES.md#p4--clear-boundaries-ocap), operators must not treat this dispatcher as a replacement for an OCAP check. The checkpoint/result path supports [P9 — Homeostatic Self-Regulation](../architecture/core/PRINCIPLES.md#p9--homeostatic-self-regulation) by retaining the last step outcome for inspection and retry.
+`execute_tool` wraps the MCP call with a tool span and records success or error against the caller's WebID. That is observability, not authorization: per [P4 — Clear Boundaries](../architecture/core/PRINCIPLES.md#p4--clear-boundaries), operators must not treat this dispatcher as an authority boundary. Nor is `McpRuntime::invoke` downstream of it one — it meters and dispatches (RR-0056). The authority boundaries are the tool allowlists named in P4.2. The checkpoint/result path supports [P9 — Homeostatic Self-Regulation](../architecture/core/PRINCIPLES.md#p9--homeostatic-self-regulation) by retaining the last step outcome for inspection and retry.
 
 The complete, aspirational corpus workflow is in [`corpus/pipeline-capabilities-researcher.yaml`](../../corpus/pipeline-capabilities-researcher.yaml); all its `docproc_*` and `training_*` steps are now dispatched in-process against the unified `hkask-mcp-corpus` server. See also [the corpus server reference](../reference/mcp-servers/README.md).
 
@@ -389,7 +403,7 @@ status: VERIFIED
 
 ## Key Decision Points
 
-| Decision | Condition | Branches |
+| Decision | Condition | Branches |[^training-decisions]
 |----------|-----------|----------|
 | Mode selection | CLI flag (`--rust-coding`, `--eval`, etc.) | 5 paths: train, eval, coding, analysis, both |
 | Pod readiness | RunPod `desiredStatus == RUNNING` | Retry loop, max 5 min |
@@ -644,6 +658,8 @@ status: VERIFIED
 
 ## Design Notes
 
+The following architectural seams define the training server's design:[^ousterhout-training]
+
 - `TrainingHost` is the seam for compute backends — three providers (Runpod, DeepInfra, Nebius) implement it
 - `PodStatus` is the rich status type — every pod returns SSH command, IP, uptime, GPU type, and failure reason
 - `HarnessAdapter` is the seam for training tooling — renders config in the harness native format (YAML for Axolotl/Ludwig, Python for TRL)
@@ -653,4 +669,27 @@ status: VERIFIED
 - `LoraParams` defaults: r=16, alpha=32, dropout=0, 7 target modules (all attention + MLP projections)
 - `TrainingParams` defaults: LR=1e-4, 3 epochs, batch_size=4
 - Every pod/VM/container MUST be debuggable via SSH — empty `ssh_command` is a red flag
+
+## Footnotes
+
+[^lora-paper]: Hu, E. J., Shen, Y., Wallis, P., Allen-Zhu, Z., Li, Y., Wang, S., Wang, L., & Chen, W. (2021). LoRA: Low-Rank Adaptation of Large Language Models. arXiv. https://arxiv.org/abs/2106.09685
+    Cited for the LoRA low-rank adaptation method the training path implements.
+
+[^peft-lib]: Liu, Y., et al. (2024). *Parameter-Efficient Fine-Tuning (PEFT)*. Hugging Face. https://huggingface.co/docs/peft
+    Cited for the PEFT library that provides the adapter serialization and merge interface the MCP lifecycle manages.
+
+[^unsloth-lib]: Unsloth. (2024). *Unsloth: Fine-tune LLMs 2x faster, use 70% less VRAM*. GitHub. https://github.com/unslothai/unsloth
+    Cited for the Unsloth optimization layer the RunPod training scripts use.
+
+[^axolotl-lib]: Axolotl. (2024). *Axolotl: A tool for fine-tuning various AI models*. GitHub. https://github.com/axolotl-ai-cloud/axolotl
+    Cited for the Axolotl fine-tuning harness the training scripts execute on the pod.
+
+[^mcp-spec-training]: Anthropic. (2024). *Model Context Protocol Specification*. Anthropic PBC. https://modelcontextprotocol.io/specification
+    Cited for the MCP protocol the training server exposes its 8 lifecycle tools over.
+
+[^training-decisions]: Dettmers, T., Pagnoni, A., Holtzman, A., & Zettlemoyer, L. (2023). QLoRA: Efficient Finetuning of Quantized LLMs. arXiv. https://arxiv.org/abs/2305.14314
+    Cited for the dataset-size vs quality and early-stopping decision points the pipeline branches on.
+
+[^ousterhout-training]: Ousterhout, J. (2018). *A Philosophy of Software Design*. Yakny Press.
+    Cited for the deep-module/seam discipline that the `TrainingHost` and `HarnessAdapter` trait boundaries follow.
 

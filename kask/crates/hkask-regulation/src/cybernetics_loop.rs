@@ -6,7 +6,7 @@
 //! 1. **Sense** — receive `reg.*` spans from all loops (tool invocations,
 //!    prompt outcomes, agent pod lifecycle, connector I/O).
 //! 2. **Compare** — evaluate each signal against homeostatic set-points:
-//!    gas budget remaining, variety counter balance, error rate threshold,
+//!    call-cap remaining, variety counter balance, error rate threshold,
 //!    connector latency envelope.
 //! 3. **Compute** — when a signal deviates beyond its set-point, produce an
 //!    efferent signal: throttle, escalate, calibrate, or circuit-break.
@@ -28,33 +28,26 @@
 //! in `SetPoints` + regulation actions via `InferenceRegulation`.
 
 use crate::dampener::{Dampener, StagnationDetector};
-use crate::energy::{AgentGasStatus, GasBudget, GasCost, GasError};
-use crate::energy_budget_management::GasBudgetManager;
+use crate::energy::{AgentCallCapStatus, CallCap, CallCapError, CallCapManager, CallMeterOutcome};
 
 use crate::runtime::{RegulationCycleEntry, RegulationLedger};
-use crate::sensor_provider::{
-    EnergyBudgetSensor, SensorBus, ToolReliabilitySensor, VarietySensor, WalletBalanceRatioSensor,
-    WalletKeyHealthSensor,
-};
+use crate::sensor_provider::{EnergyBudgetSensor, SensorBus, ToolReliabilitySensor, VarietySensor};
 use crate::set_points::{InferenceThrottleMode, SetPoints};
 use crate::strategy_evaluator::StrategyEvaluator;
 use crate::system_simulator::MovingAverageExtrapolator;
 use crate::tool_stats::ToolStats;
-use crate::wallet_budget::WalletBackedBudget;
-use crate::wallet_manager::WalletManager;
-use crate::well::WellManager;
 
 use crate::algedonic::{AlertSeverity, RuntimeAlert};
 use crate::regulation_policy::{
-    self, RegulationPolicy, classify_decision, default_substitution_ladder,
+    self, RegulationPolicy, RegulationReason, classify_decision, default_substitution_ladder,
     extract_deficit_threshold,
 };
 use crate::types::loops::{
     ActionDecision, ActionType, CurationInput, Deviation, ImpactReport, LoopId, LoopMetrics,
-    RegulationLoop, RegulatoryAction, RegulatoryActionParams, Signal, SignalMetric, TriggerOrigin,
+    RegulatoryAction, RegulatoryActionParams, Signal, SignalMetric, TriggerOrigin,
 };
 use crate::types::loops::{BudgetOption, RegulationData};
-use hkask_types::BackpressureSignal;
+
 use hkask_types::CuratorDirective;
 use hkask_types::WebID;
 use hkask_types::event::{CyclePhase, RegulationRecord, RegulationSink, Span, SpanKind};
@@ -72,21 +65,27 @@ struct CalibratedThresholds {
 
 /// The Cybernetics Loop — homeostatic self-regulation.
 ///
-/// Implements the `Loop` trait's sense→compare→compute→act cycle.
+/// Implements the sense→compare→compute→act regulation cycle.
 /// The Cybernetic Loop regulates all three domain loops (Inference,
 /// Episodic, Semantic) and may signal the Curation Loop via algedonic
 /// alerts. It may NOT regulate the Curation Loop.
 pub struct CyberneticsLoop {
     ledger: Arc<RwLock<RegulationLedger>>,
-    gas_budget_manager: Arc<RwLock<GasBudgetManager>>,
-    well_manager: Arc<RwLock<WellManager>>,
-    wallet_manager: Option<Arc<WalletManager>>,
+    call_cap_manager: Arc<RwLock<CallCapManager>>,
     set_points: SetPoints,
     /// Cascade detection — prevents unbounded sense→act cycles
     max_iterations: u32,
     dampener: Arc<Dampener>,
     /// When present, algedonic alerts are persisted to RegulationArchive for restart durability.
     event_sink: Option<Arc<dyn RegulationSink>>,
+    /// When present, algedonic alerts are persisted to the reviewable escalation
+    /// queue (the `EscalationQueue` on the curator's curator.db). This is the
+    /// primary durable path for alert review — every escalated alert is written
+    /// here unconditionally, so the Curator/user can review pending alerts via
+    /// the `curator_escalations` MCP tool and resolve/dismiss them. The
+    /// `event_sink` (`RegulationArchive`) remains as a secondary fallback for
+    /// restart durability when this queue is unavailable.
+    alert_escalation_sink: Option<Arc<dyn crate::algedonic::AlertEscalationSink>>,
     /// Direct alerts channel: Cybernetics → Curation (CurationInput).
     alerts_tx: Option<mpsc::UnboundedSender<CurationInput>>,
     alert_email_sink: Option<Arc<dyn crate::algedonic::AlertEmailSink>>,
@@ -95,7 +94,7 @@ pub struct CyberneticsLoop {
     curator_directive_rx: Option<Arc<RwLock<mpsc::UnboundedReceiver<CuratorDirective>>>>,
     /// Loop-quality telemetry from the most recent tick cycle.
     loop_quality: RwLock<LoopMetrics>,
-    /// Path for persisting gas budgets across restarts.
+    /// Path for persisting call caps across restarts.
     budget_persistence_path: Option<std::path::PathBuf>,
     /// Detects regulatory plateaus — repeated ineffective (metric, action) pairs.
     /// Fermi-inspired early-stopping pattern for cybernetic regulation.
@@ -139,7 +138,7 @@ impl CyberneticsLoop {
             StagnationDetector::new(crate::set_points::DEFAULT_STAGNATION_THRESHOLD)
                 .with_per_metric_thresholds(set_points.stagnation_thresholds.clone()),
         );
-        let gas_budget_manager = Arc::new(RwLock::new(GasBudgetManager::new()));
+        let call_cap_manager = Arc::new(RwLock::new(CallCapManager::new()));
         let calibrated_thresholds = Arc::new(RwLock::new(CalibratedThresholds {
             stagnation_thresholds: set_points.stagnation_thresholds.clone(),
             block_worsening_ratio: set_points.block_worsening_ratio,
@@ -148,32 +147,35 @@ impl CyberneticsLoop {
         let sensor_registry = {
             let registry = SensorBus::new();
             registry.register(Arc::new(EnergyBudgetSensor::new(
-                Arc::clone(&gas_budget_manager),
+                Arc::clone(&call_cap_manager),
                 set_points.gas_min_remaining,
             )));
             registry.register(Arc::new(VarietySensor::new(
                 Arc::clone(&ledger),
                 set_points.variety_max_deficit,
             )));
-            registry.register(Arc::new(WalletKeyHealthSensor::new(Arc::clone(
-                &gas_budget_manager,
-            ))));
-            registry.register(Arc::new(WalletBalanceRatioSensor::new(
-                Arc::clone(&gas_budget_manager),
-                0.1, // alert when below 10%
+            let trace_dir = std::path::PathBuf::from(
+                std::env::var("HKASK_TRACE_DIR").unwrap_or_else(|_| "kask/traces".to_string()),
+            );
+            registry.register(Arc::new(crate::sensor_provider::TestCoverageSensor::new(
+                trace_dir.clone(),
+                set_points.coverage_floor,
+            )));
+            registry.register(Arc::new(crate::sensor_provider::MutationScoreSensor::new(
+                trace_dir,
+                set_points.mutation_score_floor,
             )));
             Arc::new(registry)
         };
 
         Self {
             ledger,
-            gas_budget_manager,
-            well_manager: Arc::new(RwLock::new(WellManager::new())),
-            wallet_manager: None,
+            call_cap_manager,
             set_points,
             max_iterations,
             dampener,
             event_sink: None,
+            alert_escalation_sink: None,
             alerts_tx: None,
             alert_email_sink: None,
             curator_directive_rx: None,
@@ -197,6 +199,36 @@ impl CyberneticsLoop {
     pub fn with_event_sink(mut self, sink: Arc<dyn RegulationSink>) -> Self {
         self.event_sink = Some(sink);
         self
+    }
+
+    /// Wire the reviewable escalation queue sink for algedonic alerts.
+    ///
+    /// When set, every escalated alert is persisted to the escalation queue
+    /// (the `EscalationQueue` on the curator's curator.db) so the Curator/user can
+    /// review pending alerts via `curator_escalations` and resolve/dismiss them
+    /// with an audit trail. This is the primary durable path for alert review.
+    ///
+    /// expect: "The system provides configurable cybernetic self-regulation"
+    /// post: returns Self for chaining
+    #[must_use = "builder methods must be chained or assigned"]
+    pub fn with_alert_escalation_sink(
+        mut self,
+        sink: Arc<dyn crate::algedonic::AlertEscalationSink>,
+    ) -> Self {
+        self.alert_escalation_sink = Some(sink);
+        self
+    }
+
+    /// Set or clear the alert escalation sink after construction.
+    ///
+    /// Used by the composition root to lazily wire the escalation queue after
+    /// the curator DB passphrase resolves (post-login deferred task), mirroring
+    /// `set_event_sink`. Pass `None` to disable escalation-queue persistence.
+    pub fn set_alert_escalation_sink(
+        &mut self,
+        sink: Option<Arc<dyn crate::algedonic::AlertEscalationSink>>,
+    ) {
+        self.alert_escalation_sink = sink;
     }
 
     /// Wire the direct alerts channel for Cybernetics → Curation CurationInput delivery.
@@ -235,6 +267,15 @@ impl CyberneticsLoop {
         self.alert_email_sink = sink;
     }
 
+    /// Replace the regulation event sink after construction.
+    ///
+    /// Used by the composition root to upgrade from `NoopEventSink` to a
+    /// durable `RegulationArchive` once the curator DB passphrase resolves
+    /// (post-login deferred task).
+    pub fn set_event_sink(&mut self, sink: Arc<dyn RegulationSink>) {
+        self.event_sink = Some(sink);
+    }
+
     /// Wire the direct curator directive channel: Curation → Cybernetics.
     ///
     /// expect: "The system provides configurable cybernetic self-regulation"
@@ -248,9 +289,9 @@ impl CyberneticsLoop {
         self
     }
 
-    /// Enable gas budget persistence across restarts.
+    /// Enable call-cap persistence across restarts.
     ///
-    /// Budgets are saved to the given path after each replenishment cycle
+    /// Caps are saved to the given path after each reset cycle
     /// and loaded automatically on construction.
     ///
     /// expect: "The system provides configurable cybernetic self-regulation"
@@ -399,6 +440,51 @@ impl CyberneticsLoop {
         }
     }
 
+    /// Persist an algedonic alert to the reviewable escalation queue.
+    ///
+    /// This is the primary durable path for alert review: every escalated
+    /// alert is written here when the sink is wired (not just as a fallback),
+    /// so the Curator/user can review pending alerts via `curator_escalations`
+    /// and resolve/dismiss them with an audit trail. Best-effort — a failing
+    /// or missing sink never breaks the regulation loop. Non-escalated alerts
+    /// (Info severity, or `escalated: false`) are skipped to avoid polluting
+    /// the review queue with non-actionable noise.
+    ///
+    /// The `RuntimeAlert` fields are mapped to `EscalationEntry` columns:
+    /// `output` = `alert.message`, `error_context` = serialized alert JSON
+    /// (domain/deficit/threshold/severity), `confidence` = 1.0 for Critical /
+    /// 0.5 for Warning.
+    ///
+    /// `efferent_action` carries the original `ActionType` for actions that
+    /// were converted to Escalate alerts (non-native Escalate). `None` for
+    /// native Escalate actions. The field is included in the `error_context`
+    /// JSON so the Curator's `curator_escalations` tool sees the recommended
+    /// action as structured data, not just free-text in the message.
+    fn persist_alert_to_queue(&self, alert: &RuntimeAlert, efferent_action: Option<&str>) {
+        let Some(ref sink) = self.alert_escalation_sink else {
+            return;
+        };
+        // Skip non-escalated alerts — only escalated alerts (Critical, or
+        // Warning with `escalated: true`) belong in the reviewable backlog.
+        // Info alerts and non-escalated Warnings are diagnostic, not
+        // actionable, and would pollute the queue.
+        if !alert.escalated {
+            return;
+        }
+        let confidence = if alert.is_critical() { 1.0 } else { 0.5 };
+        let error_context = serde_json::json!({
+            "domain": alert.domain,
+            "deficit": alert.deficit,
+            "threshold": alert.threshold,
+            "severity": alert.severity,
+            "escalated": alert.escalated,
+            "efferent_action": efferent_action,
+            "timestamp": alert.timestamp.to_rfc3339(),
+        })
+        .to_string();
+        sink.persist_alert(&alert.message, confidence, &error_context);
+    }
+
     /// Check regulation coherence — flag contradictory or suspicious action pairs.
     ///
     /// Runs after verify_impact. Scans the action set from this tick and logs
@@ -433,56 +519,40 @@ impl CyberneticsLoop {
         }
     }
 
-    /// Attach a WalletManager for agent wallet operations.
-    ///
-    /// expect: "The system provides configurable cybernetic self-regulation"
-    /// post: returns Self for chaining
-    #[must_use = "builder methods must be chained or assigned"]
-    pub fn with_wallet_manager(mut self, mgr: Arc<WalletManager>) -> Self {
-        self.wallet_manager = Some(mgr);
-        self
-    }
-
-    /// Attempt to load persisted budgets from the configured path.
+    /// Attempt to load persisted call caps from the configured path.
     /// Called automatically during `build()` if a persistence path is set.
     /// Returns count loaded (0 if first run or no path configured).
     ///
     /// expect: "The system provides observability into Regulation regulation state"
-    pub async fn load_budgets(&self) -> Result<usize, GasError> {
+    pub async fn load_budgets(&self) -> Result<usize, CallCapError> {
         if let Some(ref path) = self.budget_persistence_path {
             let contents = match tokio::fs::read_to_string(path).await {
                 Ok(c) => c,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
                 Err(e) => {
-                    return Err(GasError::Persistence(format!(
+                    return Err(CallCapError::Persistence(format!(
                         "read {}: {e}",
                         path.display()
                     )));
                 }
             };
             let wrapper: serde_json::Value = serde_json::from_str(&contents)
-                .map_err(|e| GasError::Persistence(format!("parse {}: {e}", path.display())))?;
+                .map_err(|e| CallCapError::Persistence(format!("parse {}: {e}", path.display())))?;
 
-            // Load gas budgets
-            let count = if let Some(budgets_val) = wrapper.get("budgets") {
-                let loaded: HashMap<WebID, GasBudget> = serde_json::from_value(budgets_val.clone())
-                    .map_err(|e| GasError::Persistence(format!("parse budgets: {e}")))?;
+            // Load persisted call caps.
+            let count = if let Some(caps_val) = wrapper.get("budgets") {
+                let loaded: HashMap<WebID, CallCap> = serde_json::from_value(caps_val.clone())
+                    .map_err(|e| CallCapError::Persistence(format!("parse caps: {e}")))?;
                 let n = loaded.len();
-                let gbm = self.gas_budget_manager.read().await;
-                let mut budgets = gbm.gas_budgets_mut().await;
-                for (id, budget) in loaded {
-                    budgets.insert(id, budget);
+                let mgr = self.call_cap_manager.read().await;
+                let mut caps = mgr.caps_mut().await;
+                for (id, cap) in loaded {
+                    caps.insert(id, cap);
                 }
                 n
             } else {
                 0
             };
-
-            // Restore Well state
-            if let Some(well_val) = wrapper.get("well") {
-                let mut wells = self.well_manager.write().await;
-                wells.load_state(well_val);
-            }
 
             // Restore ToolStats state
             if let Some(ts_val) = wrapper.get("tool_stats")
@@ -492,38 +562,12 @@ impl CyberneticsLoop {
             }
 
             if count > 0 || wrapper.get("tool_stats").is_some() {
-                tracing::info!(target: "reg.cybernetics", count = count, "Loaded persisted budgets + Well + ToolStats state");
+                tracing::info!(target: "reg.cybernetics", count = count, "Loaded persisted caps + ToolStats state");
             }
             Ok(count)
         } else {
             Ok(0)
         }
-    }
-
-    /// Access the WalletManager for wallet creation and balance queries.
-    /// Returns None if no wallet manager was attached via with_wallet_manager().
-    ///
-    /// expect: "The system provides observability into Regulation regulation state"
-    pub fn wallet_manager(&self) -> Option<&Arc<WalletManager>> {
-        self.wallet_manager.as_ref()
-    }
-
-    /// Attach a WalletManager after construction.
-    ///
-    /// expect: "The system provides configurable cybernetic self-regulation"
-    pub async fn set_wallet_manager(&mut self, mgr: Arc<WalletManager>) {
-        self.gas_budget_manager
-            .write()
-            .await
-            .set_wallet_manager(Arc::clone(&mgr));
-        self.wallet_manager = Some(mgr);
-    }
-
-    /// Access the WellManager for Well creation and configuration.
-    ///
-    /// expect: "The system provides observability into Regulation regulation state"
-    pub fn well_manager(&self) -> &Arc<RwLock<WellManager>> {
-        &self.well_manager
     }
 
     /// Record a tool outcome in the Regulation runtime for outcome quality tracking.
@@ -540,108 +584,68 @@ impl CyberneticsLoop {
             .await;
     }
 
-    /// Register a gas budget for an agent in the gas budget manager.
+    /// Register a per-agent call cap (the hard ceiling on governed tool calls per
+    /// regulation tick). The composition root must seed a cap for every agent
+    /// that makes governed tool calls — agents without one are denied (fail-closed).
     ///
     /// expect: "The system enforces energy homeostasis through gas budget membrane regulation"
-    pub async fn register_gas_budget(&self, agent: WebID, budget: GasBudget) {
-        self.gas_budget_manager
+    pub async fn register_call_cap(&self, agent: WebID, ceiling: u32) {
+        self.call_cap_manager
             .read()
             .await
-            .register_gas_budget(agent, budget)
+            .register_call_cap(agent, ceiling)
             .await;
     }
 
-    /// Register a wallet-backed budget for an agent (Phase 5).
-    /// Wallet budgets are checked before gas budgets in the membrane.
+    /// Check whether an agent still has calls available this tick.
     ///
     /// expect: "The system enforces energy homeostasis through gas budget membrane regulation"
-    pub async fn register_wallet_budget(&self, agent: WebID, budget: WalletBackedBudget) {
-        self.gas_budget_manager
-            .read()
-            .await
-            .register_wallet_budget(agent, budget)
-            .await;
+    pub async fn can_proceed(&self, agent: &WebID) -> bool {
+        self.call_cap_manager.read().await.can_proceed(agent).await
     }
 
-    /// Check whether an agent has sufficient budget to proceed with a gas cost.
+    /// Consume one call. Returns `Err` if the agent has no cap or it is exhausted.
     ///
     /// expect: "The system enforces energy homeostasis through gas budget membrane regulation"
-    pub async fn can_proceed(&self, agent: &WebID, gas: GasCost) -> bool {
-        self.gas_budget_manager
-            .read()
-            .await
-            .can_proceed(agent, gas)
-            .await
+    pub async fn charge_call(&self, agent: &WebID) -> Result<(), CallCapError> {
+        self.call_cap_manager.read().await.charge(agent).await
     }
 
-    /// Returns `None` if agent has no registered budget.
+    /// Meter one governed tool call, auto-registering an unknown agent at the
+    /// default runaway ceiling. The tool-dispatch path uses this rather than
+    /// [`Self::charge_call`] — see [`CallCapManager::charge_metered`].
     ///
     /// expect: "The system enforces energy homeostasis through gas budget membrane regulation"
-    pub async fn agent_gas_status(&self, agent: &WebID) -> Option<AgentGasStatus> {
-        self.gas_budget_manager
+    pub async fn charge_call_metered(&self, agent: &WebID) -> CallMeterOutcome {
+        self.call_cap_manager
             .read()
             .await
-            .agent_gas_status(agent)
+            .charge_metered(agent)
             .await
     }
 
-    /// Hold-settle pattern: gas reserved but not consumed. Call settle_gas() after.
+    /// Returns `None` if the agent has no registered cap.
     ///
     /// expect: "The system enforces energy homeostasis through gas budget membrane regulation"
-    pub async fn reserve_gas(&self, agent: &WebID, gas: GasCost) -> Result<GasCost, GasError> {
-        self.gas_budget_manager
-            .read()
-            .await
-            .reserve_gas(agent, gas)
-            .await
+    pub async fn agent_call_cap_status(&self, agent: &WebID) -> Option<AgentCallCapStatus> {
+        self.call_cap_manager.read().await.agent_status(agent).await
     }
 
-    /// If actual < reserved, the difference is refunded.
+    /// Reset every registered cap to its ceiling (one regulation tick).
     ///
     /// expect: "The system enforces energy homeostasis through gas budget membrane regulation"
-    pub async fn settle_gas(
-        &self,
-        agent: &WebID,
-        reserved_gas: GasCost,
-        actual_gas: GasCost,
-    ) -> Result<GasCost, GasError> {
-        self.gas_budget_manager
-            .read()
-            .await
-            .settle_gas(agent, reserved_gas, actual_gas)
-            .await
+    pub async fn reset_all_caps(&self) {
+        self.call_cap_manager.read().await.reset_all().await;
     }
 
-    /// For estimated cost, prefer `reserve_gas` + `settle_gas`.
+    /// Credit `amount` calls to an agent (used by `CuratorDirective::ReplenishBudget`).
     ///
     /// expect: "The system enforces energy homeostasis through gas budget membrane regulation"
-    pub async fn acquire_budget(&self, agent: &WebID, gas: GasCost) -> Result<GasCost, GasError> {
-        self.gas_budget_manager
+    pub async fn credit_calls(&self, agent: &WebID, amount: u32) {
+        self.call_cap_manager
             .read()
             .await
-            .acquire_budget(agent, gas)
-            .await
-    }
-
-    /// Replenish all registered agent gas budgets on the current cycle.
-    ///
-    /// expect: "The system enforces energy homeostasis through gas budget membrane regulation"
-    pub async fn replenish_all_budgets(&self) {
-        self.gas_budget_manager
-            .read()
-            .await
-            .replenish_all_budgets()
-            .await;
-    }
-
-    /// Used by CuratorDirective::ReplenishBudget.
-    ///
-    /// expect: "The system enforces energy homeostasis through gas budget membrane regulation"
-    pub async fn replenish_agent_budget(&self, agent: &WebID, amount: GasCost) {
-        self.gas_budget_manager
-            .read()
-            .await
-            .replenish_agent_budget(agent, amount)
+            .credit(agent, amount)
             .await;
     }
 
@@ -662,12 +666,8 @@ impl CyberneticsLoop {
                 tracing::info!(target: "reg.cybernetics", processed = cd_processed, "Processed direct curator directives");
             }
         }
-
-        self.gas_budget_manager
-            .read()
-            .await
-            .expire_overrides()
-            .await;
+        // Curation overrides persist until explicitly cleared via
+        // `CuratorDirective::ClearOverride` — there is no TTL auto-expiry.
     }
 
     async fn handle_curation_directive(&self, directive: CuratorDirective) {
@@ -698,14 +698,14 @@ impl CyberneticsLoop {
                 new_threshold,
             } => self.apply_calibrate_threshold(&domain, new_threshold).await,
             CuratorDirective::OverrideEnergyBudget { agent, new_budget } => {
-                self.apply_override_gas_budget(agent, new_budget).await
+                self.apply_override_cap(agent, new_budget).await
             }
             CuratorDirective::ClearOverride { agent } => self.apply_clear_override(agent).await,
             CuratorDirective::ReplenishBudget {
                 agent,
                 amount,
-                priority,
-            } => self.apply_replenish_budget(agent, amount, priority).await,
+                priority: _,
+            } => self.apply_credit_calls(agent, amount).await,
             CuratorDirective::UpdateCapabilities {
                 agent,
                 additions,
@@ -736,30 +736,32 @@ impl CyberneticsLoop {
         );
     }
 
-    /// Metacognitive override — recorded in active_overrides so replenish skips it.
-    async fn apply_override_gas_budget(&self, agent: WebID, new_budget: u64) {
-        self.gas_budget_manager
+    /// Curation override: install a new call ceiling for an agent. Survives
+    /// per-tick resets until `apply_clear_override` is called.
+    async fn apply_override_cap(&self, agent: WebID, new_ceiling: u64) {
+        self.call_cap_manager
             .read()
             .await
-            .apply_override_gas_budget(agent, GasCost(new_budget))
+            .apply_override(agent, new_ceiling as u32)
             .await;
     }
 
-    /// Removes agent from active_overrides, resuming normal replenishment.
+    /// Removes a curation override, restoring the agent's original ceiling on the
+    /// next `reset_all_caps`.
     async fn apply_clear_override(&self, agent: WebID) {
-        self.gas_budget_manager
+        self.call_cap_manager
             .read()
             .await
-            .apply_clear_override(agent)
+            .clear_override(agent)
             .await;
     }
 
-    /// Priority-scaled: when priority is provided, replenishment is weighted.
-    async fn apply_replenish_budget(&self, agent: WebID, amount: u64, priority: Option<f64>) {
-        self.gas_budget_manager
+    /// Credit `amount` calls to an agent (curation `ReplenishBudget` directive).
+    async fn apply_credit_calls(&self, agent: WebID, amount: u64) {
+        self.call_cap_manager
             .read()
             .await
-            .apply_replenish_budget(agent, GasCost(amount), priority)
+            .credit(&agent, amount as u32)
             .await;
     }
 
@@ -786,10 +788,10 @@ impl CyberneticsLoop {
     }
 }
 
-#[async_trait::async_trait]
-impl RegulationLoop for CyberneticsLoop {
-    fn id(&self) -> LoopId {
-        LoopId::Cybernetics
+impl CyberneticsLoop {
+    /// Compare: detect deviations from set-points.
+    async fn compare(&self, signals: &[Signal]) -> Vec<Deviation> {
+        signals.iter().filter_map(Deviation::from_signal).collect()
     }
 
     /// Produces signals for: per-agent energy ratio, variety deficit, queue depth,
@@ -801,11 +803,8 @@ impl RegulationLoop for CyberneticsLoop {
         let mut signals = Vec::new();
 
         // All sensing is now done through the SensorBus.
-        // Wallet balance ratio, energy remaining, variety deficit, wallet key health,
-        // and tool reliability are all sensed by registered Sensor implementations.
-        //
-        // The inline wallet ratio sensing that was here has been migrated to
-        // WalletBalanceRatioSensor (v0.32.0) — see ADR-056.
+        // Energy remaining, variety deficit, and tool reliability are all sensed
+        // by registered Sensor implementations.
 
         // Append signals from pluggable sensor providers.
         let registry_signals = self.sensor_registry.sense_all(LoopId::Cybernetics).await;
@@ -863,46 +862,33 @@ impl RegulationLoop for CyberneticsLoop {
     }
 
     async fn act(&self, actions: &[RegulatoryAction]) {
-        self.replenish_all_budgets().await;
+        self.reset_all_caps().await;
 
-        // E04: Detect and escalate budget exhaustion via algedonic pathway
+        // E04: Detect and escalate call-cap exhaustion via the algedonic pathway.
+        // A cap is exhausted when its remaining count hit zero this tick.
         {
             let statuses = self
-                .gas_budget_manager
+                .call_cap_manager
                 .read()
                 .await
                 .all_agent_statuses()
                 .await;
-            let gas_exhausted: Vec<_> = statuses
+            let exhausted: Vec<_> = statuses
                 .into_iter()
-                .filter(|(_, s)| s.remaining.0 == 0 && s.hard_limit)
+                .filter(|(_, s)| s.remaining == 0)
                 .collect();
 
-            // G10: Wallet-backed budget exhaustion
-            let wallet_exhausted = self
-                .gas_budget_manager
-                .read()
-                .await
-                .wallet_exhausted_agents()
-                .await;
-
-            let alert_entries: Vec<(String, String)> = gas_exhausted
+            let alert_entries: Vec<(String, String)> = exhausted
                 .iter()
                 .map(|(agent, status)| {
                     (
-                        format!("gas_budget:{agent}"),
+                        format!("call_cap:{agent}"),
                         format!(
-                            "Agent {agent} gas budget exhausted (cap: {}, remaining: 0)",
-                            status.cap.0
+                            "Agent {agent} call cap exhausted (ceiling: {}, remaining: 0)",
+                            status.ceiling
                         ),
                     )
                 })
-                .chain(wallet_exhausted.iter().map(|agent| {
-                    (
-                        format!("wallet_budget:{agent}"),
-                        format!("Agent {agent} wallet balance exhausted"),
-                    )
-                }))
                 .collect();
 
             for (domain, message) in &alert_entries {
@@ -921,8 +907,13 @@ impl RegulationLoop for CyberneticsLoop {
                     false
                 };
                 if !sent {
-                    tracing::warn!(target: "reg.alert", domain = %alert.domain, "Well exhaustion alert send failed or channel not connected");
+                    tracing::warn!(target: "reg.alert", domain = %alert.domain, "call-cap exhaustion alert send failed or channel not connected");
                 }
+                // Persist to the reviewable escalation queue unconditionally —
+                // the queue is the primary durable path for alert review, not
+                // a fallback (the RegulationArchive below is the fallback for
+                // restart durability when the live channel is down).
+                self.persist_alert_to_queue(&alert, None);
                 if !sent && let Some(ref sink) = self.event_sink {
                     let event = RegulationRecord::new(
                         WebID::from_persona(b"regulation"),
@@ -937,190 +928,216 @@ impl RegulationLoop for CyberneticsLoop {
                         0,
                     );
                     if let Err(e) = sink.persist(&event) {
-                        tracing::error!(target: "reg.cybernetics", error = %e, "Failed to persist budget exhaustion alert");
+                        tracing::error!(target: "reg.cybernetics", error = %e, "Failed to persist call-cap exhaustion alert");
                     }
                 }
             }
         }
 
-        // E02: Persist budgets + Well state after each replenishment cycle
-        if let Some(ref path) = self.budget_persistence_path {
-            let mut wrapper = serde_json::json!({
-                "version": 1,
-            });
-            {
-                let gbm = self.gas_budget_manager.read().await;
-                let budgets = gbm.gas_budgets().await;
-                match serde_json::to_value(&*budgets) {
-                    Ok(v) => wrapper["budgets"] = v,
+        // E02: Persist call caps after each reset cycle.
+        // Persistence failures log and fall through — regulation actions
+        // (algedonic alerts, action dispatch) must NOT be skipped because a
+        // transient I/O error prevented writing caps.
+        'persist: {
+            if let Some(ref path) = self.budget_persistence_path {
+                let mut wrapper = serde_json::json!({
+                    "version": 2,
+                });
+                {
+                    let mgr = self.call_cap_manager.read().await;
+                    let caps = mgr.caps().await;
+                    match serde_json::to_value(&*caps) {
+                        Ok(v) => wrapper["budgets"] = v,
+                        Err(e) => {
+                            tracing::error!(target: "reg.cybernetics", error = %e, "Failed to serialize call caps — skipping persistence");
+                            break 'persist;
+                        }
+                    }
+                }
+                {
+                    if let Some(ref stats) = self.tool_stats {
+                        wrapper["tool_stats"] = stats.save_state().await;
+                    }
+                }
+                let json = match serde_json::to_string_pretty(&wrapper) {
+                    Ok(s) => s,
                     Err(e) => {
-                        tracing::error!(target: "reg.cybernetics", error = %e, "Failed to serialize gas budgets — skipping persistence");
-                        return;
+                        tracing::error!(target: "reg.cybernetics", error = %e, "Failed to serialize cap wrapper — skipping persistence");
+                        break 'persist;
                     }
+                };
+                if let Some(parent) = path.parent()
+                    && let Err(e) = tokio::fs::create_dir_all(parent).await
+                {
+                    tracing::error!(target: "reg.cybernetics", path = %parent.display(), error = %e, "Failed to create cap persistence directory");
+                    break 'persist;
+                }
+                if let Err(e) = tokio::fs::write(path, &json).await {
+                    tracing::error!(target: "reg.cybernetics", path = %path.display(), error = %e, "Failed to persist call caps");
                 }
             }
-            {
-                let wells = self.well_manager.read().await;
-                wrapper["well"] = wells.save_state();
-            }
-            {
-                if let Some(ref stats) = self.tool_stats {
-                    wrapper["tool_stats"] = stats.save_state().await;
-                }
-            }
-            let json = match serde_json::to_string_pretty(&wrapper) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(target: "reg.cybernetics", error = %e, "Failed to serialize budget wrapper — skipping persistence");
-                    return;
-                }
-            };
-            if let Some(parent) = path.parent()
-                && let Err(e) = tokio::fs::create_dir_all(parent).await
-            {
-                tracing::error!(target: "reg.cybernetics", path = %parent.display(), error = %e, "Failed to create budget persistence directory");
-                return;
-            }
-            if let Err(e) = tokio::fs::write(path, &json).await {
-                tracing::error!(target: "reg.cybernetics", path = %path.display(), error = %e, "Failed to persist gas budgets");
-            }
-        }
-
-        // Replenish Wells on each regulation cycle
-        {
-            let mut wells = self.well_manager.write().await;
-            wells.replenish_all();
-        }
-
-        // 1.8: Well exhaustion → algedonic alert (with dampening)
-        {
-            let mut wells = self.well_manager.write().await;
-            if wells.default_well_exhausted() {
-                if !wells.was_already_exhausted {
-                    wells.was_already_exhausted = true;
-                    let alert = RuntimeAlert {
-                        domain: "well".into(),
-                        deficit: 1,
-                        threshold: 1,
-                        severity: AlertSeverity::Critical,
-                        escalated: true,
-                        timestamp: chrono::Utc::now(),
-                        message: "Default Well exhausted — agents will be blocked".into(),
-                    };
-                    if let Some(ref tx) = self.alerts_tx
-                        && tx.send(CurationInput::Alert(alert)).is_err()
-                    {
-                        tracing::warn!(target: "reg.alert", "Well exhaustion alert send failed — channel closed");
-                    }
-                }
-            } else {
-                wells.was_already_exhausted = false;
-            }
-        }
-        // Note: Auto-draw from Well is now synchronous — handled in WalletManager::spend().
-        let has_energy_depletion = actions
-            .iter()
-            .any(|a| a.parameters.reason == "energy_budget_low");
-        if has_energy_depletion {
-            let ledger = self.ledger.read().await;
-            let worst_ratio = actions
-                .iter()
-                .filter_map(|a| a.parameters.data.remaining_ratio())
-                .fold(1.0, f64::min);
-            ledger
-                .emit_backpressure(BackpressureSignal {
-                    source: LoopId::Cybernetics,
-                    reason: "energy_budget_depletion".into(),
-                    severity: 1.0 - worst_ratio,
-                })
-                .await;
         }
         if actions.len() > self.max_iterations as usize {
             tracing::warn!(target: "reg.cybernetics", action_count = actions.len(), max_iterations = self.max_iterations, "Cascade detected: action count exceeds max_iterations");
         }
         for action in actions {
-            tracing::info!(target: "reg.cybernetics", action_type = ?action.action_type, target_loop = %action.target, "Cybernetics Loop efferent signal");
-            let target_id = action.target;
+            self.route_action_as_alert(&action).await;
+        }
+    }
 
-            // Send CurationInput::Alert on direct alerts channel.
-            // Fallback: persist to RegulationArchive when channel is down (Curator inactive).
-            // Per design decision: the algedonic system must always be connected
-            // to the Curator agent — persistence is the bridge when the
-            // live channel has no receiver.
-            if action.action_type == ActionType::Escalate && target_id == LoopId::Curation {
-                let (deficit, threshold) = extract_deficit_threshold(&action.parameters.data);
-                let domain = String::new();
-                let alert = RuntimeAlert {
-                    domain,
-                    deficit,
-                    threshold,
-                    severity: AlertSeverity::Critical,
-                    escalated: true,
-                    timestamp: chrono::Utc::now(),
-                    message: format!(
-                        "Variety deficit {} exceeds threshold {}",
-                        deficit, threshold
-                    ),
-                };
+    /// Convert a single `RegulatoryAction` into a `RuntimeAlert` and route it
+    /// through the three-tier alert path (escalation queue → live channel →
+    /// archive fallback → email fallback).
+    ///
+    /// Design decision (2026-08-06): the cybernetics loop is a sensor+advisor,
+    /// not an actuator. All computed actions are converted to Escalate alerts
+    /// routed to the Curator/human. Actions that would have been direct
+    /// efferent signals (Throttle, CircuitBreak, AdjustEnergyBudget, etc.)
+    /// carry an `efferent_action` field in the alert data so the Curator sees
+    /// what the loop would have done — but the actuator is not wired. This
+    /// preserves user sovereignty: the human decides whether to apply the
+    /// recommended action, the loop does not act autonomously.
+    ///
+    /// `Notify` actions are skipped — they are observational ("no action
+    /// required, positive signal" per `ActionType::Notify`'s doc). Converting
+    /// them to Critical alerts would be a variety inversion (positive signal
+    /// → critical alert) and would pollute the escalation queue with
+    /// non-actionable noise.
+    ///
+    /// See `kask/docs/diataxis/hkask-regulation/reference.md` §
+    /// "Efferent action dispatch" for the full rationale.
+    async fn route_action_as_alert(&self, action: &RegulatoryAction) {
+        let target_id = action.target;
 
-                // Primary path: live channel to Curator's inbox
-                let sent_live = if let Some(ref alerts_tx) = self.alerts_tx {
-                    match alerts_tx.send(CurationInput::Alert(alert.clone())) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            tracing::warn!(target: "reg.cybernetics", error = %e, "Failed to send CurationInput::Alert via live channel — falling back to persistence");
-                            false
-                        }
-                    }
-                } else {
-                    tracing::warn!(target: "reg.cybernetics", "Alerts channel not connected — falling back to persistence. Wire with_alerts_channel() for live delivery.");
+        if action.action_type == ActionType::Notify {
+            tracing::info!(
+                target: "reg.cybernetics",
+                action_type = ?action.action_type,
+                target_loop = %action.target,
+                "Notify action — observational, not routed as alert"
+            );
+            return;
+        }
+
+        let is_native_escalate =
+            action.action_type == ActionType::Escalate && target_id == LoopId::Curation;
+        let efferent_action = if is_native_escalate {
+            None
+        } else {
+            Some(action.action_type.as_str())
+        };
+
+        tracing::info!(
+            target: "reg.cybernetics",
+            action_type = ?action.action_type,
+            target_loop = %action.target,
+            efferent = ?efferent_action,
+            "Cybernetics Loop efferent signal (routed as Escalate{})",
+            if efferent_action.is_some() { " — efferent not wired" } else { "" }
+        );
+
+        // Build the alert. For native Escalate actions (variety deficit,
+        // wallet balance, etc.), extract the deficit/threshold from the
+        // typed data. For converted efferent actions, synthesize a
+        // deficit of 1 and threshold of 1 — the alert's purpose is
+        // advisory, not quantitative.
+        let (deficit, threshold) = if is_native_escalate {
+            extract_deficit_threshold(&action.parameters.data)
+        } else {
+            (1, 1)
+        };
+        let domain = if is_native_escalate {
+            String::new()
+        } else {
+            format!("efferent:{}", action.action_type.as_str())
+        };
+        let message = if is_native_escalate {
+            format!(
+                "Variety deficit {} exceeds threshold {}",
+                deficit, threshold
+            )
+        } else {
+            format!(
+                "Efferent action {} (target: {}) recommended but not wired — reason: {}",
+                action.action_type.as_str(),
+                action.target,
+                action.parameters.reason
+            )
+        };
+        let alert = RuntimeAlert {
+            domain,
+            deficit,
+            threshold,
+            severity: AlertSeverity::Critical,
+            escalated: true,
+            timestamp: chrono::Utc::now(),
+            message,
+        };
+
+        // Persist to the reviewable escalation queue unconditionally —
+        // the queue is the primary durable path for alert review, not
+        // a fallback. The RegulationArchive below remains as a
+        // secondary fallback for restart durability when the live
+        // channel is down.
+        self.persist_alert_to_queue(&alert, efferent_action);
+
+        // Primary path: live channel to Curator's inbox
+        let sent_live = if let Some(ref alerts_tx) = self.alerts_tx {
+            match alerts_tx.send(CurationInput::Alert(alert.clone())) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(target: "reg.cybernetics", error = %e, "Failed to send CurationInput::Alert via live channel — falling back to persistence");
                     false
-                };
+                }
+            }
+        } else {
+            tracing::warn!(target: "reg.cybernetics", "Alerts channel not connected — falling back to persistence. Wire with_alerts_channel() for live delivery.");
+            false
+        };
 
-                // Fallback: persist full alert to RegulationArchive for Curator retrieval on next activation
-                if !sent_live {
-                    let mut persisted = false;
-                    if let Some(ref sink) = self.event_sink {
-                        let event = RegulationRecord::new(
-                            WebID::from_persona(b"regulation"),
-                            Span::from_kind(SpanKind::VarietyAlgedonicAlert),
-                            CyclePhase::Act,
-                            serde_json::json!({
-                                "domain": alert.domain,
-                                "deficit": alert.deficit,
-                                "threshold": alert.threshold,
-                                "severity": "Critical",
-                                "escalated": true,
-                                "message": alert.message,
-                                "timestamp": alert.timestamp.to_rfc3339(),
-                            }),
-                            0,
-                        );
-                        match sink.persist(&event) {
-                            Ok(()) => {
-                                persisted = true;
-                                tracing::info!(target: "reg.alert", deficit = deficit, threshold = threshold, "Algedonic alert persisted to RegulationArchive (Curator inbox unavailable)");
-                            }
-                            Err(e) => {
-                                tracing::error!(target: "reg.alert", error = %e, "Failed to persist algedonic alert to archive");
-                            }
-                        }
+        // Fallback: persist full alert to RegulationArchive for Curator retrieval on next activation
+        if !sent_live {
+            let mut persisted = false;
+            if let Some(ref sink) = self.event_sink {
+                let event = RegulationRecord::new(
+                    WebID::from_persona(b"regulation"),
+                    Span::from_kind(SpanKind::VarietyAlgedonicAlert),
+                    CyclePhase::Act,
+                    serde_json::json!({
+                        "domain": alert.domain,
+                        "deficit": alert.deficit,
+                        "threshold": alert.threshold,
+                        "severity": "Critical",
+                        "escalated": true,
+                        "message": alert.message,
+                        "efferent_action": efferent_action,
+                        "timestamp": alert.timestamp.to_rfc3339(),
+                    }),
+                    0,
+                );
+                match sink.persist(&event) {
+                    Ok(()) => {
+                        persisted = true;
+                        tracing::info!(target: "reg.alert", deficit = deficit, threshold = threshold, "Algedonic alert persisted to RegulationArchive (Curator inbox unavailable)");
                     }
-
-                    // Email notification: fires when live channel is down, regardless of
-                    // archive outcome. Serves as notification (archive succeeded) or last
-                    // resort (archive failed/unavailable).
-                    if let Some(ref email_sink) = self.alert_email_sink {
-                        email_sink.send_alert_email(&alert);
-                        if persisted {
-                            tracing::info!(target: "reg.alert", deficit = deficit, threshold = threshold, "Algedonic alert emailed as notification (live channel down, archive persisted)");
-                        } else {
-                            tracing::info!(target: "reg.alert", deficit = deficit, threshold = threshold, "Algedonic alert emailed as last resort (archive unavailable)");
-                        }
-                    } else if !persisted {
-                        tracing::error!(target: "reg.alert", deficit = deficit, threshold = threshold, "CRITICAL: Algedonic alert LOST - no live channel, event_sink, or email sink");
+                    Err(e) => {
+                        tracing::error!(target: "reg.alert", error = %e, "Failed to persist algedonic alert to archive");
                     }
                 }
+            }
+
+            // Email notification: fires when live channel is down, regardless of
+            // archive outcome. Serves as notification (archive succeeded) or last
+            // resort (archive failed/unavailable).
+            if let Some(ref email_sink) = self.alert_email_sink {
+                email_sink.send_alert_email(&alert);
+                if persisted {
+                    tracing::info!(target: "reg.alert", deficit = deficit, threshold = threshold, "Algedonic alert emailed as notification (live channel down, archive persisted)");
+                } else {
+                    tracing::info!(target: "reg.alert", deficit = deficit, threshold = threshold, "Algedonic alert emailed as last resort (archive unavailable)");
+                }
+            } else if !persisted {
+                tracing::error!(target: "reg.alert", deficit = deficit, threshold = threshold, "CRITICAL: Algedonic alert LOST - no live channel, event_sink, or email sink");
             }
         }
     }
@@ -1138,7 +1155,7 @@ impl RegulationLoop for CyberneticsLoop {
 
         // Re-sense current state for comparison.
         let budget_statuses = self
-            .gas_budget_manager
+            .call_cap_manager
             .read()
             .await
             .all_agent_statuses()
@@ -1169,7 +1186,7 @@ impl RegulationLoop for CyberneticsLoop {
             let after_val = match metric {
                 SignalMetric::EnergyRemaining => budget_statuses
                     .iter()
-                    .map(|(_, s)| s.remaining.0 as f64 / s.cap.0.max(1) as f64)
+                    .map(|(_, s)| s.remaining as f64 / s.ceiling.max(1) as f64)
                     .fold(1.0, f64::min),
                 SignalMetric::VarietyDeficit => current_deficit,
                 _ => continue,
@@ -1227,20 +1244,22 @@ impl RegulationLoop for CyberneticsLoop {
                     }),
                 )
                 .await;
+                let alert = RuntimeAlert {
+                    domain: format!("regulatory_plateau:{}", metric.as_str()),
+                    deficit: 1,
+                    threshold: 1,
+                    severity: AlertSeverity::Warning,
+                    escalated: true,
+                    timestamp: chrono::Utc::now(),
+                    message: format!(
+                        "Regulatory plateau: {} via {:?} has been rejected for {threshold} consecutive cycles",
+                        metric.as_str(),
+                        action.action_type,
+                    ),
+                };
+                // Persist to the reviewable escalation queue unconditionally.
+                self.persist_alert_to_queue(&alert, None);
                 if let Some(ref tx) = self.alerts_tx {
-                    let alert = RuntimeAlert {
-                        domain: format!("regulatory_plateau:{}", metric.as_str()),
-                        deficit: 1,
-                        threshold: 1,
-                        severity: AlertSeverity::Warning,
-                        escalated: true,
-                        timestamp: chrono::Utc::now(),
-                        message: format!(
-                            "Regulatory plateau: {} via {:?} has been rejected for {threshold} consecutive cycles",
-                            metric.as_str(),
-                            action.action_type,
-                        ),
-                    };
                     if tx.send(CurationInput::Alert(alert)).is_err() {
                         tracing::warn!(target: "reg.alert", "Plateau alert send failed — channel closed");
                     }
@@ -1265,22 +1284,24 @@ impl RegulationLoop for CyberneticsLoop {
                     }),
                 )
                 .await;
+                let alert = RuntimeAlert {
+                    domain: format!("action_blocked:{}", metric.as_str()),
+                    deficit: 1,
+                    threshold: 1,
+                    severity: AlertSeverity::Critical,
+                    escalated: true,
+                    timestamp: chrono::Utc::now(),
+                    message: format!(
+                        "ActionDecision::Block: {} on {} caused {:.1}% worsening (threshold: {:.1}%)",
+                        action.action_type.as_str(),
+                        metric.as_str(),
+                        worsening * 100.0,
+                        block_worsening_ratio * 100.0,
+                    ),
+                };
+                // Persist to the reviewable escalation queue unconditionally.
+                self.persist_alert_to_queue(&alert, None);
                 if let Some(ref tx) = self.alerts_tx {
-                    let alert = RuntimeAlert {
-                        domain: format!("action_blocked:{}", metric.as_str()),
-                        deficit: 1,
-                        threshold: 1,
-                        severity: AlertSeverity::Critical,
-                        escalated: true,
-                        timestamp: chrono::Utc::now(),
-                        message: format!(
-                            "ActionDecision::Block: {} on {} caused {:.1}% worsening (threshold: {:.1}%)",
-                            action.action_type.as_str(),
-                            metric.as_str(),
-                            worsening * 100.0,
-                            block_worsening_ratio * 100.0,
-                        ),
-                    };
                     if tx.send(CurationInput::Alert(alert)).is_err() {
                         tracing::warn!(target: "reg.alert", "Block alert send failed — channel closed");
                     }
@@ -1316,13 +1337,23 @@ impl RegulationLoop for CyberneticsLoop {
 
     /// Full regulation cycle with loop-quality telemetry.
     ///
-    /// Overrides the default `tick()` to measure elapsed time and compute
-    /// `LoopMetrics` metrics (delay_ms, gain, fidelity_score, effectiveness_score)
-    /// after each cycle. Calls `verify_impact` to close the feedback loop.
-    async fn tick(&self) {
+    /// Measures elapsed time and computes `LoopMetrics` metrics (delay_ms,
+    /// gain, fidelity_score, effectiveness_score) after each cycle. Calls
+    /// `verify_impact` to close the feedback loop.
+    pub async fn tick(&self) {
         let start = std::time::Instant::now();
 
         let signals = self.sense().await;
+        // Emit a runtime-posture signal span so the runtime-posture-monitor
+        // skill (and any downstream observer) has a production telemetry
+        // substrate even when the skill cascade is not explicitly invoked.
+        // The namespace `reg.runtime.select` is registered in
+        // CANONICAL_NAMESPACES; without this emitter it would be skill-only.
+        tracing::info!(
+            target: "reg.runtime.select",
+            signal_count = signals.len(),
+            "REG"
+        );
         let deviations = self.compare(&signals).await;
         let actions = self.compute(&deviations).await;
         self.act(&actions).await;
@@ -1453,31 +1484,6 @@ impl RegulationLoop for CyberneticsLoop {
     }
 }
 
-/// Adapt `Arc<RwLock<CyberneticsLoop>>` for use as `Arc<dyn RegulationLoop>` in LoopScheduler.
-/// Eliminates the pass-through `CyberneticsLoopHandle` struct per Prohibition #4.
-#[async_trait::async_trait]
-impl RegulationLoop for tokio::sync::RwLock<CyberneticsLoop> {
-    fn id(&self) -> LoopId {
-        LoopId::Cybernetics
-    }
-
-    async fn sense(&self) -> Vec<Signal> {
-        self.read().await.sense().await
-    }
-
-    async fn compute(&self, deviations: &[Deviation]) -> Vec<RegulatoryAction> {
-        self.read().await.compute(deviations).await
-    }
-
-    async fn act(&self, actions: &[RegulatoryAction]) {
-        self.read().await.act(actions).await
-    }
-
-    async fn verify_impact(&self, previous_actions: &[RegulatoryAction]) -> Vec<ImpactReport> {
-        self.read().await.verify_impact(previous_actions).await
-    }
-}
-
 impl CyberneticsLoop {
     /// Build a `RegulatoryAction` from a `ProposedAction` returned by the regulation policy.
     ///
@@ -1489,22 +1495,22 @@ impl CyberneticsLoop {
         dev: &Deviation,
         proposed: &regulation_policy::ProposedAction,
     ) -> Option<RegulatoryAction> {
-        use ActionType::*;
-        use LoopId::*;
         use SignalMetric::*;
 
         match proposed.reason {
             // -- EnergyRemaining BelowSetPoint ------------------------------
-            "energy_budget_low" => {
+            RegulationReason::EnergyBudgetLow => {
                 if !matches!(
                     self.set_points.inference_throttle_mode,
                     InferenceThrottleMode::Autonomous
                 ) {
                     return None;
                 }
-                let at = self.try_substitute(EnergyRemaining, Throttle).await;
+                let at = self
+                    .try_substitute(EnergyRemaining, proposed.action_type)
+                    .await;
                 Some(RegulatoryAction::with_metric(
-                    Inference,
+                    proposed.target,
                     at,
                     RegulatoryActionParams::with_data(
                         "energy_budget_low",
@@ -1516,7 +1522,7 @@ impl CyberneticsLoop {
                     "energy_remaining".into(),
                 ))
             }
-            "budget_guard_escalation" => {
+            RegulationReason::BudgetGuardEscalation => {
                 let curator_timeout_secs = match self.set_points.inference_throttle_mode {
                     InferenceThrottleMode::CuratorMediated {
                         curator_timeout_secs,
@@ -1526,8 +1532,8 @@ impl CyberneticsLoop {
                 let remaining_ratio = dev.signal.value;
                 let projected_minutes = (remaining_ratio * 60.0) as u64;
                 Some(RegulatoryAction::new(
-                    Curation,
-                    Escalate,
+                    proposed.target,
+                    proposed.action_type,
                     RegulatoryActionParams::with_data(
                         "budget_guard_escalation",
                         RegulationData::BudgetGuardEscalation {
@@ -1554,7 +1560,7 @@ impl CyberneticsLoop {
                     ),
                 ))
             }
-            "energy_depletion_auto_adjust" => {
+            RegulationReason::EnergyDepletionAutoAdjust => {
                 if matches!(
                     self.set_points.inference_throttle_mode,
                     InferenceThrottleMode::Off
@@ -1562,10 +1568,10 @@ impl CyberneticsLoop {
                     return None;
                 }
                 let at = self
-                    .try_substitute(EnergyRemaining, AdjustEnergyBudget)
+                    .try_substitute(EnergyRemaining, proposed.action_type)
                     .await;
                 Some(RegulatoryAction::new(
-                    Cybernetics,
+                    proposed.target,
                     at,
                     RegulatoryActionParams::with_data(
                         "energy_depletion_auto_adjust",
@@ -1577,10 +1583,12 @@ impl CyberneticsLoop {
                 ))
             }
             // -- VarietyDeficit AboveSetPoint -------------------------------
-            "variety_deficit_exceeded" => {
-                let at = self.try_substitute(VarietyDeficit, Escalate).await;
+            RegulationReason::VarietyDeficitExceeded => {
+                let at = self
+                    .try_substitute(VarietyDeficit, proposed.action_type)
+                    .await;
                 Some(RegulatoryAction::new(
-                    Curation,
+                    proposed.target,
                     at,
                     RegulatoryActionParams::with_data(
                         "variety_deficit_exceeded",
@@ -1592,10 +1600,10 @@ impl CyberneticsLoop {
                 ))
             }
             // -- ErrorRate AboveSetPoint ------------------------------------
-            "error_rate_exceeded" => {
-                let at = self.try_substitute(ErrorRate, CircuitBreak).await;
+            RegulationReason::ErrorRateExceeded => {
+                let at = self.try_substitute(ErrorRate, proposed.action_type).await;
                 Some(RegulatoryAction::new(
-                    Inference,
+                    proposed.target,
                     at,
                     RegulatoryActionParams::with_data(
                         "error_rate_exceeded",
@@ -1607,10 +1615,12 @@ impl CyberneticsLoop {
                 ))
             }
             // -- ConnectorLatency AboveSetPoint -----------------------------
-            "connector_latency_exceeded" => {
-                let at = self.try_substitute(ConnectorLatency, Throttle).await;
+            RegulationReason::ConnectorLatencyExceeded => {
+                let at = self
+                    .try_substitute(ConnectorLatency, proposed.action_type)
+                    .await;
                 Some(RegulatoryAction::new(
-                    Cybernetics,
+                    proposed.target,
                     at,
                     RegulatoryActionParams::with_data(
                         "connector_latency_exceeded",
@@ -1622,16 +1632,18 @@ impl CyberneticsLoop {
                 ))
             }
             // -- CommunicationQueueDepth AboveSetPoint ----------------------
-            "communication_backpressure" => {
+            RegulationReason::CommunicationBackpressure => {
                 tracing::info!(
                     target: "reg.cybernetics.backpressure",
                     queue_depth = dev.signal.value,
                     threshold = dev.signal.set_point,
                     "Communication queue depth exceeded backpressure threshold"
                 );
-                let at = self.try_substitute(CommunicationQueueDepth, Throttle).await;
+                let at = self
+                    .try_substitute(CommunicationQueueDepth, proposed.action_type)
+                    .await;
                 Some(RegulatoryAction::new(
-                    Cybernetics,
+                    proposed.target,
                     at,
                     RegulatoryActionParams::with_data(
                         "communication_backpressure",
@@ -1643,7 +1655,7 @@ impl CyberneticsLoop {
                 ))
             }
             // -- WalletBalanceRatio BelowSetPoint ---------------------------
-            "wallet_balance_low" => {
+            RegulationReason::WalletBalanceLow => {
                 let severity = if dev.signal.value <= 0.0 {
                     "critical"
                 } else {
@@ -1655,9 +1667,11 @@ impl CyberneticsLoop {
                     severity = severity,
                     "Wallet balance alert"
                 );
-                let at = self.try_substitute(WalletBalanceRatio, Escalate).await;
+                let at = self
+                    .try_substitute(WalletBalanceRatio, proposed.action_type)
+                    .await;
                 Some(RegulatoryAction::new(
-                    Curation,
+                    proposed.target,
                     at,
                     RegulatoryActionParams::with_data(
                         "wallet_balance_low",
@@ -1670,14 +1684,14 @@ impl CyberneticsLoop {
                 ))
             }
             // -- WalletKeyHealth AboveSetPoint ------------------------------
-            "wallet_key_unhealthy" => {
+            RegulationReason::WalletKeyUnhealthy => {
                 tracing::info!(
                     target: "reg.wallet",
                     "API key health alert — exhausted or expired"
                 );
                 Some(RegulatoryAction::new(
-                    Curation,
-                    Escalate,
+                    proposed.target,
+                    proposed.action_type,
                     RegulatoryActionParams::with_data(
                         "wallet_key_unhealthy",
                         RegulationData::WalletKeyUnhealthy {
@@ -1688,7 +1702,7 @@ impl CyberneticsLoop {
                 ))
             }
             // -- SeamCoverage BelowSetPoint ---------------------------------
-            "seam_coverage_degraded" => {
+            RegulationReason::SeamCoverageDegraded => {
                 let drop_magnitude = dev.signal.set_point - dev.signal.value;
                 let severity = if drop_magnitude > 5.0 {
                     "critical"
@@ -1704,8 +1718,8 @@ impl CyberneticsLoop {
                     "Public seam coverage degraded — seam watcher alert"
                 );
                 Some(RegulatoryAction::new(
-                    Curation,
-                    Escalate,
+                    proposed.target,
+                    proposed.action_type,
                     RegulatoryActionParams::with_data(
                         "seam_coverage_degraded",
                         RegulationData::SeamCoverageDegraded {
@@ -1718,7 +1732,7 @@ impl CyberneticsLoop {
                 ))
             }
             // -- SeamCoverage AboveSetPoint ---------------------------------
-            "seam_coverage_improved" => {
+            RegulationReason::SeamCoverageImproved => {
                 let improvement = dev.signal.value - dev.signal.set_point;
                 tracing::info!(
                     target: "hkask.architecture.seam",
@@ -1728,8 +1742,8 @@ impl CyberneticsLoop {
                     "Public seam coverage improved — seam watcher positive signal"
                 );
                 Some(RegulatoryAction::new(
-                    Curation,
-                    Notify,
+                    proposed.target,
+                    proposed.action_type,
                     RegulatoryActionParams::with_data(
                         "seam_coverage_improved",
                         RegulationData::SeamCoverageImproved {
@@ -1741,16 +1755,18 @@ impl CyberneticsLoop {
                 ))
             }
             // -- ToolReliability BelowSetPoint ------------------------------
-            "tool_reliability_degraded" => {
+            RegulationReason::ToolReliabilityDegraded => {
                 tracing::warn!(
                     target: "reg.tool",
                     reliability = dev.signal.value,
                     set_point = dev.signal.set_point,
                     "Tool reliability degraded — success rate below threshold"
                 );
-                let at = self.try_substitute(ToolReliability, Escalate).await;
+                let at = self
+                    .try_substitute(ToolReliability, proposed.action_type)
+                    .await;
                 Some(RegulatoryAction::new(
-                    Curation,
+                    proposed.target,
                     at,
                     RegulatoryActionParams::with_data(
                         "tool_reliability_degraded",
@@ -1764,8 +1780,8 @@ impl CyberneticsLoop {
             _ => {
                 tracing::debug!(
                     target: "reg.outcome",
-                    reason = proposed.reason,
-                    "Unknown regulation reason — no action built"
+                    reason = proposed.reason.as_str(),
+                    "Unhandled regulation reason — no action built"
                 );
                 None
             }
@@ -1800,6 +1816,7 @@ impl CyberneticsLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::strategy::Strategy;
 
     #[tokio::test]
     async fn new_loop_starts_with_default_quality() {
@@ -1823,5 +1840,305 @@ mod tests {
             q.gain >= 0.0 && q.fidelity_score >= 0.0,
             "quality should be computed after tick"
         );
+    }
+
+    /// A capturing `AlertEscalationSink` for testing the escalation-queue
+    /// wiring. Records every `persist_alert` call so the test can assert the
+    /// alert reached the reviewable backlog.
+    struct CapturingEscalationSink {
+        calls: std::sync::Mutex<Vec<(String, f64, String)>>,
+    }
+
+    impl CapturingEscalationSink {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<(String, f64, String)> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn clear(&self) {
+            self.calls.lock().unwrap().clear();
+        }
+    }
+
+    impl crate::algedonic::AlertEscalationSink for CapturingEscalationSink {
+        fn persist_alert(&self, output: &str, confidence: f64, error_context: &str) {
+            self.calls.lock().unwrap().push((
+                output.to_string(),
+                confidence,
+                error_context.to_string(),
+            ));
+        }
+    }
+
+    /// `persist_alert_to_queue` must write to the `AlertEscalationSink` when
+    /// wired. This pins the Store seam: if the sink call is dropped or guarded
+    /// by the wrong condition, the alert never reaches the reviewable backlog
+    /// and `curator_escalations` returns `count: 0` — the loop is open.
+    #[tokio::test]
+    async fn persist_alert_to_queue_writes_to_escalation_sink() {
+        let ledger = Arc::new(RwLock::new(RegulationLedger::with_threshold(100)));
+        let sink = Arc::new(CapturingEscalationSink::new());
+        let loop_instance = CyberneticsLoop::new(ledger).with_alert_escalation_sink(
+            sink.clone() as Arc<dyn crate::algedonic::AlertEscalationSink>
+        );
+
+        let critical_alert = RuntimeAlert {
+            domain: "test_domain".to_string(),
+            deficit: 150,
+            threshold: 100,
+            severity: AlertSeverity::Critical,
+            escalated: true,
+            timestamp: chrono::Utc::now(),
+            message: "Critical test alert".to_string(),
+        };
+        loop_instance.persist_alert_to_queue(&critical_alert, None);
+
+        let warning_alert = RuntimeAlert {
+            domain: "test_domain".to_string(),
+            deficit: 60,
+            threshold: 100,
+            severity: AlertSeverity::Warning,
+            escalated: true,
+            timestamp: chrono::Utc::now(),
+            message: "Warning test alert".to_string(),
+        };
+        loop_instance.persist_alert_to_queue(&warning_alert, None);
+
+        let calls = sink.calls();
+        assert_eq!(calls.len(), 2, "both alerts must reach the escalation sink");
+
+        // Critical alert: confidence 1.0, message preserved
+        assert_eq!(calls[0].0, "Critical test alert");
+        assert!(
+            (calls[0].1 - 1.0).abs() < f64::EPSILON,
+            "critical confidence must be 1.0"
+        );
+        assert!(
+            calls[0].2.contains("\"severity\":\"Critical\""),
+            "error_context must carry severity"
+        );
+        assert!(
+            calls[0].2.contains("\"domain\":\"test_domain\""),
+            "error_context must carry domain"
+        );
+
+        // Warning alert: confidence 0.5
+        assert_eq!(calls[1].0, "Warning test alert");
+        assert!(
+            (calls[1].1 - 0.5).abs() < f64::EPSILON,
+            "warning confidence must be 0.5"
+        );
+        assert!(
+            calls[1].2.contains("\"severity\":\"Warning\""),
+            "error_context must carry severity"
+        );
+    }
+
+    /// When no `AlertEscalationSink` is wired, `persist_alert_to_queue` must
+    /// be a no-op (not panic). This pins the best-effort contract: a missing
+    /// sink never breaks the regulation loop.
+    #[tokio::test]
+    async fn persist_alert_to_queue_no_op_when_sink_absent() {
+        let ledger = Arc::new(RwLock::new(RegulationLedger::with_threshold(100)));
+        let loop_instance = CyberneticsLoop::new(ledger);
+
+        let alert = RuntimeAlert {
+            domain: "test_domain".to_string(),
+            deficit: 150,
+            threshold: 100,
+            severity: AlertSeverity::Critical,
+            escalated: true,
+            timestamp: chrono::Utc::now(),
+            message: "Critical test alert".to_string(),
+        };
+        // Must not panic — the sink is None.
+        loop_instance.persist_alert_to_queue(&alert, None);
+    }
+
+    // ── Property tests ──────────────────────────────────────────────────
+    //
+    // The unit tests above pin specific values (Critical → 1.0, Warning →
+    // 0.5, specific domain strings). Property tests verify the universal
+    // invariants hold across the full input space — any domain, any deficit,
+    // any threshold, any severity, any escalated flag. This catches edge
+    // cases the static tests miss (e.g. empty domain, zero threshold, very
+    // large deficit, Info severity with escalated=true).
+
+    /// Strategy for generating arbitrary `RuntimeAlert` values across the
+    /// full input space. Generates non-empty domains (the `RuntimeAlert::new`
+    /// constructor rejects empty domains, but `persist_alert_to_queue` takes a
+    /// constructed `RuntimeAlert` directly, so we test all non-empty strings).
+    fn arb_runtime_alert() -> proptest::prelude::BoxedStrategy<RuntimeAlert> {
+        use proptest::prelude::*;
+        (
+            "[a-z_][a-z0-9_/]{0,30}",
+            0u64..=10_000,
+            1u64..=10_000, // threshold > 0 (RuntimeAlert::new rejects 0)
+            proptest::sample::select(&[
+                AlertSeverity::Info,
+                AlertSeverity::Warning,
+                AlertSeverity::Critical,
+            ]),
+            any::<bool>(),
+        )
+            .prop_map(
+                |(domain, deficit, threshold, severity, escalated)| RuntimeAlert {
+                    domain,
+                    deficit,
+                    threshold,
+                    severity,
+                    escalated,
+                    timestamp: chrono::Utc::now(),
+                    message: format!(
+                        "Variety deficit {} in domain '{}' (threshold: {})",
+                        deficit, "test", threshold
+                    ),
+                },
+            )
+            .boxed()
+    }
+
+    /// Helper: build a CyberneticsLoop wired with a CapturingEscalationSink.
+    fn loop_with_sink() -> (CyberneticsLoop, Arc<CapturingEscalationSink>) {
+        let ledger = Arc::new(RwLock::new(RegulationLedger::with_threshold(100)));
+        let sink = Arc::new(CapturingEscalationSink::new());
+        let loop_instance = CyberneticsLoop::new(ledger).with_alert_escalation_sink(
+            sink.clone() as Arc<dyn crate::algedonic::AlertEscalationSink>
+        );
+        (loop_instance, sink)
+    }
+
+    // **P4 — panic_freedom:** `persist_alert_to_queue` must never panic on
+    // any `RuntimeAlert` input, whether the sink is wired or absent. This
+    // is the foundational contract — the regulation loop must never break
+    // due to an alert persistence failure.
+    proptest::proptest! {
+        #[test]
+        fn prop_persist_alert_to_queue_never_panics(
+            alert in arb_runtime_alert()
+        ) {
+            let ledger = Arc::new(RwLock::new(RegulationLedger::with_threshold(100)));
+            let (loop_with_sink, _sink) = loop_with_sink();
+            let loop_without_sink = CyberneticsLoop::new(ledger);
+
+            // With sink wired — must not panic
+            loop_with_sink.persist_alert_to_queue(&alert, None);
+            // Without sink — must not panic
+            loop_without_sink.persist_alert_to_queue(&alert, None);
+        }
+    }
+
+    // **P1 — invariant:** Non-escalated alerts (`escalated: false`) are
+    // never persisted to the sink, regardless of severity, deficit, domain,
+    // or threshold. This prevents Info and non-escalated Warning alerts from
+    // polluting the reviewable backlog.
+    proptest::proptest! {
+        #[test]
+        fn prop_non_escalated_alerts_never_persisted(
+            alert in arb_runtime_alert().prop_filter(
+                "only non-escalated alerts",
+                |a| !a.escalated
+            )
+        ) {
+            let (loop_instance, sink) = loop_with_sink();
+            loop_instance.persist_alert_to_queue(&alert, None);
+            assert_eq!(
+                sink.calls().len(),
+                0,
+                "non-escalated alert must not reach the sink"
+            );
+        }
+    }
+
+    // **P1 — invariant:** Escalated alerts (`escalated: true`) are always
+    // persisted when the sink is wired, regardless of severity, deficit,
+    // domain, or threshold. This is the Store seam — if an escalated alert
+    // is dropped, the loop is open.
+    proptest::proptest! {
+        #[test]
+        fn prop_escalated_alerts_always_persisted(
+            alert in arb_runtime_alert().prop_filter(
+                "only escalated alerts",
+                |a| a.escalated
+            )
+        ) {
+            let (loop_instance, sink) = loop_with_sink();
+            sink.clear();
+            loop_instance.persist_alert_to_queue(&alert, None);
+            let calls = sink.calls();
+            assert_eq!(
+                calls.len(),
+                1,
+                "escalated alert must reach the sink exactly once"
+            );
+        }
+    }
+
+    // **P1 — invariant:** The `confidence` passed to the sink is always
+    // exactly 1.0 for Critical alerts and 0.5 for non-Critical (Warning/Info)
+    // escalated alerts. This is the severity→confidence mapping that the
+    // `alert-review` flowdef's triage report relies on to classify alerts.
+    proptest::proptest! {
+        #[test]
+        fn prop_confidence_mapping_is_correct(
+            alert in arb_runtime_alert().prop_filter(
+                "only escalated alerts (non-escalated are skipped)",
+                |a| a.escalated
+            )
+        ) {
+            let (loop_instance, sink) = loop_with_sink();
+            sink.clear();
+            loop_instance.persist_alert_to_queue(&alert, None);
+            let calls = sink.calls();
+            assert_eq!(calls.len(), 1);
+            let expected_confidence = if alert.is_critical() { 1.0 } else { 0.5 };
+            assert!(
+                (calls[0].1 - expected_confidence).abs() < f64::EPSILON,
+                "confidence {:?} != expected {:?} for severity {:?}",
+                calls[0].1, expected_confidence, alert.severity
+            );
+        }
+    }
+
+    // **P1 — invariant:** The `error_context` JSON always contains the
+    // `domain`, `deficit`, `threshold`, `severity`, `escalated`, and
+    // `timestamp` fields. The `alert-review` flowdef's triage report reads
+    // these fields to classify and propose actions — if any is missing, the
+    // report is incomplete.
+    proptest::proptest! {
+        #[test]
+        fn prop_error_context_carries_all_fields(
+            alert in arb_runtime_alert().prop_filter(
+                "only escalated alerts",
+                |a| a.escalated
+            )
+        ) {
+            let (loop_instance, sink) = loop_with_sink();
+            sink.clear();
+            loop_instance.persist_alert_to_queue(&alert, None);
+            let calls = sink.calls();
+            assert_eq!(calls.len(), 1);
+            let ctx = &calls[0].2;
+            // Parse as JSON to verify all fields are present
+            let parsed: serde_json::Value = serde_json::from_str(ctx)
+                .expect("error_context must be valid JSON");
+            assert!(parsed.get("domain").is_some(), "error_context must carry domain");
+            assert!(parsed.get("deficit").is_some(), "error_context must carry deficit");
+            assert!(parsed.get("threshold").is_some(), "error_context must carry threshold");
+            assert!(parsed.get("severity").is_some(), "error_context must carry severity");
+            assert!(parsed.get("escalated").is_some(), "error_context must carry escalated");
+            assert!(parsed.get("efferent_action").is_some(), "error_context must carry efferent_action");
+            assert!(parsed.get("timestamp").is_some(), "error_context must carry timestamp");
+            // The domain must match the alert's domain
+            assert_eq!(
+                parsed.get("domain").and_then(|v| v.as_str()),
+                Some(alert.domain.as_str())
+            );
+        }
     }
 }

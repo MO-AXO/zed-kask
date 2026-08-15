@@ -6,14 +6,16 @@
 # EVA is the canonical data-driven initializer for the Capabilities Researcher
 # adapter. PiSSA is not used because its mutated-base save contract is not
 # portable across the verified environments.
+[inference]
+max_tokens = 2048
 base_model: {{ base_model }}
 adapter: lora
-load_in_4bit: {{ load_in_4bit | default("false") }}
+load_in_4bit: {{ load_in_4bit | default("false") | lower }}
 load_in_8bit: false
 trust_remote_code: true
 
 sequence_len: {{ sequence_len | default(4096) }}
-bf16: {{ bf16 | default(true) }}
+bf16: {{ bf16 | default(true) | lower }}
 
 {% if peft_init_lora_weights %}
 # Explicit PEFT initialization strategy from the accepted operator config.
@@ -68,7 +70,7 @@ save_total_limit: {{ save_total_limit | default(5) }}
 early_stopping_patience: {{ early_stopping_patience | default(25) }}
 
 # Packing
-sample_packing: {{ sample_packing | default(false) }}
+sample_packing: {{ sample_packing | default(false) | lower }}
 
 # Optimizations
 liger_kernel: {{ liger_kernel | default("true") }}

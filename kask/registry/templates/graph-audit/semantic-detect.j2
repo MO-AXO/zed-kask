@@ -1,11 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- detect
-- audit
-- classify
-- isolate
-- verify
 contract:
   input:
     nodes: array
@@ -15,7 +9,6 @@ contract:
   output:
     structural_issues: array
     issue_summary: string
-energy_cap: 4096
 visibility: Public
 ---
 {# Template: graph-audit/semantic-detect.j2 #}

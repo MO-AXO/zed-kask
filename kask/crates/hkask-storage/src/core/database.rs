@@ -16,19 +16,24 @@
 use hkask_keystore::derive_key;
 use thiserror::Error;
 
-use crate::database::driver::DatabaseDriver;
-
 /// Default embedding dimension (configurable via HKASK_EMBEDDING_DIM)
-pub(crate) const DEFAULT_EMBEDDING_DIM: usize = 1024;
-pub(crate) fn embedding_dim() -> usize {
-    std::env::var("HKASK_EMBEDDING_DIM")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        // Filter 0: HKASK_EMBEDDING_DIM=0 would otherwise create a schema
-        // with zero-dimensional vector columns, causing DimensionMismatch on
-        // every store call. Mirrors codegraph's resolve_embedding_dim guard.
-        .filter(|&d| d > 0)
-        .unwrap_or(DEFAULT_EMBEDDING_DIM)
+pub const DEFAULT_EMBEDDING_DIM: usize = 1024;
+pub fn embedding_dim() -> usize {
+    match std::env::var("HKASK_EMBEDDING_DIM") {
+        Ok(raw) => match raw.parse::<usize>() {
+            Ok(dim) if dim > 0 => dim,
+            _ => {
+                tracing::warn!(
+                    target: "reg.storage",
+                    value = %raw,
+                    fallback = DEFAULT_EMBEDDING_DIM,
+                    "HKASK_EMBEDDING_DIM malformed or non-positive; using default",
+                );
+                DEFAULT_EMBEDDING_DIM
+            }
+        },
+        Err(_) => DEFAULT_EMBEDDING_DIM,
+    }
 }
 
 /// Load the sqlite-vec extension into a single connection.
@@ -48,7 +53,7 @@ pub(crate) fn embedding_dim() -> usize {
 /// connection. The two pointer args are NULL (no error message out-param,
 /// no custom API routines) — the documented static-link invocation.
 #[allow(unsafe_code)]
-fn init_sqlite_vec_on(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
+pub(crate) fn init_sqlite_vec_on(conn: &rusqlite::Connection) -> rusqlite::Result<()> {
     type Sqlite3ExtInitFn = unsafe extern "C" fn(
         *mut rusqlite::ffi::sqlite3,
         *mut *mut std::os::raw::c_char,
@@ -85,8 +90,6 @@ pub enum DatabaseError {
     PassphraseMismatch(String),
     #[error("Corrupted database — file is not a valid SQLite database: {0}")]
     Corrupted(String),
-    #[error("PostgreSQL error: {0}")]
-    Postgres(String),
 }
 
 /// Database handle — path, passphrase, and whether it's a new file.
@@ -350,10 +353,21 @@ impl Database {
             )
         });
 
-        let pool_size = std::env::var("HKASK_DB_POOL_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8);
+        let pool_size = match std::env::var("HKASK_DB_POOL_SIZE") {
+            Ok(raw) => match raw.parse::<u32>() {
+                Ok(size) if size > 0 => size,
+                _ => {
+                    tracing::warn!(
+                        target: "reg.storage",
+                        value = %raw,
+                        fallback = 8,
+                        "HKASK_DB_POOL_SIZE malformed or non-positive; using default",
+                    );
+                    8
+                }
+            },
+            Err(_) => 8,
+        };
         let pool = r2d2::Pool::builder()
             .max_size(pool_size)
             .build(manager)
@@ -422,42 +436,6 @@ pub fn open_database(path: &str, passphrase: &str) -> Result<Database, DatabaseE
     } else {
         Database::open(path, passphrase)
     }
-}
-
-/// Open a PostgreSQL database and return a driver ready for store construction.
-///
-/// Creates the `pgvector` extension if missing, then runs the Postgres-compatible
-/// schema (`schema_pg.sql`). The returned `Arc<dyn DatabaseDriver>` can be passed
-/// directly to any store's `from_driver` constructor.
-///
-/// Unlike SQLite's `Database::open`, there is no separate passphrase/salt flow —
-/// encryption at rest is the operator's responsibility (TLS to a remote Postgres
-/// plus disk encryption). The `passphrase` parameter is accepted for API symmetry
-/// with `open_database` but is not used by the Postgres path.
-///
-/// pre:  `url` is a valid PostgreSQL connection string (e.g. `postgres://user:pass@host/db`)
-/// post: returns a connected `PostgresDriver` with schema initialized, or `Err(DatabaseError::Postgres)`
-pub fn open_postgres(
-    url: &str,
-) -> Result<std::sync::Arc<dyn crate::database::driver::DatabaseDriver>, DatabaseError> {
-    let pool = sqlx::PgPool::connect_lazy(url)
-        .map_err(|e| DatabaseError::Postgres(format!("connect: {e}")))?;
-    let driver = crate::database::postgres::PostgresDriver::new(pool);
-    // Bootstrap pgvector extension before schema (schema creates vector columns).
-    driver
-        .execute_batch("CREATE EXTENSION IF NOT EXISTS vector;")
-        .map_err(|e| DatabaseError::Postgres(format!("create extension: {e}")))?;
-    let schema = include_str!("sql/schema_pg.sql");
-    let dim = embedding_dim();
-    driver
-        .execute_batch(&schema.replace("$DIM", &dim.to_string()))
-        .map_err(|e| DatabaseError::Postgres(format!("schema init: {e}")))?;
-    tracing::info!(
-        target: "reg.storage",
-        operation = "open_postgres",
-        "PostgreSQL database opened with pgvector schema"
-    );
-    Ok(std::sync::Arc::new(driver))
 }
 
 fn generate_salt() -> [u8; SQLCIPHER_SALT_SIZE] {

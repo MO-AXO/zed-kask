@@ -1,57 +1,32 @@
 #![forbid(unsafe_code)]
+#![warn(clippy::let_underscore_future)]
 //! hKask MCP Companies — Dual-provider company financial data (FMP + EODHD)
 //!
 //! Tools are provider-agnostic: each tool routes to FMP or EODHD based on
 //! symbol characteristics, with automatic fallback. EODHD responses are
 //! normalized to match FMP format so analysis functions work transparently.
 //!
-//! ## Financial data tools
-//! - `company_profile` — Company profile by symbol
-//! - `stock_quote` — Real-time stock quote
-//! - `income_statement` — Income statements
-//! - `balance_sheet` — Balance sheet statements
-//! - `cash_flow_statement` — Cash flow statements
-//! - `key_metrics` — Key financial metrics
-//! - `historical_price` — Historical price data
-//! - `symbol_search` — Symbol search
+//! ## Tools (44) — pinned by `tool_surface_is_exactly_44_registered_tools`
 //!
-//! ## MAIA fundamental analysis
-//! - `moat_check` — Competitive moat: gross margin stability + WC signal
-//! - `management_scorecard` — CEO capital allocation scorecard (ROIC vs IC)
-//! - `working_capital_cycle` — CFO working capital analysis (DPO, DSO, CCC)
+//! Tools are split across submodules under `src/tools/`, each with its own
+//! `#[tool_router]` block, merged in `combined_router()`:
+//! - `tools/financial_data.rs` — company_profile, stock_quote, income_statement,
+//!   balance_sheet, cash_flow_statement, key_metrics, historical_price, symbol_search
+//! - `tools/analysis.rs` — moat_check, management_scorecard, working_capital_cycle
+//! - `tools/valuation.rs` — dcf_valuation, reverse_dcf, ep_valuation, comparable_analysis,
+//!   scenario_analysis, sensitivity_analysis, monte_carlo_dcf, scenario_impact_valuation,
+//!   calibrate_forecast, forecast_record
+//! - `tools/analytics.rs` — portfolio_attribution, portfolio_characteristics,
+//!   portfolio_comparison, portfolio_returns
+//! - `tools/economic_profit.rs` — ep_valuation (economic profit view)
+//! - `tools/expectations.rs` — expectations_gap
+//! - `tools/portfolio.rs` — ledger_import, ledger_export, portfolio_list,
+//!   portfolio_delete, transaction_note_append, note_add, note_list, note_delete,
+//!   file_attach, file_list, file_delete
+//! - `tools/transcript.rs` — earnings-call transcript tools
+//! - `tools/screener.rs` — stock_screener, research_search
 //!
-//! ## Valuation tools
-//! - `dcf_valuation` — Two-stage 11-line-item DCF (Damodaran 2012)
-//! - `reverse_dcf` — Market-implied growth rate (Mauboussin's Expectations Investing)
-//! - `ep_valuation` — Economic Profit / Residual Income Model (Bergen et al. 2025)
-//! - `comparable_analysis` — Peer multiples + DCF overlay
-//! - `scenario_analysis` — Schwartz 2×2 scenario matrix
-//! - `sensitivity_analysis` — Driver-by-driver intrinsic value sensitivity
-//! - `monte_carlo_dcf` — N-simulation Monte Carlo with histogram
-//! - `calibrate_forecast` — Fermi decomposition + Bayesian update (Tetlock)
-//! - `forecast_record` — Forecast-vs-actual decomposition (11-line-item gap)
-//!
-//! ## Research & screening
-//! - `research_search` — Multi-provider claim search with classification
-//! - `stock_screener` — Natural language screening
-//! - `expectations_gap` — Market-implied vs management vs analyst growth gap
-//!
-//! ## Portfolio tools
-//! - `ledger_import` — Import CSV/JSON (auto-creates portfolio)
-//! - `ledger_export` — Export CSV/JSON
-//! - `portfolio_list` — List all portfolios
-//! - `portfolio_delete` — Delete a portfolio
-//! - `transaction_note_append` — Annotate a transaction
-//! - `note_add` — Add a research note to a security
-//! - `note_list` — List notes with optional date/tag filtering
-//! - `note_delete` — Delete a note
-//! - `file_attach` — Attach a file (base64) to a security
-//! - `file_list` — List attached files for a security
-//! - `file_delete` — Delete an attached file
-//! - `portfolio_attribution` — What moved the portfolio
-//! - `portfolio_characteristics` — Weighted-average fundamentals
-//! - `portfolio_comparison` — Side-by-side comparison
-//! - `portfolio_returns` — TWR and IRR for any date range
+//! The pin test is the source of truth for the count; this list is a map.
 //!
 //! ## Data quality framework (FinGPT §3.2)
 //! - Regulation `data_quality` spans on every valuation tool — staleness, CV, confidence
@@ -64,11 +39,9 @@
 //! Balance sheet items under `fibo-fbc-pas-fpas`, ratios under `fibo-fbc-fct-ra`,
 //! securities under `fibo-sec-sec-ast`, indices under `fibo-ind-ind-ind`.
 
-#![allow(unused_crate_dependencies)] // Bin target — deps used in main.rs, lint checks lib target only
-
 // Bridge crates: shared ontological vocabulary (P5.4 dual-axis framework)
 
-use hkask_mcp_server::server::{McpToolError, validate_identifier};
+use hkask_mcp_server::server::{McpToolError, map_join_error, validate_identifier};
 use serde::{Deserialize, Serialize};
 
 pub mod aggregation;
@@ -85,11 +58,13 @@ pub mod research;
 mod scenarios;
 mod screener;
 pub mod superforecast;
+mod transcript;
 pub mod types;
 
-use portfolio::{PersistedForecast, PortfolioError, PortfolioManager};
+use portfolio::{PersistedForecast, PortfolioManager};
 
 pub mod tools;
+pub use transcript::{MissingReason, TranscriptCoverage, TranscriptRecord, TranscriptResult};
 
 // ── Forecast store ───────────────────────────────────────────────────
 
@@ -173,19 +148,14 @@ hkask_mcp_server::mcp_server!(
         pub exa_api_key: Option<String>,
         pub tavily_api_key: Option<String>,
         pub brave_api_key: Option<String>,
+        pub serpapi_key: Option<String>,
         pub portfolio: PortfolioManager,
         pub learning: std::sync::Arc<std::sync::Mutex<LearningState>>,
         pub fermi_defaults: superforecast::FermiDefaults,
     }
 );
 
-/// Classify PortfolioError for MCP dispatch: user errors → invalid_argument, system errors → internal.
-fn map_portfolio_error(e: PortfolioError) -> McpToolError {
-    match &e {
-        PortfolioError::InvalidArgument(_) => McpToolError::invalid_argument(e.to_string()),
-        _ => McpToolError::internal(e.to_string()),
-    }
-}
+use hkask_mcp_portfolio::map_portfolio_error;
 
 impl CompaniesServer {
     async fn fetch(
@@ -215,7 +185,7 @@ impl CompaniesServer {
         let portfolio = self.portfolio.clone();
         tokio::task::spawn_blocking(move || portfolio.save_forecast(&forecast))
             .await
-            .map_err(|error| McpToolError::internal(format!("forecast task failed: {error}")))?
+            .map_err(|error| map_join_error(error, "forecast task failed"))?
             .map_err(map_portfolio_error)
     }
 
@@ -226,7 +196,7 @@ impl CompaniesServer {
         let portfolio = self.portfolio.clone();
         tokio::task::spawn_blocking(move || portfolio.get_forecast(&forecast_id))
             .await
-            .map_err(|error| McpToolError::internal(format!("forecast task failed: {error}")))?
+            .map_err(|error| map_join_error(error, "forecast task failed"))?
             .map_err(map_portfolio_error)
     }
 
@@ -237,7 +207,7 @@ impl CompaniesServer {
         let portfolio = self.portfolio.clone();
         tokio::task::spawn_blocking(move || portfolio.list_forecasts(&symbol))
             .await
-            .map_err(|error| McpToolError::internal(format!("forecast task failed: {error}")))?
+            .map_err(|error| map_join_error(error, "forecast task failed"))?
             .map_err(map_portfolio_error)
     }
 
@@ -251,7 +221,7 @@ impl CompaniesServer {
             portfolio.record_forecast_outcome(&forecast_id, outcome)
         })
         .await
-        .map_err(|error| McpToolError::internal(format!("forecast task failed: {error}")))?
+        .map_err(|error| map_join_error(error, "forecast task failed"))?
         .map_err(map_portfolio_error)
     }
 }
@@ -267,11 +237,87 @@ impl CompaniesServer {
             + Self::valuation_router()
             + Self::economic_profit_router()
             + Self::expectations_router()
+            + Self::transcript_router()
+    }
+
+    /// Map a tool name to its ontology concept URI. The concept is used both
+    /// as the `reg.tool.*` span ontology tag (via `execute_tool_semantic`)
+    /// and as the `"ontology"` field in the tool output JSON (via
+    /// `fibo::enrich_with_ontology`). Delegates to `fibo::tool_to_ontology` —
+    /// the single source of truth for the tool → concept mapping.
+    fn ontology_anchor(tool: &str) -> Option<&'static str> {
+        fibo::tool_to_ontology(tool)
     }
 }
 
 #[rmcp::tool_handler(router = Self::combined_router())]
 impl rmcp::ServerHandler for CompaniesServer {}
+
+#[cfg(test)]
+mod tool_surface_tests {
+    use super::*;
+
+    // Pins the registered tool-surface count end-to-end. Catches silent
+    // registration drops — a `#[tool]` impl block without `#[tool_router]`, or
+    // a sub-router missing from `combined_router()`, silently registers nothing
+    // (`cargo check` passes on an unwired orphan). Mirrors the swarm pin.
+    #[test]
+    fn tool_surface_is_exactly_44_registered_tools() {
+        let n = CompaniesServer::combined_router().list_all().len();
+        assert_eq!(n, 44, "companies registered tool surface changed; got {n}");
+    }
+
+    // Coverage: every registered tool must have a non-None ontology anchor.
+    // Catches the silent-drop failure mode where a new tool is added to the
+    // router without a corresponding arm in fibo::tool_to_ontology. The count
+    // pin above catches addition; this test catches anchoring.
+    #[test]
+    fn ontology_anchor_covers_all_registered_tools() {
+        let router = CompaniesServer::combined_router();
+        for tool in router.list_all() {
+            assert!(
+                CompaniesServer::ontology_anchor(&tool.name).is_some(),
+                "ontology_anchor returned None for registered tool '{}'; \
+                 add an explicit arm in fibo::tool_to_ontology",
+                tool.name
+            );
+        }
+    }
+
+    // Regression: the ontology anchor must not collapse to a single constant
+    // (the stub pattern). Distinct tool families must anchor on distinct FIBO
+    // concepts — financial data, valuation, and portfolio tools are different
+    // ontological categories.
+    #[test]
+    fn ontology_anchor_distinguishes_tool_families() {
+        let profile = CompaniesServer::ontology_anchor("company_profile");
+        let dcf = CompaniesServer::ontology_anchor("dcf_valuation");
+        let ledger = CompaniesServer::ontology_anchor("ledger_import");
+        assert_ne!(
+            profile, dcf,
+            "company_profile and dcf_valuation must anchor on distinct concepts"
+        );
+        assert_ne!(
+            dcf, ledger,
+            "dcf_valuation and ledger_import must anchor on distinct concepts"
+        );
+        assert_eq!(
+            profile,
+            Some(fibo::CORPORATION),
+            "company_profile must anchor on FIBO Corporation"
+        );
+        assert_eq!(
+            dcf,
+            Some(fibo::DCF_VALUATION),
+            "dcf_valuation must anchor on FIBO DCF Valuation"
+        );
+        assert_eq!(
+            ledger,
+            Some(fibo::TRANSACTION_LEDGER),
+            "ledger_import must anchor on FIBO TransactionLedger"
+        );
+    }
+}
 
 // ── Entry point ─────────────────────────────────────────────────────
 
@@ -284,16 +330,27 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
             let fmp_api_key = ctx
                 .credentials
                 .get("HKASK_FMP_API_KEY")
-                .expect("required credential checked by run_stdio_server")
+                .ok_or_else(|| hkask_mcp_server::McpError::MissingCredentials {
+                    missing: "HKASK_FMP_API_KEY".to_string(),
+                })?
                 .clone();
             let eodhd_api_key = ctx
                 .credentials
                 .get("HKASK_EODHD_API_KEY")
-                .expect("required credential checked by run_stdio_server")
+                .ok_or_else(|| hkask_mcp_server::McpError::MissingCredentials {
+                    missing: "HKASK_EODHD_API_KEY".to_string(),
+                })?
                 .clone();
             let exa_api_key = ctx.credentials.get("HKASK_EXA_API_KEY").cloned();
             let tavily_api_key = ctx.credentials.get("HKASK_TAVILY_API_KEY").cloned();
             let brave_api_key = ctx.credentials.get("HKASK_BRAVE_API_KEY").cloned();
+            // `HKASK_SERPAPI_API_KEY` — the canonical spelling used by kask/.env,
+            // the credential registry (inference_providers.rs) and the research
+            // server. This read used the shorter `HKASK_SERPAPI_KEY`, which
+            // appeared in no allowlist and no credential registry, so the key
+            // could never arrive and corpus-mode transcript search was
+            // permanently unavailable (RR-0061).
+            let serpapi_key = ctx.credentials.get("HKASK_SERPAPI_API_KEY").cloned();
             Ok(CompaniesServer::new(
                 ctx.webid,
                 reqwest::Client::new(),
@@ -302,7 +359,8 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
                 exa_api_key,
                 tavily_api_key,
                 brave_api_key,
-                PortfolioManager::new(ctx.webid),
+                serpapi_key,
+                PortfolioManager::new(ctx.webid)?,
                 std::sync::Arc::new(std::sync::Mutex::new(
                     match std::env::var("HKASK_CHRONIC_STALENESS_DAYS")
                         .ok()
@@ -336,6 +394,10 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
                 "HKASK_BRAVE_API_KEY",
                 "Brave Search API key for fundamental research search",
             ),
+            hkask_mcp_server::CredentialRequirement::optional(
+                "HKASK_SERPAPI_API_KEY",
+                "SerpAPI key for corpus-mode transcript search",
+            ),
         ],
     )
     .await
@@ -345,6 +407,29 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
 
 #[cfg(test)]
 mod poison_tests;
+
+#[cfg(test)]
+mod dead_surface_pins {
+    /// `PORTFOLIO_AGGREGATABLE_FIELDS` and `PORTFOLIO_CATEGORICAL_FIELDS` were
+    /// deleted from `fibo.rs` because they had zero production call sites —
+    /// only the in-module tests referenced them. This test pins their absence
+    /// so a future commit cannot re-add them without a consumer. Per `.rules`
+    /// "Advertised invariants need enforcement points": a constant with no
+    /// consumer is dead surface regardless of its ontological correctness.
+    #[test]
+    fn portfolio_field_tables_not_present() {
+        // The constants must not be re-added without a production consumer.
+        let fibo_source = include_str!("fibo.rs");
+        assert!(
+            !fibo_source.contains("PORTFOLIO_AGGREGATABLE_FIELDS"),
+            "PORTFOLIO_AGGREGATABLE_FIELDS must not be re-added without a consumer — it was dead surface"
+        );
+        assert!(
+            !fibo_source.contains("PORTFOLIO_CATEGORICAL_FIELDS"),
+            "PORTFOLIO_CATEGORICAL_FIELDS must not be re-added without a consumer — it was dead surface"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

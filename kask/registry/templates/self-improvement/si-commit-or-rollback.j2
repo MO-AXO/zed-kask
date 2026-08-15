@@ -1,11 +1,6 @@
 [inference]
+max_tokens = 2048
 template_type: KnowAct
-lexicon_terms:
-- declare
-- target
-- measure
-- plan
-- explore
 contract:
   input:
     evaluation_result: object
@@ -14,7 +9,6 @@ contract:
     context: object
   output:
     response: string
-energy_cap: 3000
 visibility: Public
 ---
 {# goal: Apply acceptance criteria to the proposed update, commit or rollback the update, and determine the next step with strict enum constraints on output fields to prevent fragile string matching in loop conditions. #}

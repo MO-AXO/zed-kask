@@ -1,29 +1,27 @@
 #![forbid(unsafe_code)]
-//! hKask Capability — OCAP delegation token system
+#![warn(clippy::let_underscore_future)]
+//! hKask Capability — tool dispatch port.
 //!
-//! Ed25519-signed delegation tokens with cryptographic attenuation.
-//! Two token kinds: **Loop authority** (ZST tokens in `tokens.rs`) prove loop-authorized operations;
-//! **Delegation** (`DelegationToken`) are Ed25519-signed tokens for inter-agent delegation.
+//! # No per-call capability gate
+//!
+//! This crate previously minted `DelegationToken`s that `McpRuntime::invoke`
+//! checked against the invoked tool. That gate was removed: every production
+//! mint site derived the token's `resource_id` from the same tool name it then
+//! passed to `invoke`, so the check compared a value against itself and denied
+//! nothing while adding work to every tool call.
+//!
+//! Capability *separation* is still enforced, at the boundaries that hold a list
+//! the caller cannot choose: the per-request `tool_allowlist` on the inference
+//! IPC dispatch, each swarm agent card's `mcp_tools` allowlist, and the
+//! per-server MCP env/credential allowlists. What remains here is the dispatch
+//! port itself.
+//!
+//! The FIDES `ToolTaint` labels also lived here. They were removed with the
+//! runtime-policy gate they fed: every `ToolInfo` was labelled `Pure` at its
+//! only construction site, so the `Source`→`Sink` block could not fire.
 
-pub mod auth;
-pub mod resources;
 pub mod token_types;
-pub mod tokens;
 pub mod tool_port;
-pub mod verification;
 
-pub use auth::{AuthContext, derive_signing_key};
-pub use resources::{
-    CapabilityParseError, CapabilitySpec, DelegationAction, DelegationResource, capabilities_match,
-    capability_from_server_id,
-};
-pub use token_types::{
-    CapabilityError, DelegationToken, DelegationTokenBuilder, NoOpTokenRegistry,
-    SYSTEM_MAX_ATTENUATION, SYSTEM_MAX_RECURSION, TokenRegistry, TokenRegistryError,
-};
+pub use token_types::SYSTEM_MAX_RECURSION;
 pub use tool_port::{ToolFuture, ToolInfo, ToolPort, ToolPortError};
-pub use verification::{
-    CapabilityChecker, TOKEN_ERR_EXPIRED, TOKEN_ERR_INVALID_SIGNATURE, TOKEN_ERR_NO_CHECKER,
-    VerificationOutcome, require_read_access, require_write_access, token_err_insufficient_access,
-    token_err_tool_access_denied, verify_delegation_token, verify_delegation_token_now,
-};

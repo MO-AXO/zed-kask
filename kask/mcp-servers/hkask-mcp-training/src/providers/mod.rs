@@ -27,7 +27,7 @@ pub use nebius::NebiusHost;
 pub use runpod::RunpodHost;
 pub use trl_harness::TrlHarness;
 pub use types::{
-    AdvancedParams, CompletionMetadata, LoraParams, OptimizationParams, PodStatus, ProviderError,
+    AdvancedParams, HostProviderError, LoraParams, OptimizationParams, PodStatus,
     QuantizationParams, SequenceParams, TrainingHarnessId, TrainingHost, TrainingHostId,
     TrainingJob, TrainingJobStatus, TrainingParams, TrlTrainer,
 };
@@ -38,11 +38,13 @@ pub use types::{
 ///
 /// Supports three providers: Runpod, DeepInfra, and Nebius.
 /// The provider is selected from `config.host`.
-pub fn create_host(config: &TrainingHostConfig) -> Result<Box<dyn TrainingHost>, ProviderError> {
+pub fn create_host(
+    config: &TrainingHostConfig,
+) -> Result<Box<dyn TrainingHost>, HostProviderError> {
     match config.host {
         TrainingHostId::Runpod => {
             if config.runpod_api_key.is_empty() {
-                return Err(ProviderError::Unavailable(
+                return Err(HostProviderError::Unavailable(
                     "Runpod API key not configured (set RUNPOD_API_KEY)".to_string(),
                 ));
             }
@@ -56,7 +58,7 @@ pub fn create_host(config: &TrainingHostConfig) -> Result<Box<dyn TrainingHost>,
         }
         TrainingHostId::DeepInfra => {
             let api_key = std::env::var("DEEPINFRA_API_KEY").map_err(|_| {
-                ProviderError::Unavailable("DEEPINFRA_API_KEY not configured".to_string())
+                HostProviderError::Unavailable("DEEPINFRA_API_KEY not configured".to_string())
             })?;
             let gpu_config = std::env::var("DEEPINFRA_GPU_CONFIG")
                 .unwrap_or_else(|_| "1xB200-180GB".to_string());
@@ -72,10 +74,10 @@ pub fn create_host(config: &TrainingHostConfig) -> Result<Box<dyn TrainingHost>,
         }
         TrainingHostId::Nebius => {
             let project_id = std::env::var("NEBIUS_PROJECT_ID").map_err(|_| {
-                ProviderError::Unavailable("NEBIUS_PROJECT_ID not configured".to_string())
+                HostProviderError::Unavailable("NEBIUS_PROJECT_ID not configured".to_string())
             })?;
             let subnet_id = std::env::var("NEBIUS_SUBNET_ID").map_err(|_| {
-                ProviderError::Unavailable("NEBIUS_SUBNET_ID not configured".to_string())
+                HostProviderError::Unavailable("NEBIUS_SUBNET_ID not configured".to_string())
             })?;
             let ssh_key = read_ssh_public_key()?;
             let gpu_platform =
@@ -97,15 +99,15 @@ pub fn create_host(config: &TrainingHostConfig) -> Result<Box<dyn TrainingHost>,
 }
 
 /// Read the SSH public key from ~/.ssh/id_ed25519.pub (or id_rsa.pub as fallback).
-fn read_ssh_public_key() -> Result<String, ProviderError> {
+fn read_ssh_public_key() -> Result<String, HostProviderError> {
     let home = dirs::home_dir()
-        .ok_or_else(|| ProviderError::Unavailable("Cannot find home directory".to_string()))?;
+        .ok_or_else(|| HostProviderError::Unavailable("Cannot find home directory".to_string()))?;
     let ed25519 = home.join(".ssh/id_ed25519.pub");
     let rsa = home.join(".ssh/id_rsa.pub");
     let path = if ed25519.exists() { ed25519 } else { rsa };
     std::fs::read_to_string(&path)
         .map(|s| s.trim().to_string())
-        .map_err(|e| ProviderError::Unavailable(format!("Cannot read SSH public key: {e}")))
+        .map_err(|e| HostProviderError::Unavailable(format!("Cannot read SSH public key: {e}")))
 }
 
 // ── Training host config ──────────────────────────────────────────────────
@@ -432,6 +434,20 @@ mod tests {
 
     #[test]
     fn host_config_default() {
+        // The Default impl auto-detects the host from env vars (DeepInfra →
+        // Nebius → Runpod). Clear them so this test asserts the documented
+        // fallback deterministically, regardless of the operator's configured
+        // API keys. Without this, the test fails on any machine with
+        // DEEPINFRA_API_KEY or NEBIUS_PROJECT_ID set.
+        //
+        // Edition 2024 marks env mutation as unsafe. nextest runs each test in
+        // its own process by default, so there is no cross-test leakage; the
+        // crate permits unsafe in test builds via cfg_attr(not(test), ...).
+        unsafe {
+            std::env::remove_var("HKASK_TRAINING_HOST");
+            std::env::remove_var("DEEPINFRA_API_KEY");
+            std::env::remove_var("NEBIUS_PROJECT_ID");
+        }
         let config = TrainingHostConfig::default();
         assert_eq!(config.host, TrainingHostId::Runpod);
     }

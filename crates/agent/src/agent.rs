@@ -11,11 +11,12 @@ mod tests;
 mod thread;
 mod thread_store;
 mod tool_permissions;
+pub mod tool_retry_tracker;
 pub mod tool_router;
 mod tools;
 
 use context_server::ContextServerId;
-pub use curator_agent_server::CuratorAgentServer;
+pub use curator_agent_server::{CURATOR_STATIC_CONTEXT, CuratorAgentServer};
 pub use db::*;
 use itertools::Itertools;
 pub use native_agent_server::NativeAgentServer;
@@ -38,9 +39,9 @@ use acp_thread::{
 use agent_client_protocol::schema::v1 as acp;
 use agent_skills::{
     AGENTS_DIR_NAME, ProjectSkillGroup, SKILL_FILE_NAME, Skill, SkillIndex, SkillLoadError,
-    SkillScopeId, SkillSource, SkillSummary, builtin_skills, embedded_global_skills,
-    global_skills_dir, load_marketplace_skills, load_skills_from_directory,
-    parse_skill_frontmatter, project_skills_relative_path,
+    SkillScopeId, SkillSource, SkillSummary, global_skills_dir, load_marketplace_skills,
+    load_skills_from_directory, parse_skill_frontmatter, project_skills_relative_path,
+    seed_shipped_skills,
 };
 use anyhow::{Context as _, Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -224,8 +225,9 @@ impl LanguageModels {
     }
 
     fn refresh_list(&mut self, cx: &App) {
-        let providers = LanguageModelRegistry::global(cx)
-            .read(cx)
+        let registry = LanguageModelRegistry::global(cx);
+        let registry = registry.read(cx);
+        let providers = registry
             .visible_providers()
             .into_iter()
             .filter(|provider| provider.is_authenticated(cx))
@@ -399,22 +401,21 @@ pub struct NativeAgent {
     fs: Arc<dyn Fs>,
     _subscriptions: Vec<Subscription>,
     /// Tracks the lifecycle of global skills directory observation. We
-    /// don't eagerly watch (or even check for) `~/.agents/skills/` at
+    /// don't eagerly watch (or even check for) the global skills dir at
     /// startup; users who never engage with the agent panel pay zero
     /// filesystem cost. The watch is kicked off lazily by
     /// [`Self::ensure_skills_scan_started`], which is called from the
     /// three agent-panel interaction points: input box focus, slash
     /// autocomplete, and conversation submit.
     skills_state: SkillsState,
-    /// When set, all new threads created by this agent get this system
-    /// prompt override. Used by the Curator agent to inject its own persona.
-    system_prompt_override: Option<SharedString>,
     /// When set, all new threads get this static context appended to the
     /// system prompt (NOT an override — the Zed Agent prompt stays).
     /// Used by the Curator overlay to inject regulatory context.
     curator_static_context: Option<SharedString>,
-    /// Whether to register curator tools on new threads.
-    register_curator_tools: bool,
+    /// When set, new threads' context-server (MCP) tools are filtered to
+    /// this server only — the kask panel's per-tab scoping enforcement.
+    /// Applied via `Thread::set_mcp_server_scope` in `new_session`.
+    mcp_server_scope: Option<SharedString>,
 }
 
 #[derive(Default)]
@@ -424,10 +425,10 @@ enum SkillsState {
     #[default]
     Idle,
     /// A one-shot scan task is in flight. It checks whether
-    /// `~/.agents/skills/` exists; if so, transitions to `Watching`,
+    /// the global skills dir exists; if so, transitions to `Watching`,
     /// otherwise back to `Idle`.
     Scanning,
-    /// A watch task is observing `~/.agents/skills/`. It transitions
+    /// A watch task is observing the global skills dir. It transitions
     /// back to `Idle` if the watched directory itself is removed.
     Watching,
 }
@@ -633,10 +634,29 @@ impl NativeAgent {
                 fs,
                 _subscriptions: subscriptions,
                 skills_state: SkillsState::default(),
-                system_prompt_override: None,
                 curator_static_context: None,
-                register_curator_tools: false,
+                mcp_server_scope: None,
             }
+        })
+    }
+
+    /// Build a `NativeAgent` connection — the shared spawn sequence used by
+    /// both `NativeAgentServer` and `CuratorAgentServer`. Each server clones
+    /// its `fs` + `thread_store` into the spawned task; this helper does the
+    /// `Templates::new()` -> `NativeAgent::new()` -> `NativeAgentConnection`
+    /// sequence so the two servers cannot drift. Callers may apply their
+    /// overlay (e.g. `set_curator_static_context`) on the returned agent
+    /// before wrapping it, but for the common case where no overlay is needed
+    /// this returns the connection ready to hand back to the agent picker.
+    pub fn build_connection(
+        thread_store: Entity<ThreadStore>,
+        fs: Arc<dyn Fs>,
+        cx: &mut App,
+    ) -> Task<Result<Rc<dyn acp_thread::AgentConnection>>> {
+        cx.spawn(async move |cx| {
+            let templates = Templates::new();
+            let agent = cx.update(|cx| NativeAgent::new(thread_store, templates, fs, cx));
+            Ok(Rc::new(NativeAgentConnection(agent)) as Rc<dyn acp_thread::AgentConnection>)
         })
     }
 
@@ -650,7 +670,7 @@ impl NativeAgent {
     /// repeat.
     ///
     /// The scan itself runs detached on the foreground executor. If
-    /// `~/.agents/skills/` exists it transitions state to
+    /// the global skills dir exists it transitions state to
     /// [`SkillsState::Watching`] and starts a recursive watch;
     /// otherwise it transitions back to [`SkillsState::Idle`] so the
     /// next trigger retries (covering the case where the user creates
@@ -667,6 +687,24 @@ impl NativeAgent {
 
     async fn run_skills_scan(this: WeakEntity<Self>, fs: Arc<dyn Fs>, cx: &mut AsyncApp) {
         let skills_dir = global_skills_dir();
+
+        // zed-kask: D28 — ensure the kask data-root skills directory exists.
+        // Pre-release: no migration from legacy paths.
+        let _ = fs.create_dir(&skills_dir).await;
+
+        // zed-kask: Materialise the shipped kask skills onto the user's disk
+        // if missing. The disk copy is the single runtime source of truth —
+        // the compiled seed payload exists only so a self-contained binary
+        // can populate the catalog on a fresh install. Existing files are
+        // never overwritten (user edits are sovereign). Must run before the
+        // disk load below so freshly-seeded skills appear in the catalog.
+        // Skipped on the fake filesystem used in tests so skill-count
+        // assertions aren't polluted by the 42 shipped skills; seeding is
+        // unit-tested directly in `agent_skills`.
+        if !fs.is_fake() {
+            seed_shipped_skills(fs.as_ref(), &skills_dir).await;
+        }
+
         if !fs.is_dir(&skills_dir).await {
             // Skills directory doesn't exist; revert state so the next
             // user trigger retries.
@@ -763,26 +801,27 @@ impl NativeAgent {
         self.sibling_thread_host = Some(host);
     }
 
-    /// Set a system prompt override for all new threads created by this agent.
-    ///
-    /// Used by the Curator agent to inject its own persona. When set,
-    /// each new thread created via `new_session` gets this prompt via
-    /// `Thread::set_system_prompt_override`.
-    pub fn set_system_prompt_override(&mut self, prompt: SharedString, _cx: &mut Context<Self>) {
-        self.system_prompt_override = Some(prompt);
-    }
-
     /// Enable the Curator overlay on this agent.
     ///
-    /// This does NOT override the system prompt. Instead, it:
-    /// 1. Sets `curator_static_context` — appended to the system prompt
-    /// 2. Enables `register_curator_tools` — curator tools added to each thread
+    /// This does NOT override the system prompt. Instead, it appends
+    /// `curator_static_context` to the system prompt and registers the
+    /// `CuratorStatusTool` on each new thread.
     ///
     /// The Zed Agent's coding instructions remain intact. The Curator
     /// gets all coding capabilities PLUS regulatory context and tools.
-    pub fn set_curator_static_context(&mut self, context: SharedString, _cx: &mut Context<Self>) {
+    pub fn set_curator_static_context(&mut self, context: SharedString) {
         self.curator_static_context = Some(context);
-        self.register_curator_tools = true;
+    }
+
+    /// Restrict all new threads' context-server (MCP) tools to one server.
+    ///
+    /// Used by the kask panel: each tab constructs its own
+    /// `CuratorAgentServer` with a per-tab scope, so the tab's thread
+    /// exposes only that MCP server's tools — enforcing the scoping the
+    /// per-tab system prompt declares. Called after
+    /// `set_curator_static_context`; independent of it.
+    pub fn set_mcp_server_scope(&mut self, server: SharedString) {
+        self.mcp_server_scope = Some(server);
     }
 
     pub fn sibling_thread_host(&self) -> Option<Rc<dyn SiblingThreadHost>> {
@@ -816,24 +855,26 @@ impl NativeAgent {
             )
         });
 
-        // Apply the system prompt override if set (e.g., Curator persona).
-        if let Some(ref override_prompt) = self.system_prompt_override {
-            thread.update(cx, |thread, cx| {
-                thread.set_system_prompt_override(override_prompt.clone(), cx);
-            });
-        }
-
         // Apply the Curator overlay: static context + curator tools.
         // This is NOT a system prompt override — the Zed Agent prompt stays.
         // The curator context is appended via `static_context`.
         if let Some(ref curator_context) = self.curator_static_context {
             thread.update(cx, |thread, cx| {
                 thread.set_static_context(curator_context.clone(), cx);
+                // Tag the thread with the Curator agent ID so the memory
+                // ingestion path (D6) routes Curator turns to the curator's
+                // sovereign DB, and the context injector dispatch (D11)
+                // selects the curator's recall store. Without this, Curator
+                // turns would be ingested as user-perspective records and the
+                // curator would have no automatic recall.
+                thread.set_agent_id(CURATOR_AGENT_ID.clone(), cx);
+                thread.add_tool(CuratorStatusTool);
+                thread.add_tool(CuratorDirectiveTool);
             });
         }
-        if self.register_curator_tools {
-            thread.update(cx, |thread, _cx| {
-                thread.add_tool(CuratorStatusTool);
+        if let Some(ref scope) = self.mcp_server_scope {
+            thread.update(cx, |thread, cx| {
+                thread.set_mcp_server_scope(Some(scope.clone()), cx);
             });
         }
 
@@ -897,22 +938,38 @@ impl NativeAgent {
             // after the thread is constructed are still visible to the
             // model — without this, the catalog and tool would drift out
             // of sync until the session was reopened.
-            // D1: If the global manifest executor is set (by the zed-kask
-            // composition root), use it to run the hKask cascade instead of
-            // body injection. The SKILL.md frontmatter stays the discovery-only
-            // catalog entry; the manifest YAML in kask/registry/manifests/ drives
-            // the cascade.
-            if let Some(executor) = crate::manifest_executor() {
-                thread.add_tool(SkillTool::with_manifest_executor(
-                    skills_resolver_for_project(weak.clone(), project_id),
-                    executor.clone(),
-                ));
-            } else {
-                thread.add_tool(SkillTool::new(skills_resolver_for_project(
-                    weak.clone(),
-                    project_id,
-                )));
-            }
+            // D1: The manifest executor is resolved at invocation time by
+            // reading the process-global `manifest_executor()`. This closes
+            // the session-creation race: if a session is created before the
+            // deferred post-login task wires the executor, the resolver
+            // returns `None` on early invocations and `Some(...)` once
+            // `set_manifest_executor` runs. Caching the executor at
+            // session-creation time would pin `None` for the session's
+            // entire lifetime. The slash-command path (`send_skill_invocation`)
+            // already reads the global at invocation time; this aligns the
+            // model-invocation path with it.
+            thread.add_tool(SkillTool::with_manifest_executor_resolver(
+                skills_resolver_for_project(weak.clone(), project_id),
+                crate::manifest_executor_cloned,
+            ));
+            // Register the skill_bundle tool for multi-skill composition.
+            // Shares the same skills resolver and manifest executor resolver
+            // as SkillTool — the bundler is invoked when ≥3 peer-level skills
+            // are named, producing a governed BundleManifest before execution.
+            thread.add_tool(SkillBundleTool::with_manifest_executor_resolver(
+                skills_resolver_for_project(weak.clone(), project_id),
+                crate::manifest_executor_cloned,
+            ));
+            // Register the pipeline tool for executing pipeline manifests
+            // (category: pipeline). Shares the same manifest executor resolver
+            // as SkillTool — the bridge loads the manifest from a file path
+            // and runs the cascade with access to all MCP tools. The project
+            // entity is passed for path containment (same pattern as
+            // ReadFileTool — resolve_project_path enforces worktree boundaries).
+            thread.add_tool(PipelineTool::with_manifest_executor_resolver(
+                project.clone(),
+                crate::manifest_executor_cloned,
+            ));
         });
 
         let subscriptions = vec![
@@ -1133,7 +1190,7 @@ impl NativeAgent {
         // Load global skills. Two sources contribute, both tagged
         // `SkillSource::Global`:
         //
-        // 1. Disk-loaded skills from `~/.agents/skills/` — the user's own
+        // 1. Disk-loaded skills from the global skills dir — the user's own
         //    installs. These win on name conflicts with embedded skills
         //    because `apply_skill_overrides` keeps the first entry on ties,
         //    and `combine_skills` chains `global` before embedded globals.
@@ -1156,7 +1213,7 @@ impl NativeAgent {
                 )
                 .await;
                 // zed-kask: Load marketplace-installed skills from
-                // `~/.agents/skills/_marketplace/{source_user}/{skill_name}/`.
+                // `{global_skills_dir}/_marketplace/{source_user}/{skill_name}/`.
                 // These are `SkillSource::Public` — precedence is lower than
                 // `Global` so a local skill of the same name wins (plan §2.3).
                 let marketplace_skills =
@@ -1164,9 +1221,6 @@ impl NativeAgent {
                 // Disk globals first so they win ties in `apply_skill_overrides`.
                 let mut all_globals = disk_globals;
                 all_globals.extend(marketplace_skills);
-                for skill in embedded_global_skills() {
-                    all_globals.push(Ok(skill));
-                }
                 all_globals
             })
         };
@@ -1242,7 +1296,11 @@ impl NativeAgent {
                         // are harmless when body injection is off.
                         //
                         // (Original zed checks skill_file.size > MAX_SKILL_FILE_SIZE
-                        // and pushes a SkillLoadError. We skip that check entirely.)
+                        // and pushes a SkillLoadError. The size check is enforced
+                        // at the parse layer — `extract_skill_frontmatter` /
+                        // `load_skill_frontmatter` in `agent_skills` reject
+                        // oversized files before they reach this loop — so this
+                        // call site no longer repeats the check.)
 
                         let buffer = match project
                             .update(cx, |project, cx| {
@@ -1569,7 +1627,6 @@ impl NativeAgent {
         for state in self.projects.values() {
             for skill in state.skills.iter() {
                 match &skill.source {
-                    SkillSource::BuiltIn => {}
                     SkillSource::Global | SkillSource::Public { .. } => {
                         if !seen_global {
                             global_skills.push(skill.clone());
@@ -2130,6 +2187,19 @@ impl NativeAgent {
             // The user's task (text from `original_content`) is injected into
             // the cascade context as `task` so templates can reference
             // `{{ task }}`. Without this, the cascade runs blind.
+            //
+            // The slash-command path has no `SkillToolInput.context` channel
+            // (unlike the model-invoked `skill` tool, where the model passes
+            // `context: {mode, swarm_id, ...}`). To let context-dependent
+            // skills (e.g. `swarm-intelligence` needs `mode` and `swarm_id`)
+            // receive context here, leading `key=value` pairs in the
+            // argument text are parsed into the context map. The slash-command
+            // prefix is stripped first so `task` is the argument, not
+            // "/swarm-intelligence compose my swarm".
+            //
+            // Example: `/swarm-intelligence mode=local swarm_id=ws-1 compose`
+            //   → context: {mode: "local", swarm_id: "ws-1"}
+            //   → task: "compose"
             let user_task = original_content
                 .iter()
             // Find the first text block — the user's typed request.
@@ -2141,22 +2211,59 @@ impl NativeAgent {
                     }
                 })
                 .unwrap_or_default();
+            let stripped_task = strip_slash_command_prefix(&user_task);
+            let (slash_context, task_text) = parse_slash_command_context(&stripped_task);
             let envelope = if let Some(executor) = crate::manifest_executor() {
                 let skill_name = skill.name.as_ref();
                 if executor.has_manifest(skill_name) {
+                    // Extract swarm_id before the context map is moved into
+                    // `context.extend`. Used by the cascade context provider
+                    // to determine whether to recall from the swarm store.
+                    let slash_swarm_id = slash_context
+                        .get("swarm_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
                     let mut context = std::collections::HashMap::new();
+                    context.extend(slash_context);
                     context.insert(
                         "task".to_string(),
-                        serde_json::Value::String(user_task.clone()),
+                        serde_json::Value::String(task_text.clone()),
                     );
-                    match executor.execute_skill(skill_name, context).await {
+
+                    // Gather short-term (thread) and long-term (memory)
+                    // context for the cascade — same as the model-invoked
+                    // `skill` tool path. The slash-command path has the
+                    // thread entity directly (from the session), so we
+                    // snapshot recent turns and gather memory here rather
+                    // than going through `ToolCallEventStream`.
+                    let (prior_messages, memory_snippets) =
+                        crate::tools::gather_cascade_context_from_thread(
+                            &thread,
+                            &task_text,
+                            slash_swarm_id,
+                            cx,
+                        )
+                        .await;
+
+                    match executor
+                        .execute_skill(
+                            skill_name,
+                            context,
+                            prior_messages,
+                            memory_snippets,
+                            None,
+                            None,
+                        )
+                        .await
+                    {
                         Ok(result_text) => {
                             crate::tools::render_skill_envelope(&skill, &result_text)
                         }
                         Err(e) => {
                             crate::tools::render_skill_envelope(
                                 &skill,
-                                &format!("Skill '{}' manifest execution failed: {}", skill_name, e),
+                                &crate::tools::manifest_execution_failed_body(skill_name, &e),
                             )
                         }
                     }
@@ -2363,16 +2470,22 @@ impl NativeAgentConnection {
                                     )
                                 })??;
                                 cx.background_spawn(async move {
-                                    if let acp_thread::RequestPermissionOutcome::Selected(outcome) =
-                                        outcome_task.await
-                                    {
-                                        response
-                                            .send(outcome)
-                                            .map_err(|_| {
-                                                anyhow!("authorization receiver was dropped")
-                                            })
-                                            .log_err();
-                                    }
+                                    let outcome = match outcome_task.await {
+                                        acp_thread::RequestPermissionOutcome::Selected(outcome) => outcome,
+                                        acp_thread::RequestPermissionOutcome::InterruptedByFollowUp => {
+                                            acp_thread::SelectedPermissionOutcome::new(
+                                                acp::PermissionOptionId::new(
+                                                    FOLLOW_UP_PERMISSION_DENIED_OPTION_ID,
+                                                ),
+                                                acp::PermissionOptionKind::RejectOnce,
+                                            )
+                                        }
+                                        acp_thread::RequestPermissionOutcome::Cancelled => return,
+                                    };
+                                    response
+                                        .send(outcome)
+                                        .map_err(|_| anyhow!("authorization receiver was dropped"))
+                                        .log_err();
                                 })
                                 .detach();
                             }
@@ -2393,6 +2506,11 @@ impl NativeAgentConnection {
                                 acp_thread.update(cx, |thread, cx| {
                                     thread.update_tool_call(update, cx)
                                 })??;
+                            }
+                            ThreadEvent::ToolCallThinking { tool_call_id, text } => {
+                                acp_thread.update(cx, |thread, cx| {
+                                    thread.append_tool_call_thinking(&tool_call_id, &text, cx);
+                                })?;
                             }
                             ThreadEvent::SubagentSpawned(session_id) => {
                                 acp_thread.update(cx, |thread, cx| {
@@ -2535,6 +2653,51 @@ fn strip_slash_command_prefix(text: &str) -> String {
     rest.split_once(char::is_whitespace)
         .map(|(_, after)| after.to_string())
         .unwrap_or_default()
+}
+
+/// Parse leading `key=value` pairs from a slash-command argument string and
+/// return them as a context map plus the remaining task text. This gives
+/// the slash-command path (`send_skill_invocation`) a context channel
+/// equivalent to the model-invoked `skill` tool's `SkillToolInput.context`
+/// field — context-dependent skills like `swarm-intelligence` (which
+/// branches on `mode` and requires `swarm_id`) can receive these values
+/// without the cascade silently defaulting.
+///
+/// Pairs must appear before the task text: the first token that doesn't
+/// match `key=value` (where `key` is `[a-zA-Z0-9_]+` and `value` is
+/// non-whitespace) ends the context region and starts the task. This avoids
+/// ambiguity with task text that happens to contain `=` (e.g. "filter
+/// x=y") — once a non-pair token is seen, parsing stops.
+///
+/// Example: `"mode=local swarm_id=ws-1 compose my swarm"`
+///   → context: `{mode: "local", swarm_id: "ws-1"}`
+///   → task: `"compose my swarm"`
+fn parse_slash_command_context(
+    text: &str,
+) -> (std::collections::HashMap<String, serde_json::Value>, String) {
+    let mut context = std::collections::HashMap::new();
+    let mut rest = text;
+    loop {
+        let trimmed = rest.trim_start();
+        let Some(eq_pos) = trimmed.find('=') else {
+            break;
+        };
+        let key_part = &trimmed[..eq_pos];
+        if key_part.is_empty() || !key_part.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            break;
+        }
+        let after_eq = &trimmed[eq_pos + 1..];
+        let (value, remaining) = match after_eq.find(char::is_whitespace) {
+            Some(end) => (&after_eq[..end], &after_eq[end..]),
+            None => (after_eq, ""),
+        };
+        context.insert(
+            key_part.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+        rest = remaining;
+    }
+    (context, rest.trim_start().to_string())
 }
 
 struct NativeAgentModelSelector {
@@ -2753,6 +2916,22 @@ pub(crate) fn manifest_executor() -> Option<&'static Arc<dyn SkillManifestExecut
     MANIFEST_EXECUTOR.get().and_then(|opt| opt.as_ref())
 }
 
+/// Get a cloned handle to the global manifest executor, if set.
+///
+/// This is the invocation-time resolver used by `SkillTool` (via
+/// `with_manifest_executor_resolver`) to close the session-creation race:
+/// the closure reads the global each time the tool runs, so sessions
+/// created before the deferred post-login task wires the executor pick
+/// it up on later invocations. `Arc::clone` is cheap (atomic refcount),
+/// so calling this per skill invocation is not a measurable cost.
+///
+/// `pub` (not `pub(crate)`) so the composition root can back the IPC
+/// `SkillExecPort` (main.rs `AgentSkillExec`) with the same global — the
+/// zed-side skill-execution path for MCP servers runs through here too.
+pub fn manifest_executor_cloned() -> Option<Arc<dyn SkillManifestExecutor>> {
+    crate::manifest_executor().cloned()
+}
+
 // ── D6: Thread → memory ingestion hook ─────────────────────────────────────
 
 /// A completed thread turn offered to the memory system for ingestion.
@@ -2765,6 +2944,11 @@ pub struct ThreadTurnRecord {
     pub agent_response: String,
     pub model: String,
     pub thread_title: Option<String>,
+    /// The agent ID that produced this turn (e.g., `CURATOR_AGENT_ID`, `ZED_AGENT_ID`).
+    /// `None` for threads with no agent identity (upstream-zed compatibility).
+    /// The memory port uses this to route ingestion to the correct
+    /// perspective-scoped store — Curator turns go to the curator's sovereign DB.
+    pub agent_id: Option<AgentId>,
 }
 
 /// Port for ingesting completed thread turns into memory (D6).
@@ -2808,6 +2992,42 @@ pub fn set_memory_port(port: Option<Arc<dyn ThreadMemoryPort>>) {
 /// an await point (the ingestion is fire-and-forget on a background task).
 pub(crate) fn memory_port() -> Option<Arc<dyn ThreadMemoryPort>> {
     MEMORY_PORT.lock().expect("MEMORY_PORT poisoned").clone()
+}
+
+/// Global override for the archived threads DB path (D28 — Standardized
+/// Artifact Storage).
+///
+/// When set, `ThreadsDatabase::new` resolves the threads SQLite DB at this
+/// path instead of the upstream `paths::data_dir()/threads/threads.db`.
+/// The canonical kask path is `{kask_data_dir}/threads/threads.db`, resolved
+/// by `hkask_types::agent_paths::resolve_under_data_dir`. Wired by the
+/// zed-kask composition root at startup.
+///
+/// Uses a `Mutex` (not `OnceLock`) so the path can be replaced after startup
+/// — e.g. if the operator changes the kask data directory via settings and
+/// the composition root re-wires. Per `.rules`, `Mutex` hooks are re-settable
+/// and do not need the `Err`-branch warn.
+static THREADS_DB_PATH_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+
+/// Set the global archived-threads DB path override (D28 composition root).
+///
+/// Called by zed-kask's app startup to wire the canonical kask data-root
+/// threads path into the threads database. When `None`, the threads DB falls
+/// back to the legacy upstream path so the editor remains functional
+/// pre-wiring.
+pub fn set_threads_db_path_override(path: Option<std::path::PathBuf>) {
+    *THREADS_DB_PATH_OVERRIDE
+        .lock()
+        .expect("THREADS_DB_PATH_OVERRIDE poisoned") = path;
+}
+
+/// Get the global archived-threads DB path override, if set.
+pub(crate) fn threads_db_path_override() -> Option<std::path::PathBuf> {
+    THREADS_DB_PATH_OVERRIDE
+        .lock()
+        .expect("THREADS_DB_PATH_OVERRIDE poisoned")
+        .clone()
 }
 
 /// Context injector — enriches prompts with retrieved context (D11).
@@ -2860,9 +3080,50 @@ pub trait ContextInjector: Send + Sync {
 static CONTEXT_INJECTOR: std::sync::OnceLock<Option<Arc<dyn ContextInjector>>> =
     std::sync::OnceLock::new();
 
+/// Global hook for the **Curator's** context injector (D11 — curator mirror).
+///
+/// Set by the zed-kask composition root alongside `set_context_injector`.
+/// When set, Curator threads get their prompts enriched with memories
+/// recalled from the curator's sovereign DB (`agents/curator/curator.db`),
+/// mirroring the user agent's recall loop. When `None`, Curator threads
+/// fall back to the user injector (if any) — graceful degradation that
+/// gives the curator user-scoped recall instead of curator-scoped recall.
+static CURATOR_CONTEXT_INJECTOR: std::sync::OnceLock<Option<Arc<dyn ContextInjector>>> =
+    std::sync::OnceLock::new();
+
 /// Set the global context injector (D11 composition root).
+///
+/// Uses `OnceLock` — a second call (e.g. deferred task re-firing after a
+/// model change) is silently dropped. The warn names the hook so operators
+/// reading the log can distinguish "not configured" from "configured but
+/// the second wiring was dropped".
 pub fn set_context_injector(injector: Option<Arc<dyn ContextInjector>>) {
-    let _ = CONTEXT_INJECTOR.set(injector);
+    if let Err(prev) = CONTEXT_INJECTOR.set(injector) {
+        log::warn!(
+            "set_context_injector: hook already set — second wiring attempt dropped. \
+             This usually means the deferred post-login task re-ran (re-login, multi-window, \
+             or retry). The previously-wired injector remains active. \
+             Remediation: restart the app to re-wire from a clean process."
+        );
+        let _ = prev;
+    }
+}
+
+/// Set the Curator's context injector (D11 composition root — curator mirror).
+///
+/// Called by the composition root alongside `set_context_injector`. The
+/// curator injector recalls from the curator's sovereign DB so the Curator
+/// builds its own semantic + episodic memory and recalls it automatically —
+/// a parallel of the user agent's memory loop.
+pub fn set_curator_context_injector(injector: Option<Arc<dyn ContextInjector>>) {
+    if let Err(prev) = CURATOR_CONTEXT_INJECTOR.set(injector) {
+        log::warn!(
+            "set_curator_context_injector: hook already set — second wiring attempt dropped. \
+             The previously-wired curator injector remains active. \
+             Remediation: restart the app to re-wire from a clean process."
+        );
+        let _ = prev;
+    }
 }
 
 /// Get the global context injector, if set.
@@ -2870,12 +3131,123 @@ pub(crate) fn context_injector() -> Option<&'static Arc<dyn ContextInjector>> {
     CONTEXT_INJECTOR.get().and_then(|opt| opt.as_ref())
 }
 
+/// Get the context injector for a given agent ID (D11 per-agent dispatch).
+///
+/// Returns the Curator's injector when `agent_id` is `CURATOR_AGENT_ID`,
+/// falling back to the user injector when the curator injector is not set
+/// (graceful degradation — gives the curator user-scoped recall instead of
+/// none). Returns the user injector for any other agent ID (including
+/// `None` — the default Zed Agent).
+pub(crate) fn context_injector_for(
+    agent_id: Option<&AgentId>,
+) -> Option<&'static Arc<dyn ContextInjector>> {
+    if agent_id == Some(&CURATOR_AGENT_ID) {
+        if let Some(curator_injector) = CURATOR_CONTEXT_INJECTOR.get().and_then(|opt| opt.as_ref())
+        {
+            return Some(curator_injector);
+        }
+        // Fall back to the user injector so the curator still gets *some*
+        // recall when the curator injector isn't wired. Logged at composition
+        // root so the operator knows the curator is running on user-scoped
+        // memory instead of its own.
+    }
+    context_injector()
+}
+
+// ── D11: Cascade context provider — memory + short-term context for skills ─
+
+/// A request for cascade context gathering. The `agent` crate's local mirror
+/// of `hkask_types::CascadeContextRequest`. The bridge adapts between the two.
+pub struct CascadeContextRequest {
+    pub thread_id: String,
+    pub task: String,
+    pub agent_id: Option<String>,
+    pub swarm_id: Option<String>,
+    pub short_term_messages: Vec<language_model::LanguageModelRequestMessage>,
+    pub saliency_floor: f64,
+    pub max_chunks: u32,
+}
+
+/// The gathered context for a skill cascade invocation. The `agent` crate's
+/// local mirror of `hkask_types::CascadeContext`.
+pub struct CascadeContext {
+    pub short_term_messages: Vec<language_model::LanguageModelRequestMessage>,
+    /// Long-term memory snippets as serialized JSON (text + source +
+    /// confidence + relevance_score). The bridge converts these to
+    /// `hkask_types::MemorySnippet` when threading through to the executor.
+    pub long_term_snippets: Vec<MemorySnippetRecord>,
+}
+
+/// A recalled memory snippet — the `agent` crate's local mirror of
+/// `hkask_types::MemorySnippet`.
+#[derive(Debug, Clone)]
+pub struct MemorySnippetRecord {
+    pub text: String,
+    pub source: String,
+    pub confidence: f64,
+    pub relevance_score: f64,
+}
+
+/// A chat message for cascade context injection — the `agent` crate's local
+/// mirror of `hkask_types::ChatMessage`. The bridge converts these to
+/// `hkask_types::ChatMessage` when threading through to the executor.
+#[derive(Debug, Clone)]
+pub struct CascadeChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// Port for gathering cascade context (short-term thread messages +
+/// long-term memory from participant stores).
+///
+/// The bridge provides the implementation (`BridgeCascadeContextProvider`),
+/// which holds an `Arc<RealMemoryPort>` and applies the participant matrix
+/// to select recall sources. When no implementation is injected, skill
+/// cascades run without thread context or memory (the pre-fix behavior).
+pub trait CascadeContextProvider: Send + Sync {
+    fn gather_context<'a>(
+        &'a self,
+        request: &'a CascadeContextRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<CascadeContext, String>> + Send + 'a>,
+    >;
+}
+
+/// Global hook for the cascade context provider.
+///
+/// Set by the zed-kask composition root at startup alongside
+/// `set_context_injector`. When set, skill cascades receive short-term
+/// thread context + long-term memory. When `None`, cascades run isolated
+/// (the pre-fix behavior).
+static CASCADE_CONTEXT_PROVIDER: std::sync::OnceLock<Option<Arc<dyn CascadeContextProvider>>> =
+    std::sync::OnceLock::new();
+
+/// Set the global cascade context provider (composition root).
+pub fn set_cascade_context_provider(provider: Option<Arc<dyn CascadeContextProvider>>) {
+    if let Err(_prev) = CASCADE_CONTEXT_PROVIDER.set(provider) {
+        log::warn!(
+            "set_cascade_context_provider: hook already set — second wiring attempt dropped. \
+             The previously-wired provider remains active. \
+             Remediation: restart the app to re-wire from a clean process."
+        );
+    }
+}
+
+/// Get the global cascade context provider, if set.
+pub(crate) fn cascade_context_provider() -> Option<&'static Arc<dyn CascadeContextProvider>> {
+    CASCADE_CONTEXT_PROVIDER.get().and_then(|opt| opt.as_ref())
+}
+
 /// Thread condenser — compresses tool results before they enter the message
-/// history (D12).
+/// history (D8).
 ///
 /// Called from the tool-result handling path in `run_turn_internal`.
 /// When set, tool output text is compressed before being stored in the
 /// `AgentMessage.tool_results`. When `None`, tool results are stored verbatim.
+///
+/// Code-reading tools (read_file, grep, list_directory, etc.) are bypassed at
+/// the call site — see `NO_COMPRESS_TOOLS` in `thread.rs`. The condenser is
+/// intended for verbose terminal/build/test output, not source code.
 pub trait ThreadCondenser: Send + Sync {
     /// Compress a tool result's text output.
     ///
@@ -2884,36 +3256,51 @@ pub trait ThreadCondenser: Send + Sync {
     fn compress_tool_result(&self, tool_name: &str, output: &str) -> String;
 }
 
-/// Global hook for the thread condenser (D12).
-static THREAD_CONDENSER: std::sync::OnceLock<Option<Arc<dyn ThreadCondenser>>> =
-    std::sync::OnceLock::new();
+/// Global hook for the thread condenser (D8).
+///
+/// Uses a `Mutex` (not `OnceLock`) so the condenser can be replaced after
+/// startup — the composition root installs an early condenser before the
+/// model resolves, then the deferred post-login task may upgrade it.
+static THREAD_CONDENSER: std::sync::Mutex<Option<Arc<dyn ThreadCondenser>>> =
+    std::sync::Mutex::new(None);
 
-/// Set the global thread condenser (D12 composition root).
+/// Set the global thread condenser (D8 composition root).
+///
+/// Re-settable — later calls replace the earlier condenser (e.g., upgrading
+/// from an early condenser to one constructed after the model resolves).
 pub fn set_thread_condenser(condenser: Option<Arc<dyn ThreadCondenser>>) {
-    let _ = THREAD_CONDENSER.set(condenser);
+    *THREAD_CONDENSER.lock().expect("THREAD_CONDENSER poisoned") = condenser;
 }
 
-/// Get the global thread condenser, if set.
-pub(crate) fn thread_condenser() -> Option<&'static Arc<dyn ThreadCondenser>> {
-    THREAD_CONDENSER.get().and_then(|opt| opt.as_ref())
+/// Get a cloned handle to the global thread condenser, if set.
+///
+/// Returns an owned `Arc` clone so the caller doesn't hold the lock across
+/// an await point.
+pub(crate) fn thread_condenser() -> Option<Arc<dyn ThreadCondenser>> {
+    THREAD_CONDENSER
+        .lock()
+        .expect("THREAD_CONDENSER poisoned")
+        .clone()
 }
 
 /// Global hook for the tool router. When set, `Thread::enabled_tools`
 /// applies the router as a final filter after profile and feature-flag
 /// checks. When `None` (upstream Zed), all enabled tools pass through (I2).
-static TOOL_ROUTER: std::sync::OnceLock<Option<Arc<dyn crate::tool_router::ToolRouter>>> =
-    std::sync::OnceLock::new();
+static TOOL_ROUTER: std::sync::Mutex<Option<Arc<dyn crate::tool_router::ToolRouter>>> =
+    std::sync::Mutex::new(None);
 
 /// Set the global tool router.
+///
+/// Re-settable — later calls replace the earlier router.
 pub fn set_tool_router(router: Option<Arc<dyn crate::tool_router::ToolRouter>>) {
-    let _ = TOOL_ROUTER.set(router);
+    *TOOL_ROUTER.lock().expect("TOOL_ROUTER poisoned") = router;
 }
 
 /// Get the global tool router, if set. Returns `None` when no router has
 /// been configured (upstream Zed — I2). hKask's composition root calls
 /// `set_tool_router(Some(Arc::new(LazyToolRouter::new())))` to enable it.
-pub(crate) fn tool_router() -> Option<&'static Arc<dyn crate::tool_router::ToolRouter>> {
-    TOOL_ROUTER.get().and_then(|opt| opt.as_ref())
+pub(crate) fn tool_router() -> Option<Arc<dyn crate::tool_router::ToolRouter>> {
+    TOOL_ROUTER.lock().expect("TOOL_ROUTER poisoned").clone()
 }
 
 impl acp_thread::AgentConnection for NativeAgentConnection {
@@ -4048,7 +4435,7 @@ pub fn skill_body_resolver_for_project(
                 read_skill_body_from_content(&skill.skill_file_path, &content).map_err(Into::into)
             })
         }
-        SkillSource::BuiltIn | SkillSource::Global | SkillSource::Public { .. } => {
+        SkillSource::Global | SkillSource::Public { .. } => {
             let fs = fs.clone();
             cx.background_spawn(async move {
                 agent_skills::read_skill_body(fs.as_ref(), &skill.skill_file_path)
@@ -4073,9 +4460,7 @@ fn combine_skills(
     global: Vec<Result<Skill, SkillLoadError>>,
     project: impl Iterator<Item = Result<Skill, SkillLoadError>>,
 ) -> (Vec<Skill>, Vec<SkillLoadError>) {
-    // Built-in skills go first (lowest priority) so that global and
-    // project-local skills with the same name shadow them.
-    let mut skills = builtin_skills();
+    let mut skills = Vec::new();
     let mut errors = Vec::new();
     for result in global.into_iter().chain(project) {
         match result {
@@ -4130,6 +4515,11 @@ fn log_skill_conflicts(skills: &[Skill]) {
 /// source colliding (e.g. two globals or two project-locals) keep the
 /// first one to match the historical behavior.
 ///
+/// Core skills are unshadowable: a project-local skill with the same
+/// name as a core skill cannot override it. This prevents a compromised
+/// project from injecting instructions that bypass the consent/trust/
+/// quality controls that core skills enforce.
+///
 /// This is the projection of `state.skills` used by everything the
 /// model interacts with: the system-prompt catalog, the `SkillTool`'s
 /// name resolver, and slash-command invocation. The autocomplete popup
@@ -4144,6 +4534,22 @@ fn apply_skill_overrides(skills: &[Skill]) -> Vec<Skill> {
     for skill in skills {
         match indices.get(skill.name.as_str()).copied() {
             Some(idx) => {
+                // Core skills are unshadowable in BOTH directions:
+                // 1. A non-core skill can never override a core skill
+                //    already in the result, regardless of precedence.
+                // 2. A core skill arriving later must replace a non-core
+                //    skill of the same name regardless of precedence —
+                //    without this, a project-local user skill iterated
+                //    before a global core skill would win on precedence
+                //    (ProjectLocal=3 > Global=2) and silently shadow the
+                //    core skill, defeating the unshadowable guarantee.
+                if result[idx].core && !skill.core {
+                    continue;
+                }
+                if skill.core && !result[idx].core {
+                    result[idx] = skill.clone();
+                    continue;
+                }
                 if skill.source.precedence() > result[idx].source.precedence() {
                     result[idx] = skill.clone();
                 }
@@ -4163,6 +4569,7 @@ mod internal_tests {
 
     use super::*;
     use acp_thread::{AgentConnection, AgentModelGroupName, AgentModelInfo, MentionUri};
+    use agent_servers::AgentServer;
     use agent_settings::COMPACTION_PROMPT;
     use agent_skills::{MAX_SKILL_DESCRIPTIONS_SIZE, MAX_SKILL_FILE_SIZE, SkillVisibility};
     use fs::FakeFs;
@@ -4179,17 +4586,19 @@ mod internal_tests {
     use util::{path, rel_path::rel_path};
 
     fn make_global_skill(name: &str, description: &str) -> Skill {
+        let dir = global_skills_dir().join(name);
         Skill {
             name: name.to_string(),
             description: description.to_string(),
             source: SkillSource::Global,
-            directory_path: PathBuf::from(format!("/home/user/.agents/skills/{name}")),
-            skill_file_path: PathBuf::from(format!("/home/user/.agents/skills/{name}/SKILL.md")),
+            directory_path: dir.clone(),
+            skill_file_path: dir.join("SKILL.md"),
             load_warnings: Vec::new(),
             disable_model_invocation: false,
             visibility: SkillVisibility::Private,
             dependencies: Vec::new(),
             embedded_body: None,
+            core: false,
         }
     }
 
@@ -4526,47 +4935,23 @@ mod internal_tests {
             visibility: SkillVisibility::Private,
             dependencies: Vec::new(),
             embedded_body: None,
+            core: false,
         }
     }
 
-    fn make_builtin_skill(name: &str, description: &str) -> Skill {
-        Skill {
-            name: name.to_string(),
-            description: description.to_string(),
-            source: SkillSource::BuiltIn,
-            directory_path: PathBuf::from(format!("/builtin/{name}")),
-            skill_file_path: PathBuf::from(format!("/builtin/{name}/SKILL.md")),
-            load_warnings: Vec::new(),
-            disable_model_invocation: false,
-            visibility: SkillVisibility::Private,
-            dependencies: Vec::new(),
-            embedded_body: Some("built-in body"),
-        }
-    }
-
-    /// Filter to only user-defined (non-built-in) skills for test assertions.
+    /// Filter to only user-defined (non-core) skills for test assertions.
     fn user_skills(skills: &[Skill]) -> Vec<&Skill> {
-        skills
-            .iter()
-            .filter(|s| !matches!(s.source, SkillSource::BuiltIn))
-            .collect()
+        skills.iter().filter(|s| !s.core).collect()
     }
 
-    /// Filter to only disk-loaded global skills (from `~/.agents/skills/`),
-    /// excluding the embedded kask globals that are always present. Tests
-    /// that create skills on disk and assert counts use this to ignore the
-    /// 42 embedded globals baked into the binary.
+    /// Filter to only disk-loaded global skills (from the global skills dir).
+    /// Tests that create skills on disk and assert counts use this to ignore
+    /// built-in and project-local skills.
     #[allow(dead_code)]
     fn disk_global_skills(skills: &[Skill]) -> Vec<&Skill> {
         skills
             .iter()
-            .filter(|s| {
-                matches!(s.source, SkillSource::Global)
-                    && !s
-                        .skill_file_path
-                        .to_string_lossy()
-                        .starts_with("<embedded-global>")
-            })
+            .filter(|s| matches!(s.source, SkillSource::Global))
             .collect()
     }
 
@@ -4621,45 +5006,80 @@ mod internal_tests {
     }
 
     #[test]
-    fn test_apply_skill_overrides_global_wins_over_builtin() {
-        // A global skill with the same name as a built-in must shadow
-        // the built-in in the model-facing projection, regardless of
-        // iteration order.
-        let built_in = make_builtin_skill("create-skill", "Built-in version");
-        let global = make_global_skill("create-skill", "User override");
-
-        let resolved = apply_skill_overrides(&[built_in, global]);
-
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].description, "User override");
-        assert!(matches!(resolved[0].source, SkillSource::Global));
-    }
-
-    #[test]
-    fn test_apply_skill_overrides_project_wins_over_builtin() {
-        let built_in = make_builtin_skill("create-skill", "Built-in version");
+    fn test_apply_skill_overrides_core_skill_unshadowable_by_project_local() {
+        // A core skill cannot be shadowed by a project-local skill of the
+        // same name — core skills are unshadowable to prevent a compromised
+        // project from bypassing consent/trust/quality controls.
+        let mut core = make_global_skill("create-skill", "Core version");
+        core.core = true;
         let project = make_project_skill("create-skill", "Project override", "my-project");
 
-        let resolved = apply_skill_overrides(&[built_in, project]);
+        let resolved = apply_skill_overrides(&[core, project]);
 
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].description, "Project override");
-        assert!(matches!(
-            resolved[0].source,
-            SkillSource::ProjectLocal { .. }
-        ));
+        assert_eq!(resolved[0].description, "Core version");
+        assert!(resolved[0].core);
     }
 
     #[test]
-    fn test_apply_skill_overrides_project_wins_over_builtin_and_global() {
-        // All three sources present — the project-local must win and
-        // both lower-precedence entries must be dropped from the
-        // model-facing projection.
-        let built_in = make_builtin_skill("create-skill", "Built-in");
+    fn test_apply_skill_overrides_core_skill_unshadowable_by_user_global() {
+        // A core skill cannot be shadowed by a user (non-core) global skill
+        // of the same name.
+        let mut core = make_global_skill("create-skill", "Core version");
+        core.core = true;
+        let user_global = make_global_skill("create-skill", "User override");
+
+        let resolved = apply_skill_overrides(&[core, user_global]);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].description, "Core version");
+        assert!(resolved[0].core);
+    }
+
+    #[test]
+    fn test_apply_skill_overrides_core_skill_wins_when_iterated_after_user_skill() {
+        // The unshadowable guarantee must hold regardless of iteration
+        // order. If a non-core project-local skill (precedence 3) is
+        // iterated BEFORE a core global skill (precedence 2) of the same
+        // name, the core skill must still win — a naive precedence-only
+        // comparison would let the project skill shadow the core skill
+        // (3 > 2), defeating the guarantee. This is the reverse-order
+        // counterpart of `..._unshadowable_by_project_local`.
+        let project = make_project_skill("create-skill", "Project override", "my-project");
+        let mut core = make_global_skill("create-skill", "Core version");
+        core.core = true;
+
+        let resolved = apply_skill_overrides(&[project, core]);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].description, "Core version");
+        assert!(resolved[0].core);
+    }
+
+    #[test]
+    fn test_apply_skill_overrides_core_skill_wins_when_iterated_after_user_global() {
+        // Same as above but with a user global skill first — the core
+        // global skill arriving second must replace it despite equal
+        // precedence (both Global).
+        let user_global = make_global_skill("create-skill", "User override");
+        let mut core = make_global_skill("create-skill", "Core version");
+        core.core = true;
+
+        let resolved = apply_skill_overrides(&[user_global, core]);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].description, "Core version");
+        assert!(resolved[0].core);
+    }
+
+    #[test]
+    fn test_apply_skill_overrides_project_wins_over_user_global() {
+        // Project-local still wins over user (non-core) global — the
+        // normal precedence order applies when no core skill is involved.
         let global = make_global_skill("create-skill", "Global");
         let project = make_project_skill("create-skill", "Project", "my-project");
 
-        let resolved = apply_skill_overrides(&[built_in, global, project]);
+        let resolved = apply_skill_overrides(&[global, project]);
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].description, "Project");
@@ -4745,6 +5165,7 @@ mod internal_tests {
                 visibility: SkillVisibility::Private,
                 dependencies: Vec::new(),
                 embedded_body: None,
+                core: false,
             });
         }
 
@@ -4785,6 +5206,7 @@ mod internal_tests {
             visibility: SkillVisibility::Private,
             dependencies: Vec::new(),
             embedded_body: None,
+            core: false,
         };
         let second = Skill {
             name: "skill-02-overflows".to_string(),
@@ -4797,6 +5219,7 @@ mod internal_tests {
             visibility: SkillVisibility::Private,
             dependencies: Vec::new(),
             embedded_body: None,
+            core: false,
         };
         let third = Skill {
             name: "skill-03-would-fit".to_string(),
@@ -4809,6 +5232,7 @@ mod internal_tests {
             visibility: SkillVisibility::Private,
             dependencies: Vec::new(),
             embedded_body: None,
+            core: false,
         };
 
         let skills = vec![first.clone(), second.clone(), third.clone()];
@@ -4850,6 +5274,7 @@ mod internal_tests {
             visibility: SkillVisibility::Private,
             dependencies: Vec::new(),
             embedded_body: None,
+            core: false,
         };
         let visible = Skill {
             name: "visible".to_string(),
@@ -4862,6 +5287,7 @@ mod internal_tests {
             visibility: SkillVisibility::Private,
             dependencies: Vec::new(),
             embedded_body: None,
+            core: false,
         };
 
         let (kept, issues) = select_catalog_skills(&[hidden, visible]);
@@ -5329,13 +5755,7 @@ mod internal_tests {
             let all = resolve(cx);
             let disk: Vec<_> = all
                 .iter()
-                .filter(|s| {
-                    matches!(s.source, SkillSource::Global)
-                        && !s
-                            .skill_file_path
-                            .to_string_lossy()
-                            .starts_with("<embedded-global>")
-                })
+                .filter(|s| matches!(s.source, SkillSource::Global))
                 .collect();
             assert!(disk.is_empty());
         });
@@ -5364,13 +5784,7 @@ mod internal_tests {
             let all = resolve(cx);
             let disk: Vec<_> = all
                 .iter()
-                .filter(|s| {
-                    matches!(s.source, SkillSource::Global)
-                        && !s
-                            .skill_file_path
-                            .to_string_lossy()
-                            .starts_with("<embedded-global>")
-                })
+                .filter(|s| matches!(s.source, SkillSource::Global))
                 .collect();
             assert_eq!(
                 disk.len(),
@@ -5445,13 +5859,7 @@ mod internal_tests {
             let all = parent_resolve(cx);
             let disk: Vec<_> = all
                 .iter()
-                .filter(|s| {
-                    matches!(s.source, SkillSource::Global)
-                        && !s
-                            .skill_file_path
-                            .to_string_lossy()
-                            .starts_with("<embedded-global>")
-                })
+                .filter(|s| matches!(s.source, SkillSource::Global))
                 .collect();
             assert_eq!(disk.len(), 1);
             assert_eq!(disk[0].name, "shared-skill");
@@ -5487,13 +5895,7 @@ mod internal_tests {
             let all = subagent_resolve(cx);
             let disk: Vec<_> = all
                 .iter()
-                .filter(|s| {
-                    matches!(s.source, SkillSource::Global)
-                        && !s
-                            .skill_file_path
-                            .to_string_lossy()
-                            .starts_with("<embedded-global>")
-                })
+                .filter(|s| matches!(s.source, SkillSource::Global))
                 .collect();
             assert_eq!(disk.len(), 1);
             assert_eq!(disk[0].name, "shared-skill");
@@ -7297,6 +7699,143 @@ mod internal_tests {
         })
     }
 
+    /// End-to-end pin for the kask panel's per-tab scoping: two
+    /// `CuratorAgentServer`s built with different per-tab scopes and
+    /// prompts must produce two connections whose sessions carry the
+    /// matching scope and static context — the runtime chain the original
+    /// bug broke (companies tab showing the curator-scoped header with all
+    /// MCP tools reachable).
+    #[gpui::test]
+    async fn test_curator_sessions_carry_per_tab_scope_and_prompt(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/", json!({ "a": {} })).await;
+        let project = Project::test(fs.clone(), [Path::new("/a")], cx).await;
+
+        for (server, expected_fragment) in [("companies", "companies"), ("curator", "curator")] {
+            let thread_store = cx.new(|cx| ThreadStore::new(cx));
+            let server_struct = CuratorAgentServer::new(fs.clone(), thread_store)
+                .with_extra_static_context(format!("scoped to {server}").into())
+                .with_mcp_server_scope(server.into());
+            let connection = cx
+                .update(|cx| {
+                    server_struct.connect(
+                        agent_servers::AgentServerDelegate::new(
+                            project.read(cx).agent_server_store().clone(),
+                            None,
+                            None,
+                        ),
+                        project.clone(),
+                        cx,
+                    )
+                })
+                .await
+                .expect("connect");
+            let acp_thread = cx
+                .update(|cx| {
+                    connection.clone().new_session(
+                        project.clone(),
+                        PathList::new(&[Path::new("/a")]),
+                        cx,
+                    )
+                })
+                .await
+                .expect("new_session");
+
+            let session_id = cx.update(|cx| acp_thread.read(cx).session_id().clone());
+            let agent = connection
+                .downcast::<NativeAgentConnection>()
+                .expect("curator connection is NativeAgentConnection");
+            let thread = cx.update(|cx| native_thread_for_session(&agent.0, &session_id, cx));
+
+            cx.update(|cx| {
+                thread.read_with(cx, |thread, _cx| {
+                    // The scope matches the tab's server.
+                    assert_eq!(
+                        thread.mcp_server_scope().map(|s| s.as_ref()),
+                        Some(server),
+                        "session scope must match the tab's server"
+                    );
+                    // The static context carries the per-tab prompt
+                    // (appended to the curator base context).
+                    let static_context = thread
+                        .agent_static_context()
+                        .expect("curator static context set");
+                    assert!(
+                        static_context.contains(expected_fragment),
+                        "static context must mention the tab's server, got: {static_context}"
+                    );
+                    assert!(
+                        static_context.contains("Curator Role"),
+                        "curator base context must be present"
+                    );
+                });
+            });
+        }
+    }
+
+    /// Pin that Curator sessions register both the `curator_status` and
+    /// `curator_directive` tools. The directive tool is the enforcement
+    /// point for the CuratorDirective channel — without it, the
+    /// `CURATOR_STATIC_CONTEXT` prompt advertising directive issuance is
+    /// theater (the `.rules` "Advertised invariants need enforcement
+    /// points" trap).
+    #[gpui::test]
+    async fn test_curator_session_registers_directive_tool(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree("/", json!({ "a": {} })).await;
+        let project = Project::test(fs.clone(), [Path::new("/a")], cx).await;
+
+        let thread_store = cx.new(|cx| ThreadStore::new(cx));
+        let server_struct = CuratorAgentServer::new(fs.clone(), thread_store);
+        let connection = cx
+            .update(|cx| {
+                server_struct.connect(
+                    agent_servers::AgentServerDelegate::new(
+                        project.read(cx).agent_server_store().clone(),
+                        None,
+                        None,
+                    ),
+                    project.clone(),
+                    cx,
+                )
+            })
+            .await
+            .expect("connect");
+        let acp_thread = cx
+            .update(|cx| {
+                connection.clone().new_session(
+                    project.clone(),
+                    PathList::new(&[Path::new("/a")]),
+                    cx,
+                )
+            })
+            .await
+            .expect("new_session");
+
+        let session_id = cx.update(|cx| acp_thread.read(cx).session_id().clone());
+        let agent = connection
+            .downcast::<NativeAgentConnection>()
+            .expect("curator connection is NativeAgentConnection");
+        let thread = cx.update(|cx| native_thread_for_session(&agent.0, &session_id, cx));
+
+        cx.update(|cx| {
+            thread.read_with(cx, |thread, _cx| {
+                assert!(
+                    thread.has_registered_tool("curator_status"),
+                    "curator sessions must register curator_status"
+                );
+                assert!(
+                    thread.has_registered_tool("curator_directive"),
+                    "curator sessions must register curator_directive — \
+                     without it the CURATOR_STATIC_CONTEXT prompt advertises \
+                     directive issuance with no enforcement point"
+                );
+            });
+        });
+    }
+
     fn init_test(cx: &mut TestAppContext) {
         env_logger::try_init().ok();
         cx.update(|cx| {
@@ -7346,6 +7885,54 @@ mod internal_tests {
         // block, the safe behavior is to return it unchanged rather than
         // silently mangling unrelated user text.
         assert_eq!(strip_slash_command_prefix("hello world"), "hello world",);
+    }
+
+    #[test]
+    fn test_parse_slash_command_context_extracts_leading_pairs() {
+        let (ctx, task) = parse_slash_command_context("mode=local swarm_id=ws-1 compose");
+        assert_eq!(ctx.get("mode").and_then(|v| v.as_str()), Some("local"));
+        assert_eq!(ctx.get("swarm_id").and_then(|v| v.as_str()), Some("ws-1"));
+        assert_eq!(task, "compose");
+    }
+
+    #[test]
+    fn test_parse_slash_command_context_no_pairs_returns_all_as_task() {
+        let (ctx, task) = parse_slash_command_context("compose my swarm");
+        assert!(ctx.is_empty());
+        assert_eq!(task, "compose my swarm");
+    }
+
+    #[test]
+    fn test_parse_slash_command_context_stops_at_non_pair_token() {
+        // A token without `=` ends the context region — task text with `=`
+        // after a non-pair token is NOT parsed as context.
+        let (ctx, task) = parse_slash_command_context("mode=abw filter x=y now");
+        assert_eq!(ctx.get("mode").and_then(|v| v.as_str()), Some("abw"));
+        assert_eq!(task, "filter x=y now");
+    }
+
+    #[test]
+    fn test_parse_slash_command_context_rejects_non_alphanumeric_key() {
+        // Keys must be alphanumeric+underscore — a key starting with a dash
+        // is not a context pair, it's task text.
+        let (ctx, task) = parse_slash_command_context("-flag=v compose");
+        assert!(ctx.is_empty());
+        assert_eq!(task, "-flag=v compose");
+    }
+
+    #[test]
+    fn test_parse_slash_command_context_empty_input() {
+        let (ctx, task) = parse_slash_command_context("");
+        assert!(ctx.is_empty());
+        assert_eq!(task, "");
+    }
+
+    #[test]
+    fn test_parse_slash_command_context_value_to_end_of_input() {
+        // A value with no trailing whitespace runs to the end.
+        let (ctx, task) = parse_slash_command_context("mode=local");
+        assert_eq!(ctx.get("mode").and_then(|v| v.as_str()), Some("local"));
+        assert_eq!(task, "");
     }
 }
 

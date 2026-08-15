@@ -11,11 +11,9 @@ path = "src/hkask_storage.rs"
 
 [dependencies]
 
-hkask-capability = { path = "../hkask-capability" }
-hkask-types = { path = "../hkask-types", features = ["sql"] }
+hkask-types = { workspace = true, features = ["sql"] }
 
-hkask-goal = { path = "../hkask-goal" }
-hkask-keystore = { path = "../hkask-keystore" }
+hkask-keystore.workspace = true
 rusqlite.workspace = true
 r2d2.workspace = true
 r2d2_sqlite.workspace = true
@@ -27,16 +25,15 @@ thiserror.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 hex.workspace = true
-argon2.workspace = true
-zeroize.workspace = true
 rand.workspace = true
 base64.workspace = true
 aes-gcm.workspace = true
 blake3.workspace = true
-sqlite-vec = "0.1"
-sqlx.workspace = true
-tokio.workspace = true
+sqlite-vec.workspace = true
+
 utoipa.workspace = true
 
+[lints]
+workspace = true
+
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }

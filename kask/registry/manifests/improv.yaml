@@ -1,5 +1,5 @@
 # Improv Process Manifest
-# ℏKask v0.31.0 — Composable interaction grammar as convergent PDCA
+# ℏKask v0.34.0 — Composable interaction grammar as convergent PDCA
 # Restructured: separated mode selection (KnowAct) from mode application (WordAct routing).
 # Five mode WordActs are now wired into the flow via conditional select steps.
 
@@ -13,16 +13,15 @@ manifest:
     mode-specific WordAct template, evaluates convergence quality, and
     iterates until constructive interaction quality is stable.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
 
 convergence:
-  threshold: 0.12
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: step_8_result.convergence_metric
+  convergence_mode: ""
+  # No convergence-check compute step: the loop runs N iterations then escalates.
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
 
 gas:
@@ -61,7 +60,7 @@ steps:
     renderer: minijinja
     template_ref: improv/improv-select
     gas_cap: 4000
-    timeout_seconds: 45
+    timeout_seconds: 120
     input_mapping:
       context: "{{ context | default({}) }}"
       contribution: "{{ contribution | default('') }}"
@@ -85,7 +84,7 @@ steps:
     renderer: minijinja
     template_ref: improv/improv-plussing
     gas_cap: 5000
-    timeout_seconds: 60
+    timeout_seconds: 120
     condition: "step_1_result.mode == 'plussing'"
     input_mapping:
       context: "{{ context | default({}) }}"
@@ -97,7 +96,7 @@ steps:
     renderer: minijinja
     template_ref: improv/improv-yes-and
     gas_cap: 5000
-    timeout_seconds: 60
+    timeout_seconds: 120
     condition: "step_1_result.mode == 'yes-and'"
     input_mapping:
       context: "{{ context | default({}) }}"
@@ -109,7 +108,7 @@ steps:
     renderer: minijinja
     template_ref: improv/improv-yes-but
     gas_cap: 5000
-    timeout_seconds: 60
+    timeout_seconds: 120
     condition: "step_1_result.mode == 'yes-but'"
     input_mapping:
       context: "{{ context | default({}) }}"
@@ -121,7 +120,7 @@ steps:
     renderer: minijinja
     template_ref: improv/improv-freestyling
     gas_cap: 5000
-    timeout_seconds: 60
+    timeout_seconds: 120
     condition: "step_1_result.mode == 'freestyling'"
     input_mapping:
       context: "{{ context | default({}) }}"
@@ -133,7 +132,7 @@ steps:
     renderer: minijinja
     template_ref: improv/improv-riffing
     gas_cap: 5000
-    timeout_seconds: 60
+    timeout_seconds: 120
     condition: "step_1_result.mode == 'riffing'"
     input_mapping:
       context: "{{ context | default({}) }}"
@@ -148,28 +147,20 @@ steps:
     renderer: minijinja
     template_ref: improv/improv-plussing
     gas_cap: 5000
-    timeout_seconds: 60
+    timeout_seconds: 120
     condition: "step_2_result == null and step_3_result == null and step_4_result == null and step_5_result == null and step_6_result == null"
     input_mapping:
       context: "{{ context | default({}) }}"
       contribution: "{{ contribution | default('') }}"
 
   - ordinal: 8
-    action: select
-    description: Compute normalized convergence metric for improv PDCA cycle.
-    renderer: minijinja
-    template_ref: improv/improv-convergence-check
-    gas_cap: 2000
-    timeout_seconds: 30
-    input_mapping:
-      mode_selection_result: "{{ step_1_result }}"
-      mode_application_result: "{{ step_2_result | default(step_3_result | default(step_4_result | default(step_5_result | default(step_6_result | default(step_7_result | default({}))))) }}"
-
-  - ordinal: 9
     action: loop
     description: Re-enter improv cycle if convergence threshold is not met.
     input_mapping:
       loop_target: "{{ 1 }}"
+      # Push the active mode's response length into convergence_signal so the
+      # Cauchy criterion can detect when the iterates have stopped moving.
+      convergence_signal: "{{ (step_2_result.response | default(step_3_result.response | default(step_4_result.response | default(step_5_result.response | default(step_6_result.response | default(step_7_result.response | default(''))))))) | length }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -177,45 +168,6 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: improv/improv-select
-      gas_budget: 4000
-    - resource: template
-      action: render
-      template_id: improv/improv-plussing
-      gas_budget: 5000
-    - resource: template
-      action: render
-      template_id: improv/improv-yes-and
-      gas_budget: 5000
-    - resource: template
-      action: render
-      template_id: improv/improv-yes-but
-      gas_budget: 5000
-    - resource: template
-      action: render
-      template_id: improv/improv-freestyling
-      gas_budget: 5000
-    - resource: template
-      action: render
-      template_id: improv/improv-riffing
-      gas_budget: 5000
-    - resource: template
-      action: render
-      template_id: improv/improv-convergence-check
-      gas_budget: 2000
-    - resource: manifest
-      action: execute
-      template_id: improv
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true
 
 ledger:
   emit_spans: true

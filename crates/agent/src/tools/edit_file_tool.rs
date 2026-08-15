@@ -5,7 +5,9 @@ use super::edit_session::{
     EditSession, EditSessionContext, EditSessionMode, EditSessionResult,
     initial_title_from_partial_path, run_session,
 };
-use crate::{AgentTool, Thread, ToolCallEventStream, ToolInput, ToolInputPayload};
+use crate::{
+    AgentTool, Thread, ToolCallEventStream, ToolInput, ToolInputPayload, map_tool_input_error,
+};
 use action_log::ActionLog;
 use agent_client_protocol::schema::v1 as acp;
 use anyhow::Result;
@@ -26,7 +28,7 @@ const DEFAULT_UI_TEXT: &str = "Editing file";
 /// Before using this tool, use the `read_file` tool to understand the file's contents and context.
 /// To create a new file or overwrite an existing one with completely new contents, use the `write_file` tool instead.
 ///
-/// The only supported path outside the project is `~/.agents/skills` or a descendant, for global agent skills.
+/// The only supported path outside the project is the global skills directory or a descendant, for global agent skills.
 ///
 /// `read_file` prefixes each line of its output with a line number right-aligned in a
 /// 6-character field followed by a single tab, then the line's actual content. When you
@@ -37,7 +39,7 @@ const DEFAULT_UI_TEXT: &str = "Editing file";
 pub struct EditFileToolInput {
     /// The full path of the file to edit in the project.
     ///
-    /// WARNING: When specifying which file path need changing, you MUST start each path with one of the project's root directories, unless it's a global agent skill under `~/.agents/skills`.
+    /// WARNING: When specifying which file path need changing, you MUST start each path with one of the project's root directories, unless it's a global agent skill under the global skills directory.
     ///
     /// The following examples assume we have two root directories in the project:
     /// - /a/b/backend
@@ -54,7 +56,7 @@ pub struct EditFileToolInput {
     /// </example>
     ///
     /// <example>
-    /// To edit a global agent skill file, you may provide a path under `~/.agents/skills`, such as `~/.agents/skills/my-skill/SKILL.md`.
+    /// To edit a global agent skill file, use the global skills directory path shown in the system prompt.
     /// </example>
     pub path: PathBuf,
 
@@ -204,7 +206,7 @@ impl EditFileTool {
                         },
                         Err(error) => {
                             return EditSessionResult::Failed {
-                                error: error.to_string(),
+                                error: map_tool_input_error(error),
                                 session,
                             };
                         }
@@ -626,14 +628,10 @@ mod tests {
         let (edit_tool, _project, _action_log, fs, _thread) =
             setup_test_with_fs(cx, fs, &[path!("/root").as_ref()]).await;
 
-        let input_path = PathBuf::from("~")
-            .join(".agents")
-            .join("skills")
-            .join("my-skill")
-            .join("SKILL.md");
         let skill_file = agent_skills::global_skills_dir()
             .join("my-skill")
             .join("SKILL.md");
+        let input_path = skill_file.clone();
 
         let (event_stream, mut event_rx) = ToolCallEventStream::test();
         let task = cx.update(|cx| {
@@ -854,6 +852,45 @@ mod tests {
         assert!(
             error.contains("cancelled"),
             "Expected cancellation error but got: {error}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_streaming_orphaned_by_stream_end_produces_truncation_message(
+        cx: &mut TestAppContext,
+    ) {
+        // When the LLM stream ends (e.g. MaxTokens) before sending
+        // is_input_complete=true, the turn loop drains streaming_tool_inputs,
+        // dropping the sender. The edit_file tool's input.next() returns
+        // Err("tool input was not fully received"), which map_tool_input_error
+        // translates to a truncation-specific message so the model knows to
+        // retry with a simpler call instead of treating it as an arbitrary
+        // failure.
+        let (edit_tool, _project, _action_log, _fs, _thread) =
+            setup_test(cx, json!({"file.txt": "hello world"})).await;
+        let (mut sender, input) = ToolInput::<EditFileToolInput>::test();
+        let (event_stream, _receiver) = ToolCallEventStream::test();
+        let task = cx.update(|cx| edit_tool.clone().run(input, event_stream, cx));
+
+        // Send a partial so the edit session starts
+        sender.send_partial(json!({"path": "root/file.txt"}));
+        cx.run_until_parked();
+
+        // Drop the sender WITHOUT sending Full — simulates the stream-end drain
+        drop(sender);
+        cx.run_until_parked();
+
+        let result = task.await;
+        let EditFileToolOutput::Error { error, .. } = result.unwrap_err() else {
+            panic!("expected error");
+        };
+        assert!(
+            error.contains("token limit"),
+            "Expected truncation message mentioning token limit, but got: {error}"
+        );
+        assert!(
+            !error.contains("tool input was not fully received"),
+            "Should not leak the generic channel-closed error string, but got: {error}"
         );
     }
 
@@ -3059,6 +3096,19 @@ mod tests {
         }))
         .expect("input should deserialize");
         assert!(input.edits.is_none());
+    }
+
+    #[test]
+    fn test_wrong_edit_field_names_produce_actionable_error() {
+        let err = serde_json::from_value::<EditFileToolInput>(json!({
+            "path": "test.go",
+            "edits": [{"old_str": "hello", "new_text": "world"}]
+        }))
+        .unwrap_err();
+
+        // When the model uses incorrect field names, the error should
+        // tell it what to fix.
+        assert_eq!(err.to_string(), "missing field `old_text`");
     }
 
     async fn setup_test_with_fs(

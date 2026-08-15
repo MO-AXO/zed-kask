@@ -15,16 +15,39 @@ impl MediaServer {
             new_bg_color: _new_bg_color,
         }): Parameters<RemoveBackgroundRequest>,
     ) -> String {
-        execute_tool(self, "image_remove_background", async {
-            let image_url = self
-                .resolve_image_url(image_index)
-                .map_err(map_media_error)?;
+        execute_tool_semantic(
+            self,
+            "image_remove_background",
+            Self::ontology_anchor("image_remove_background"),
+            async {
+                let image_url = self
+                    .resolve_image_url(image_index)
+                    .map_err(map_media_error)?;
 
-            self.inference
-                .remove_background(&image_url)
-                .await
-                .map_err(|e| McpToolError::unavailable(format!("Background removal failed: {}", e)))
-        })
+                let media_params = hkask_types::MediaGenerateParams {
+                    image_url: Some(image_url.clone()),
+                    ..Default::default()
+                };
+                let args = serde_json::to_value(&media_params).unwrap_or(serde_json::Value::Null);
+                self.charge_budget("remove_background", &media_params)
+                    .await?;
+                self.vision_port
+                    .media_generate("remove_background", &media_params)
+                    .await
+                    .map_err(|e| {
+                        McpToolError::unavailable(format!("Background removal failed: {}", e))
+                    })
+                    .map(|result| {
+                        crate::media_block::enrich_with_omc_and_provenance(
+                            result,
+                            "image_remove_background",
+                            "image",
+                            args,
+                            None,
+                        )
+                    })
+            },
+        )
         .await
     }
 
@@ -39,21 +62,43 @@ impl MediaServer {
             strength,
         }): Parameters<ApplyStyleRequest>,
     ) -> String {
-        execute_tool(self, "image_apply_style", async {
-            if style_prompt.trim().is_empty() {
-                return Err(McpToolError::invalid_argument(
-                    "style_prompt must not be empty",
-                ));
-            }
-            let image_url = self
-                .resolve_image_url(image_index)
-                .map_err(map_media_error)?;
+        execute_tool_semantic(
+            self,
+            "image_apply_style",
+            Self::ontology_anchor("image_apply_style"),
+            async {
+                if style_prompt.trim().is_empty() {
+                    return Err(McpToolError::invalid_argument(
+                        "style_prompt must not be empty",
+                    ));
+                }
+                let image_url = self
+                    .resolve_image_url(image_index)
+                    .map_err(map_media_error)?;
 
-            self.inference
-                .image_to_image(&image_url, &style_prompt, strength)
-                .await
-                .map_err(|e| McpToolError::unavailable(format!("Style transfer failed: {}", e)))
-        })
+                let media_params = hkask_types::MediaGenerateParams {
+                    image_url: Some(image_url.clone()),
+                    prompt: Some(style_prompt.clone()),
+                    strength,
+                    ..Default::default()
+                };
+                let args = serde_json::to_value(&media_params).unwrap_or(serde_json::Value::Null);
+                self.charge_budget("image_to_image", &media_params).await?;
+                self.vision_port
+                    .media_generate("image_to_image", &media_params)
+                    .await
+                    .map_err(|e| McpToolError::unavailable(format!("Style transfer failed: {}", e)))
+                    .map(|result| {
+                        crate::media_block::enrich_with_omc_and_provenance(
+                            result,
+                            "image_apply_style",
+                            "image",
+                            args,
+                            None,
+                        )
+                    })
+            },
+        )
         .await
     }
 
@@ -72,7 +117,7 @@ impl MediaServer {
             canvas_size,
         }): Parameters<CreateCollageRequest>,
     ) -> String {
-        execute_tool(self, "image_create_collage", async {
+        execute_tool_semantic(self, "image_create_collage", Self::ontology_anchor("image_create_collage"), async {
             let mode_count =
                 search_terms.is_some() as u8 + similar_to_index.is_some() as u8 + image_indices.is_some() as u8;
             if mode_count == 0 {
@@ -94,7 +139,7 @@ impl MediaServer {
                 let all_tags = self
                     .gallery_store
                     .get_all_tags(&ga.gallery_id)
-                    .map_err(|e| McpToolError::internal(format!("Failed to query tags: {}", e)))?;
+                    .map_err(map_gallery_store_error)?;
 
                 let mut image_scores: HashMap<String, f64> = HashMap::new();
                 for (tag, relative_path) in &all_tags {
@@ -123,12 +168,12 @@ impl MediaServer {
                 let ref_tags = self
                     .gallery_store
                     .get_tags(&ref_image_id)
-                    .map_err(|e| McpToolError::internal(format!("Failed to get reference tags: {}", e)))?;
+                    .map_err(map_gallery_store_error)?;
 
                 let all_tags = self
                     .gallery_store
                     .get_all_tags(&ga.gallery_id)
-                    .map_err(|e| McpToolError::internal(format!("Failed to query tags: {}", e)))?;
+                    .map_err(map_gallery_store_error)?;
 
                 let mut image_scores: HashMap<String, f64> = HashMap::new();
                 for (tag, relative_path) in &all_tags {
@@ -175,10 +220,7 @@ impl MediaServer {
 
             let mut images = Vec::new();
             for path in &paths {
-                images.push(
-                    image::open(path)
-                        .map_err(|e| McpToolError::internal(format!("Failed to open {}: {}", path.display(), e)))?,
-                );
+                images.push(image::open(path).map_err(|e| map_image_open_error(path, e))?);
             }
 
             if images.is_empty() {
@@ -230,9 +272,9 @@ impl MediaServer {
 
             canvas
                 .save(&output_path)
-                .map_err(|e| McpToolError::internal(format!("Failed to save collage: {}", e)))?;
+                .map_err(|e| map_image_open_error(&output_path, e))?;
 
-            Ok(serde_json::json!({
+            let result = serde_json::json!({
                 "status": "created",
                 "image_count": images.len(),
                 "layout": layout,
@@ -242,7 +284,18 @@ impl MediaServer {
                 "canvas_height": canvas_h,
                 "spacing": spacing,
                 "output": output_path.display().to_string(),
-            }))
+            });
+            let args = serde_json::json!({
+                "layout": layout,
+                "image_count": images.len(),
+            });
+            Ok(crate::media_block::enrich_with_omc_and_provenance(
+                result,
+                "image_create_collage",
+                "image",
+                args,
+                None,
+            ))
         })
         .await
     }
@@ -258,38 +311,55 @@ impl MediaServer {
             end_sec,
         }): Parameters<VideoClipRequest>,
     ) -> String {
-        execute_tool(self, "video_clip", async {
-            validate_tool_url(&video_url)?;
+        execute_tool_semantic(
+            self,
+            "video_clip",
+            Self::ontology_anchor("video_clip"),
+            async {
+                validate_tool_url_with_dns(&video_url).await?;
 
-            if start_sec < 0.0 || end_sec <= 0.0 {
-                return Err(McpToolError::invalid_argument(
-                    "timestamps must be non-negative",
-                ));
-            }
+                if start_sec < 0.0 || end_sec <= 0.0 {
+                    return Err(McpToolError::invalid_argument(
+                        "timestamps must be non-negative",
+                    ));
+                }
 
-            if start_sec >= end_sec {
-                return Err(McpToolError::invalid_argument(
-                    "start_sec must be less than end_sec.",
-                ));
-            }
+                if start_sec >= end_sec {
+                    return Err(McpToolError::invalid_argument(
+                        "start_sec must be less than end_sec.",
+                    ));
+                }
 
-            self.require_ffmpeg()?;
+                self.require_ffmpeg()?;
 
-            let output = self
-                .ffmpeg
-                .clip(&video_url, start_sec, end_sec)
-                .await
-                .map_err(map_media_error)?;
+                let output = self
+                    .ffmpeg
+                    .clip(&video_url, start_sec, end_sec)
+                    .await
+                    .map_err(map_media_error)?;
 
-            Ok(serde_json::json!({
-                "status": "clipped",
-                "source": video_url,
-                "start_sec": start_sec,
-                "end_sec": end_sec,
-                "duration": end_sec - start_sec,
-                "output": output.display().to_string(),
-            }))
-        })
+                let result = serde_json::json!({
+                    "status": "clipped",
+                    "source": video_url,
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "duration": end_sec - start_sec,
+                    "output": output.display().to_string(),
+                });
+                let args = serde_json::json!({
+                    "video_url": video_url,
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                });
+                Ok(crate::media_block::enrich_with_omc_and_provenance(
+                    result,
+                    "video_clip",
+                    "video",
+                    args,
+                    None,
+                ))
+            },
+        )
         .await
     }
 
@@ -304,46 +374,65 @@ impl MediaServer {
             fps,
         }): Parameters<VideoToGifRequest>,
     ) -> String {
-        execute_tool(self, "video_to_gif", async {
-            validate_tool_url(&video_url)?;
+        execute_tool_semantic(
+            self,
+            "video_to_gif",
+            Self::ontology_anchor("video_to_gif"),
+            async {
+                validate_tool_url_with_dns(&video_url).await?;
 
-            self.require_ffmpeg()?;
+                self.require_ffmpeg()?;
 
-            let start = start_sec.unwrap_or(0.0);
-            let dur = duration_sec.unwrap_or(5.0);
-            let w = width.unwrap_or(480);
-            let f = fps.unwrap_or(10);
+                let start = start_sec.unwrap_or(0.0);
+                let dur = duration_sec.unwrap_or(5.0);
+                let w = width.unwrap_or(480);
+                let f = fps.unwrap_or(10);
 
-            if start < 0.0 || dur <= 0.0 {
-                return Err(McpToolError::invalid_argument(
-                    "timestamps must be non-negative",
-                ));
-            }
-            if w == 0 {
-                return Err(McpToolError::invalid_argument(
-                    "width must be greater than 0",
-                ));
-            }
-            if f == 0 {
-                return Err(McpToolError::invalid_argument("fps must be greater than 0"));
-            }
+                if start < 0.0 || dur <= 0.0 {
+                    return Err(McpToolError::invalid_argument(
+                        "timestamps must be non-negative",
+                    ));
+                }
+                if w == 0 {
+                    return Err(McpToolError::invalid_argument(
+                        "width must be greater than 0",
+                    ));
+                }
+                if f == 0 {
+                    return Err(McpToolError::invalid_argument("fps must be greater than 0"));
+                }
 
-            let output = self
-                .ffmpeg
-                .to_gif(&video_url, start, dur, w, f)
-                .await
-                .map_err(map_media_error)?;
+                let output = self
+                    .ffmpeg
+                    .to_gif(&video_url, start, dur, w, f)
+                    .await
+                    .map_err(map_media_error)?;
 
-            Ok(serde_json::json!({
-                "status": "converted",
-                "source": video_url,
-                "start_sec": start,
-                "duration_sec": dur,
-                "width": w,
-                "fps": f,
-                "output": output.display().to_string(),
-            }))
-        })
+                let result = serde_json::json!({
+                    "status": "converted",
+                    "source": video_url,
+                    "start_sec": start,
+                    "duration_sec": dur,
+                    "width": w,
+                    "fps": f,
+                    "output": output.display().to_string(),
+                });
+                let args = serde_json::json!({
+                    "video_url": video_url,
+                    "start_sec": start,
+                    "duration_sec": dur,
+                    "width": w,
+                    "fps": f,
+                });
+                Ok(crate::media_block::enrich_with_omc_and_provenance(
+                    result,
+                    "video_to_gif",
+                    "image",
+                    args,
+                    None,
+                ))
+            },
+        )
         .await
     }
 
@@ -359,21 +448,43 @@ impl MediaServer {
             model: _model,
         }): Parameters<ImageToVideoRequest>,
     ) -> String {
-        execute_tool(self, "image_to_video", async {
-            if let Some(d) = duration {
-                if d <= 0.0 {
+        execute_tool_semantic(
+            self,
+            "image_to_video",
+            Self::ontology_anchor("image_to_video"),
+            async {
+                if let Some(d) = duration
+                    && d <= 0.0
+                {
                     return Err(McpToolError::invalid_argument("duration must be positive"));
                 }
-            }
-            let image_url = self
-                .resolve_image_url(image_index)
-                .map_err(map_media_error)?;
+                let image_url = self
+                    .resolve_image_url(image_index)
+                    .map_err(map_media_error)?;
 
-            self.inference
-                .image_to_video(&image_url, prompt.as_deref(), duration)
-                .await
-                .map_err(|e| McpToolError::unavailable(format!("Image-to-video failed: {}", e)))
-        })
+                let media_params = hkask_types::MediaGenerateParams {
+                    image_url: Some(image_url.clone()),
+                    prompt: prompt.clone(),
+                    duration,
+                    ..Default::default()
+                };
+                let args = serde_json::to_value(&media_params).unwrap_or(serde_json::Value::Null);
+                self.charge_budget("image_to_video", &media_params).await?;
+                self.vision_port
+                    .media_generate("image_to_video", &media_params)
+                    .await
+                    .map_err(|e| McpToolError::unavailable(format!("Image-to-video failed: {}", e)))
+                    .map(|result| {
+                        crate::media_block::enrich_with_omc_and_provenance(
+                            result,
+                            "image_to_video",
+                            "video",
+                            args,
+                            None,
+                        )
+                    })
+            },
+        )
         .await
     }
 
@@ -387,34 +498,52 @@ impl MediaServer {
             font_size,
         }): Parameters<VideoAddCaptionRequest>,
     ) -> String {
-        execute_tool(self, "video_add_caption", async {
-            validate_tool_url(&video_url)?;
+        execute_tool_semantic(
+            self,
+            "video_add_caption",
+            Self::ontology_anchor("video_add_caption"),
+            async {
+                validate_tool_url_with_dns(&video_url).await?;
 
-            self.require_ffmpeg()?;
+                self.require_ffmpeg()?;
 
-            let pos = position.as_deref().unwrap_or("bottom");
-            let size = font_size.unwrap_or(24);
-            if size == 0 {
-                return Err(McpToolError::invalid_argument(
-                    "font_size must be greater than 0",
-                ));
-            }
+                let pos = position.as_deref().unwrap_or("bottom");
+                let size = font_size.unwrap_or(24);
+                if size == 0 {
+                    return Err(McpToolError::invalid_argument(
+                        "font_size must be greater than 0",
+                    ));
+                }
 
-            let output = self
-                .ffmpeg
-                .add_caption(&video_url, &text, pos, size)
-                .await
-                .map_err(map_media_error)?;
+                let output = self
+                    .ffmpeg
+                    .add_caption(&video_url, &text, pos, size)
+                    .await
+                    .map_err(map_media_error)?;
 
-            Ok(serde_json::json!({
-                "status": "captioned",
-                "source": video_url,
-                "text": text,
-                "position": pos,
-                "font_size": size,
-                "output": output.display().to_string(),
-            }))
-        })
+                let result = serde_json::json!({
+                    "status": "captioned",
+                    "source": video_url,
+                    "text": text,
+                    "position": pos,
+                    "font_size": size,
+                    "output": output.display().to_string(),
+                });
+                let args = serde_json::json!({
+                    "video_url": video_url,
+                    "text": text,
+                    "position": pos,
+                    "font_size": size,
+                });
+                Ok(crate::media_block::enrich_with_omc_and_provenance(
+                    result,
+                    "video_add_caption",
+                    "video",
+                    args,
+                    None,
+                ))
+            },
+        )
         .await
     }
 
@@ -428,61 +557,78 @@ impl MediaServer {
             caption_text,
         }): Parameters<VideoRemixRequest>,
     ) -> String {
-        execute_tool(self, "video_remix", async {
-            validate_tool_url(&video_url)?;
+        execute_tool_semantic(
+            self,
+            "video_remix",
+            Self::ontology_anchor("video_remix"),
+            async {
+                validate_tool_url_with_dns(&video_url).await?;
 
-            if start_sec >= end_sec {
-                return Err(McpToolError::invalid_argument(
-                    "start_sec must be less than end_sec.",
-                ));
-            }
+                if start_sec >= end_sec {
+                    return Err(McpToolError::invalid_argument(
+                        "start_sec must be less than end_sec.",
+                    ));
+                }
 
-            self.require_ffmpeg()?;
+                self.require_ffmpeg()?;
 
-            let clipped = self
-                .ffmpeg
-                .clip(&video_url, start_sec, end_sec)
-                .await
-                .map_err(|e| McpToolError::internal(format!("Clip step failed: {}", e)))?;
-
-            let captioned = if let Some(ref cap) = caption_text {
-                self.ffmpeg
-                    .add_caption(&clipped.to_string_lossy(), cap, "bottom", 24)
+                let clipped = self
+                    .ffmpeg
+                    .clip(&video_url, start_sec, end_sec)
                     .await
-                    .map_err(|e| McpToolError::internal(format!("Caption step failed: {}", e)))?
-            } else {
-                clipped.clone()
-            };
+                    .map_err(map_media_error)?;
 
-            let gif_result = self
-                .ffmpeg
-                .to_gif(
-                    &captioned.to_string_lossy(),
-                    0.0,
-                    end_sec - start_sec,
-                    480,
-                    10,
-                )
-                .await;
+                let captioned = if let Some(ref cap) = caption_text {
+                    self.ffmpeg
+                        .add_caption(&clipped.to_string_lossy(), cap, "bottom", 24)
+                        .await
+                        .map_err(map_media_error)?
+                } else {
+                    clipped.clone()
+                };
 
-            // Always clean up temp files regardless of outcome
-            let _ = std::fs::remove_file(&clipped);
-            if caption_text.is_some() {
-                let _ = std::fs::remove_file(&captioned);
-            }
+                let gif_result = self
+                    .ffmpeg
+                    .to_gif(
+                        &captioned.to_string_lossy(),
+                        0.0,
+                        end_sec - start_sec,
+                        480,
+                        10,
+                    )
+                    .await;
 
-            let gif = gif_result
-                .map_err(|e| McpToolError::internal(format!("GIF step failed: {}", e)))?;
+                // Always clean up temp files regardless of outcome
+                let _ = std::fs::remove_file(&clipped);
+                if caption_text.is_some() {
+                    let _ = std::fs::remove_file(&captioned);
+                }
 
-            Ok(serde_json::json!({
-                "status": "remixed",
-                "source": video_url,
-                "start_sec": start_sec,
-                "end_sec": end_sec,
-                "caption": caption_text,
-                "output": gif.display().to_string(),
-            }))
-        })
+                let gif = gif_result.map_err(map_media_error)?;
+
+                let result = serde_json::json!({
+                    "status": "remixed",
+                    "source": video_url,
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "caption": caption_text,
+                    "output": gif.display().to_string(),
+                });
+                let args = serde_json::json!({
+                    "video_url": video_url,
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "caption_text": caption_text,
+                });
+                Ok(crate::media_block::enrich_with_omc_and_provenance(
+                    result,
+                    "video_remix",
+                    "image",
+                    args,
+                    None,
+                ))
+            },
+        )
         .await
     }
 
@@ -495,41 +641,58 @@ impl MediaServer {
             format,
         }): Parameters<VideoFromImagesRequest>,
     ) -> String {
-        execute_tool(self, "video_from_images", async {
-            if image_indices.is_empty() {
-                return Err(McpToolError::invalid_argument(
-                    "At least one image index is required.",
-                ));
-            }
+        execute_tool_semantic(
+            self,
+            "video_from_images",
+            Self::ontology_anchor("video_from_images"),
+            async {
+                if image_indices.is_empty() {
+                    return Err(McpToolError::invalid_argument(
+                        "At least one image index is required.",
+                    ));
+                }
 
-            self.require_ffmpeg()?;
+                self.require_ffmpeg()?;
 
-            let mut paths = Vec::new();
-            for idx in &image_indices {
-                paths.push(self.resolve_image_path(*idx).map_err(map_media_error)?);
-            }
+                let mut paths = Vec::new();
+                for idx in &image_indices {
+                    paths.push(self.resolve_image_path(*idx).map_err(map_media_error)?);
+                }
 
-            let fps = fps.unwrap_or(24);
-            let fmt = format.as_deref().unwrap_or("mp4");
+                let fps = fps.unwrap_or(24);
+                let fmt = format.as_deref().unwrap_or("mp4");
 
-            if fps == 0 {
-                return Err(McpToolError::invalid_argument("fps must be greater than 0"));
-            }
+                if fps == 0 {
+                    return Err(McpToolError::invalid_argument("fps must be greater than 0"));
+                }
 
-            let output = self
-                .ffmpeg
-                .images_to_video(&paths, fps, fmt)
-                .await
-                .map_err(map_media_error)?;
+                let output = self
+                    .ffmpeg
+                    .images_to_video(&paths, fps, fmt)
+                    .await
+                    .map_err(map_media_error)?;
 
-            Ok(serde_json::json!({
-                "status": "created",
-                "frame_count": paths.len(),
-                "fps": fps,
-                "format": fmt,
-                "output": output.display().to_string(),
-            }))
-        })
+                let result = serde_json::json!({
+                    "status": "created",
+                    "frame_count": paths.len(),
+                    "fps": fps,
+                    "format": fmt,
+                    "output": output.display().to_string(),
+                });
+                let args = serde_json::json!({
+                    "image_indices": image_indices,
+                    "fps": fps,
+                    "format": fmt,
+                });
+                Ok(crate::media_block::enrich_with_omc_and_provenance(
+                    result,
+                    "video_from_images",
+                    "video",
+                    args,
+                    None,
+                ))
+            },
+        )
         .await
     }
 
@@ -538,31 +701,44 @@ impl MediaServer {
         &self,
         Parameters(VideoConcatRequest { video_urls }): Parameters<VideoConcatRequest>,
     ) -> String {
-        execute_tool(self, "video_concat", async {
-            if video_urls.len() < 2 {
-                return Err(McpToolError::invalid_argument(
-                    "At least 2 video URLs are required.",
-                ));
-            }
+        execute_tool_semantic(
+            self,
+            "video_concat",
+            Self::ontology_anchor("video_concat"),
+            async {
+                if video_urls.len() < 2 {
+                    return Err(McpToolError::invalid_argument(
+                        "At least 2 video URLs are required.",
+                    ));
+                }
 
-            for url in &video_urls {
-                validate_tool_url(url)?;
-            }
+                for url in &video_urls {
+                    validate_tool_url_with_dns(url).await?;
+                }
 
-            self.require_ffmpeg()?;
+                self.require_ffmpeg()?;
 
-            let output = self
-                .ffmpeg
-                .concat(&video_urls)
-                .await
-                .map_err(map_media_error)?;
+                let output = self
+                    .ffmpeg
+                    .concat(&video_urls)
+                    .await
+                    .map_err(map_media_error)?;
 
-            Ok(serde_json::json!({
-                "status": "concatenated",
-                "clip_count": video_urls.len(),
-                "output": output.display().to_string(),
-            }))
-        })
+                let result = serde_json::json!({
+                    "status": "concatenated",
+                    "clip_count": video_urls.len(),
+                    "output": output.display().to_string(),
+                });
+                let args = serde_json::json!({ "video_urls": video_urls });
+                Ok(crate::media_block::enrich_with_omc_and_provenance(
+                    result,
+                    "video_concat",
+                    "video",
+                    args,
+                    None,
+                ))
+            },
+        )
         .await
     }
 
@@ -573,8 +749,8 @@ impl MediaServer {
         &self,
         Parameters(VideoCaptionRequest { video_url, style }): Parameters<VideoCaptionRequest>,
     ) -> String {
-        execute_tool(self, "video_caption", async {
-            validate_tool_url(&video_url)?;
+        execute_tool_semantic(self, "video_caption", Self::ontology_anchor("video_caption"), async {
+            validate_tool_url_with_dns(&video_url).await?;
 
             let style_str = style.as_deref().unwrap_or("descriptive");
             self.require_ffmpeg()?;
@@ -583,12 +759,10 @@ impl MediaServer {
                 .ffmpeg
                 .extract_keyframes(&video_url, 2.0, 10)
                 .await
-                .map_err(|e| {
-                    McpToolError::internal(format!("Keyframe extraction failed: {}", e))
-                })?;
+                .map_err(map_media_error)?;
 
             if frames.is_empty() {
-                return Err(McpToolError::internal(
+                return Err(McpToolError::internal( // rr0044-ok: keyframe-extraction-empty
                     "No keyframes extracted from video.",
                 ));
             }
@@ -613,12 +787,12 @@ impl MediaServer {
             vars.insert("style", style_str);
             let prompt = self
                 .render_prompt("video_caption", &vars)
-                .map_err(|e| McpToolError::internal(format!("Template render failed: {}", e)))?;
+                .map_err(|e| McpToolError::internal(format!("Template render failed: {}", e)))?; // rr0044-ok: own template engine render failure
 
             let (vision_model, _vision_label) = self.require_vision().await?;
             let params = hkask_types::template::LLMParameters::default();
             let result = self
-                .inference
+                .vision_port
                 .generate_vision(&prompt, &image_urls, &params, Some(vision_model))
                 .await;
 
@@ -642,6 +816,86 @@ impl MediaServer {
     }
 
     #[tool(
+        description = "Extract keyframes from a video as gallery assets. Each frame becomes a searchable gallery image with its own lineage. Returns the gallery indices of the imported frames."
+    )]
+    pub async fn video_extract_frames(
+        &self,
+        Parameters(VideoExtractFramesRequest {
+            video_url,
+            interval_sec,
+            max_frames,
+        }): Parameters<VideoExtractFramesRequest>,
+    ) -> String {
+        execute_tool_semantic(
+            self,
+            "video_extract_frames",
+            Self::ontology_anchor("video_extract_frames"),
+            async {
+                validate_tool_url_with_dns(&video_url).await?;
+                self.require_ffmpeg()?;
+
+                let frames = self
+                    .ffmpeg
+                    .extract_keyframes(&video_url, interval_sec, max_frames)
+                    .await
+                    .map_err(map_media_error)?;
+
+                if frames.is_empty() {
+                    return Err(McpToolError::internal("No keyframes extracted from video.")); // rr0044-ok: ffmpeg-succeeded-no-output
+                }
+
+                // Promote each temp frame into a gallery asset so it gets an
+                // image ID, lineage, and is retrievable via gallery_search. This
+                // is the gallery-asset promotion that distinguishes this tool from
+                // a raw ffmpeg call.
+                let mut imported = Vec::new();
+                let mut errors = Vec::new();
+                for frame in &frames {
+                    match self.import_reference_image(frame) {
+                        Ok((image_id, image_url)) => {
+                            imported.push(serde_json::json!({
+                                "image_id": image_id,
+                                "image_url": image_url,
+                            }));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "hkask.mcp.media",
+                                frame = %frame.display(),
+                                error = %e,
+                                "Failed to import extracted frame into gallery"
+                            );
+                            errors.push(format!("{}", frame.display()));
+                        }
+                    }
+                }
+
+                // Clean up temp files regardless of import success.
+                for frame in &frames {
+                    let _ = std::fs::remove_file(frame);
+                }
+
+                if imported.is_empty() {
+                    let msg = format!(
+                        "Extracted {} frames but failed to import any into the gallery",
+                        frames.len(),
+                    );
+                    return Err(McpToolError::internal(msg)); // rr0044-ok: pipeline-import-failure
+                }
+
+                Ok(serde_json::json!({
+                    "status": "complete",
+                    "frames_extracted": frames.len(),
+                    "frames_imported": imported.len(),
+                    "frames": imported,
+                    "errors": errors,
+                }))
+            },
+        )
+        .await
+    }
+
+    #[tool(
         description = "Create a meme video from a gallery image with text overlay and camera motion. Composes text rendering + AI motion generation. Perfect for 'WHEN YOU SEE IT' style memes."
     )]
     pub async fn video_meme(
@@ -655,13 +909,12 @@ impl MediaServer {
             font_path,
         }): Parameters<VideoMemeRequest>,
     ) -> String {
-        execute_tool(self, "video_meme", async {
+        execute_tool_semantic(self, "video_meme", Self::ontology_anchor("video_meme"), async {
             let image_path = self
                 .resolve_image_path(image_index)
                 .map_err(map_media_error)?;
 
-            let mut img =
-                image::open(&image_path).map_err(|e| McpToolError::internal(format!("Failed to open image: {}", e)))?;
+            let mut img = image::open(&image_path).map_err(|e| map_image_open_error(&image_path, e))?;
 
             let font = load_meme_font(font_path.as_deref()).map_err(|e| {
                 McpToolError::unavailable(format!(
@@ -682,9 +935,9 @@ impl MediaServer {
                 let x = ((img_w as i32 - tw as i32) / 2).max(0);
                 let y = (img_h as f32 * 0.05) as i32;
                 for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    imageproc::drawing::draw_text_mut(&mut img, black, x + dx, y + dy, scale, &font, &text_upper);
+                    draw_text_mut(&mut img, black, x + dx, y + dy, scale, &font, &text_upper);
                 }
-                imageproc::drawing::draw_text_mut(&mut img, white, x, y, scale, &font, &text_upper);
+                draw_text_mut(&mut img, white, x, y, scale, &font, &text_upper);
             }
 
             if let Some(ref text) = bottom_text {
@@ -693,14 +946,14 @@ impl MediaServer {
                 let x = ((img_w as i32 - tw as i32) / 2).max(0);
                 let y = (img_h as i32 - th as i32 - (img_h as f32 * 0.05) as i32).max(0);
                 for &(dx, dy) in &[(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    imageproc::drawing::draw_text_mut(&mut img, black, x + dx, y + dy, scale, &font, &text_upper);
+                    draw_text_mut(&mut img, black, x + dx, y + dy, scale, &font, &text_upper);
                 }
-                imageproc::drawing::draw_text_mut(&mut img, white, x, y, scale, &font, &text_upper);
+                draw_text_mut(&mut img, white, x, y, scale, &font, &text_upper);
             }
 
             let mut buf = std::io::Cursor::new(Vec::new());
             img.write_to(&mut buf, image::ImageFormat::Png)
-                .map_err(|e| McpToolError::internal(format!("Failed to encode composited image: {}", e)))?;
+                .map_err(|e| map_image_open_error(std::path::Path::new("<meme composite>"), e))?;
             let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, buf.get_ref());
             let data_uri = format!("data:image/png;base64,{}", b64);
 
@@ -709,10 +962,28 @@ impl MediaServer {
             } else {
                 motion.clone()
             };
-            self.inference
-                .image_to_video(&data_uri, Some(&motion_prompt), duration)
+            let media_params = hkask_types::MediaGenerateParams {
+                image_url: Some(data_uri.clone()),
+                prompt: Some(motion_prompt.clone()),
+                duration,
+                ..Default::default()
+            };
+            let args = serde_json::to_value(&media_params)
+                .unwrap_or(serde_json::Value::Null);
+            self.charge_budget("image_to_video", &media_params).await?;
+            self.vision_port
+                .media_generate("image_to_video", &media_params)
                 .await
                 .map_err(|e| McpToolError::unavailable(format!("Image-to-video failed: {}", e)))
+                .map(|result| {
+                    crate::media_block::enrich_with_omc_and_provenance(
+                        result,
+                        "video_meme",
+                        "video",
+                        args,
+                        None,
+                    )
+                })
         })
         .await
     }

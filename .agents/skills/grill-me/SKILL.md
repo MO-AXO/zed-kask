@@ -55,17 +55,6 @@ Socratic interrogation skill. Tests deep understanding through escalating diffic
 | `grill-me-assess.j2` | KnowAct | Synthesize final assessment with per-area ratings (Solid/Partial/Gap) and prioritized study recommendations.  |
 | `grill-me-escalate.j2` | KnowAct | Decide whether to escalate difficulty, hold, or re-probe based on answer quality ratio.  |
 
-,## Fusion Mode
-
-This skill supports **fusion mode** via the `fusion:` block in its flow manifest.
-When enabled, all interrogation steps route through a multi-model panel — either
-with LLM judge synthesis or the **algo / no-judge** path (`judge: algo`) for
-deterministic JSON merge without an LLM judge call. Grill-me uses **deliberation
-mode** (multi-round follow-ups) to match Socratic interrogation.
-
-The convergence check step has `fusion: false` to ensure deterministic rubric
-evaluation uses single-model inference.
-
 ## Constraints
 
 - `grill-me-round.j2`: Public.

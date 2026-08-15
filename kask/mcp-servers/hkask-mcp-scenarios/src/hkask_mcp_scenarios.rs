@@ -1,4 +1,9 @@
 #![forbid(unsafe_code)]
+#![warn(clippy::let_underscore_future)]
+// `tokio` is in [dependencies] for the bin target's `#[tokio::main]`; the lib
+// itself does not use it, so the unused_crate_dependencies lint fires on the
+// lib target. This is the legitimate bin-needs-dep case.
+#![allow(unused_crate_dependencies)]
 //! hKask MCP Scenarios — domain-agnostic scenario planning server.
 //!
 //! Event-tree forecasting with conditional dependencies (MAIA methodology).
@@ -8,7 +13,8 @@
 //! Shared engine: Fermi decomposition, outside/inside view, Bayesian updating,
 //! Brier scoring, dragonfly-eye synthesis, calibration tracking, cross-validation.
 //!
-//! ## Tools (18)
+//! ## Tools (21) — pinned by `tool_surface_is_exactly_21_registered_tools`
+//! - `scenario_status` — Server state: pipeline overview, calibration curve, cached tree
 //! - `scenario_frame_document` — Structure framing answers into FramingDocument
 //! - `scenario_frame` — 7-turn conversational framing interview
 //! - `scenario_triage` — Goldilocks zone classification
@@ -16,6 +22,7 @@
 //! - `scenario_brainstorm` — 4-round temperature-shifting protocol
 //! - `scenario_build` — Construct event tree template from research
 //! - `scenario_quantify` — Resolve conditional probability tree
+//! - `scenario_propagate` — Update one event's prior and propagate through descendants
 //! - `scenario_calibrate` — Fermi decomposition + outside/inside view
 //! - `scenario_update` — Bayesian evidence revision
 //! - `scenario_synthesize` — Dragonfly-eye multi-perspective aggregation
@@ -25,14 +32,15 @@
 //! - `scenario_cross_validate` — LLM vs computation cross-validation
 //! - `scenario_assess` — Chermack five-phase project evaluation
 //! - `scenario_full` — Full pipeline orchestrator (single call)
-//! - `scenario_from_companies` — Bridge from companies MCP server
+//! - `scenario_from_markets` — Bridge from prediction-markets MCP server (single record)
+//! - `scenario_from_markets_set` — Bridge from prediction-markets (multi-record EventTree)
+//! - `scenario_from_cmp_indices` — Bridge from prediction-markets CMP indices (EventTree)
 
 use std::collections::HashSet;
 
-use hkask_mcp_server::server::{CredentialRequirement, McpToolError, execute_tool_semantic};
+use hkask_bridge_ontology::dc_bibo;
+use hkask_mcp_server::server::{McpToolError, execute_tool_semantic};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
-use schemars::JsonSchema;
-use serde::Deserialize;
 
 pub mod superforecast;
 pub mod templates;
@@ -40,250 +48,88 @@ pub mod types;
 
 use types::*;
 
-// ── Request types for MCP tools ────────────────────────────────────────────
+// ── Error classification ───────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct BuildEventsRequest {
-    /// Subject: company ticker, industry, country, or technology domain
-    pub subject: String,
-    /// Time horizon for the scenario
-    pub time_horizon: Option<String>,
-    /// Scenario type
-    pub scenario_type: Option<String>,
-    /// Natural language context about the subject
-    pub context: Option<String>,
-    /// Maximum number of events to generate
-    pub max_events: Option<usize>,
+/// Classify a `ScenarioError` into the appropriate `McpToolError` kind.
+///
+/// Caller-input defects (bad probabilities, cycles, unknown parents, empty
+/// input) map to `InvalidArgument`; missing entities map to `NotFound`;
+/// empty-store maps to `Internal`. `Forecast` computation errors are
+/// classified per variant (all current `ForecastError` variants are
+/// caller-input defects).
+fn map_scenario_error(error: ScenarioError) -> McpToolError {
+    match &error {
+        ScenarioError::EventNotFound(id) => {
+            McpToolError::not_found(format!("event '{id}' not found"))
+        }
+        ScenarioError::NoForecastData => {
+            McpToolError::internal("no stored forecasts found for calibration") // rr0044-ok: mapper-internal-arm
+        }
+        ScenarioError::Forecast(forecast_error) => match forecast_error {
+            hkask_forecast::ForecastError::InvalidProbability(..)
+            | hkask_forecast::ForecastError::BrierLengthMismatch(..)
+            | hkask_forecast::ForecastError::BrierNoData
+            | hkask_forecast::ForecastError::TreeMissingNode(..)
+            | hkask_forecast::ForecastError::TreeMissingOutcome(..)
+            | hkask_forecast::ForecastError::TreeUndefinedNode(..)
+            | hkask_forecast::ForecastError::TreeUnresolvedParent(..)
+            | hkask_forecast::ForecastError::TreeConditionalLength(..) => {
+                McpToolError::invalid_argument(format!(
+                    "forecast computation failed: {forecast_error}",
+                ))
+            }
+        },
+        // Caller-side input defects
+        ScenarioError::NoEvents
+        | ScenarioError::InvalidProbability(..)
+        | ScenarioError::InvalidDependencyProbability(..)
+        | ScenarioError::InvalidDependency(..)
+        | ScenarioError::UnknownParent(..)
+        | ScenarioError::CycleDetected
+        | ScenarioError::InsufficientPerspectives
+        | ScenarioError::EmptyInput(..) => McpToolError::invalid_argument(error.to_string()),
+    }
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct BrainstormRequest {
-    /// Subject: company ticker, industry, country, or technology domain
-    pub subject: String,
-    /// Time horizon: "tactical", "strategic", or "long_term"
-    pub time_horizon: Option<String>,
-    /// Raw text from web searches about this subject
-    pub research_context: Option<String>,
-    /// Persona names to use (e.g., ["Bull", "Bear", "Contrarian"]). Empty = use defaults.
-    pub personas: Option<String>,
-    /// Start at a specific round (1-4). Default: 1 (full protocol).
-    pub start_round: Option<u8>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct FrameRequest {
-    /// Subject: company ticker, industry, country, or technology domain
-    pub subject: String,
-    /// Optional: pre-populated answers from a previous framing session
-    pub prior_answers: Option<String>,
-}
-
-/// Request to structure a completed framing conversation into a FramingDocument.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct FrameDocumentRequest {
-    /// Subject for the scenario project
-    pub subject: String,
-    /// JSON object with answers from the 7-turn framing conversation.
-    /// Expected keys: focal_question, decision_at_stake, time_horizon,
-    /// action_deadline, in_scope, out_of_scope, stakeholders, use_case,
-    /// success_criteria, constraints, surfaced_assumptions, exploration_prompts.
-    pub answers: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CompaniesBridgeRequest {
-    /// Company symbol
-    pub symbol: String,
-    /// JSON output from companies.calibrate_forecast
-    pub companies_output: String,
-    /// Time horizon for the scenario events
-    pub time_horizon: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct FullPipelineRequest {
-    /// Subject: company ticker, industry, country, or technology domain
-    pub subject: String,
-    /// Events as JSON array of ScenarioEvent objects (from scenario_brainstorm or manual construction)
-    pub events: String,
-    /// Optional: perspectives for dragonfly-eye synthesis, as JSON array of Perspective objects
-    pub perspectives: Option<String>,
-    /// Optional: project-level metadata for assessment
-    pub perspective_count: Option<usize>,
-    /// Optional: how many strategies were generated from the scenarios
-    pub strategies_generated: Option<usize>,
-    /// Optional: how many strategies were actually implemented
-    pub strategies_implemented: Option<usize>,
-    /// Optional: learning events, newline-separated
-    pub learning_events: Option<String>,
-    /// Optional: whether early-warning indicators were defined
-    pub has_early_warning_indicators: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CrossValidateRequest {
-    /// Event or question identifier
-    pub event_id: String,
-    /// Label for the first estimate source (e.g., 'superforecasting_skill')
-    pub source_a: String,
-    /// First probability estimate (0.0-1.0)
-    pub estimate_a: f64,
-    /// Fermi sub-questions for estimate A as JSON array
-    pub sub_questions_a: String,
-    /// Label for the second estimate source (e.g., 'scenario_calibrate')
-    pub source_b: String,
-    /// Second probability estimate (0.0-1.0)
-    pub estimate_b: f64,
-    /// Fermi sub-questions for estimate B as JSON array
-    pub sub_questions_b: String,
-    /// Review threshold (default 0.15). Divergence above this triggers review.
-    pub review_threshold: Option<f64>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct QuantifyRequest {
-    /// Events as JSON array of ScenarioEvent objects
-    pub events: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct UpdateRequest {
-    /// Forecast record ID
-    pub forecast_id: String,
-    /// Event ID being updated
-    pub event_id: String,
-    /// Current calibrated probability (prior)
-    pub prior_probability: f64,
-    /// P(evidence | hypothesis is true)
-    pub evidence_likelihood: f64,
-    /// P(evidence) — base rate of this evidence in general
-    pub evidence_base_rate: f64,
-    /// Description of the new evidence
-    pub evidence_description: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ScoreRequest {
-    /// Forecast record ID
-    pub forecast_id: String,
-    /// Events as JSON array of ScenarioEvent objects
-    pub events: String,
-    /// Outcomes: array of {event_id, occurred} objects as JSON
-    pub outcomes: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CalibrateRequest {
-    /// The forecast question
-    pub question: String,
-    /// Fermi sub-questions as JSON array of {question, estimate, confidence}
-    pub sub_questions: String,
-    /// Reference class description
-    pub reference_class: Option<String>,
-    /// Base rate from outside view
-    pub base_rate: Option<f64>,
-    /// Number of reference cases considered
-    pub reference_count: Option<u64>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct SensitivityRequest {
-    /// Events as JSON array of ScenarioEvent objects
-    pub events: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct SynthesizeRequest {
-    /// Event ID to synthesize perspectives for
-    pub event_id: String,
-    /// Perspectives as JSON array of Perspective objects
-    pub perspectives: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CalibrationRequest {
-    /// Optional: filter to a specific subject
-    pub subject: Option<String>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct TriageRequest {
-    /// The forecasting question to triage
-    pub question: String,
-    /// Does the question have a specific deadline?
-    pub has_deadline: Option<bool>,
-    /// Is a reference class available?
-    pub has_reference_class: Option<bool>,
-    /// Are resolution criteria clear?
-    pub has_resolution_criteria: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ResearchRequest {
-    /// Subject: company ticker, industry, country, or technology domain
-    pub subject: String,
-    /// Raw text from web searches about this subject
-    pub research_text: String,
-    /// Time horizon for the scenario
-    pub time_horizon: Option<String>,
-    /// Scenario type
-    pub scenario_type: Option<String>,
-    /// Maximum number of events to extract
-    pub max_events: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct AssessRequest {
-    /// Project identifier
-    pub project_id: String,
-    /// Subject domain
-    pub subject: String,
-    /// How many perspectives were engaged
-    pub perspective_count: Option<usize>,
-    /// Disagreement score from dragonfly-eye synthesis
-    pub disagreement_score: Option<f64>,
-    /// Total events in the scenario tree
-    pub event_count: Option<usize>,
-    /// How many events have conditional dependencies
-    pub events_with_dependencies: Option<usize>,
-    /// How many strategies were generated
-    pub strategies_generated: Option<usize>,
-    /// How many strategies were actually implemented
-    pub strategies_implemented: Option<usize>,
-    /// Observable learning events (free-text descriptions)
-    pub learning_events: Option<String>,
-    /// Whether early-warning indicators were defined
-    pub has_early_warning_indicators: Option<bool>,
-}
-
-/// Empty request for scenario_status (no parameters needed).
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct StatusRequest {}
+mod requests;
+pub use requests::*;
 
 // ── Server struct ──────────────────────────────────────────────────────────
 
 hkask_mcp_server::mcp_server!(
     pub struct ScenariosServer {
         pub forecast_store: std::sync::Arc<std::sync::Mutex<superforecast::ForecastStore>>,
-        pub client: reqwest::Client,
         pub tree_cache: std::sync::Mutex<Option<types::EventTree>>,
         pub called_tools: std::sync::Mutex<HashSet<String>>,
     }
 );
 
 impl ScenariosServer {
-    /// Map a tool name to its ontology anchor tier.
+    /// Map a tool name to its ontology concept URI. The concept URI is used
+    /// both as the `reg.tool.*` span ontology tag (via `execute_tool_semantic`)
+    /// and as the `"ontology"` field in the tool output JSON.
+    ///
     /// PKO = Procedural Knowledge Ontology (process/experience — agent's actions)
     /// Dublin Core = factual/computed outputs (probabilities, scores, trees)
-    fn ontology_anchor(tool: &str) -> &'static str {
+    fn ontology_anchor(tool: &str) -> Option<&'static str> {
+        use hkask_bridge_ontology::pko;
         match tool {
-            "scenario_frame" | "scenario_brainstorm" | "scenario_build" => "pko",
-            _ => "dublin-core",
+            "scenario_frame" | "scenario_brainstorm" | "scenario_build" => Some(pko::PROCEDURE),
+            _ => Some(dc_bibo::DATASET),
         }
     }
 
     /// Expected predecessor for each pipeline-stage tool.
     /// Returns None for tools that can be called independently.
+    ///
+    /// The chain encodes the analyst maturity ladder: frame → brainstorm →
+    /// build → quantify → calibrate → synthesize → score → calibration.
+    /// The tree-based tools (`scenario_from_markets_set`, `scenario_propagate`)
+    /// sit at the *top* of this ladder — an analyst earns the full event tree
+    /// by working through the simpler modes first (2x2 matrix, single-market
+    /// bridges, research-grounded framing). They have no predecessor enforced
+    /// here (they are entry points for already-mature analyses), but the
+    /// maturity note in their descriptions points at the ladder.
     fn expected_predecessor(tool: &str) -> Option<&'static str> {
         match tool {
             "scenario_frame_document" => Some("scenario_frame"),
@@ -305,6 +151,8 @@ impl ScenariosServer {
     /// pipeline-stage tool is invoked without its expected predecessor having
     /// been called, emits a Regulation warning. Does not block execution — tool
     /// flexibility is preserved for exploratory and bypass workflows.
+    ///
+    /// In-memory only: tracking resets when the server process restarts.
     fn check_sequence(&self, tool: &str) {
         let mut called = self.called_tools.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -329,13 +177,7 @@ impl ScenariosServer {
     /// This is the pipeline-sequence validation hook — it tracks which tools
     /// have been called on this server instance and warns when a pipeline-stage
     /// tool is invoked out of order. It does NOT record or persist anything.
-    fn record_experience(
-        &self,
-        tool: &str,
-        _input_summary: &str,
-        _outcome: &str,
-        _detail: serde_json::Value,
-    ) {
+    fn record_experience(&self, tool: &str) {
         self.check_sequence(tool);
     }
 }
@@ -350,6 +192,38 @@ impl ScenariosServer {
 
 // ── MCP Tools ──────────────────────────────────────────────────────────────
 
+fn build_status_response(
+    total: usize,
+    resolved_count: usize,
+    pending_count: usize,
+    overall_brier: Option<f64>,
+    calibration: Option<serde_json::Value>,
+    recent: Vec<serde_json::Value>,
+    tree: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let provenance_args = serde_json::Value::Object(serde_json::Map::new());
+    let provenance_span_id = serde_json::Value::Null;
+    serde_json::json!({
+        "pipeline": {
+            "forecast_count": total,
+            "resolved_count": resolved_count,
+            "pending_count": pending_count,
+            "overall_brier": overall_brier,
+            "recent_forecasts": recent
+        },
+        "calibration": calibration,
+        "event_tree": tree,
+        "provenance": {
+            "tool": "scenario_status",
+            "server": "hkask-mcp-scenarios",
+            "args": provenance_args,
+            "span_id": provenance_span_id,
+            "version": SERVER_VERSION
+        },
+        "ontology": dc_bibo::DATASET
+    })
+}
+
 #[tool_router(router = scenario_router, vis = "pub")]
 impl ScenariosServer {
     /// Return the current state snapshot for TUI display.
@@ -357,7 +231,7 @@ impl ScenariosServer {
         description = "Return current scenario server state: pipeline overview, calibration curve, and cached event tree."
     )]
     pub async fn scenario_status(&self, _parameters: Parameters<StatusRequest>) -> String {
-        execute_tool_semantic(self, "scenario_status", Some(Self::ontology_anchor("scenario_status")), async {
+        execute_tool_semantic(self, "scenario_status", Self::ontology_anchor("scenario_status"), async {
             let store = self.forecast_store.lock().unwrap_or_else(|e| e.into_inner());
             let total = store.len();
             let resolved: Vec<_> = store.resolved();
@@ -365,14 +239,45 @@ impl ScenariosServer {
             let pending_count = total - resolved_count;
 
             let overall_brier = if !resolved.is_empty() {
-                let probs: Vec<f64> = resolved.iter().map(|r| r.probability).collect();
-                let outs: Vec<bool> = resolved.iter().map(|r| r.outcome.unwrap_or(false)).collect();
-                superforecast::brier_score_multi(&probs, &outs).ok()
+                // A "resolved" forecast should carry an outcome. `None` would
+                // be treated as `false` (event did not occur), inflating the
+                // Brier score. Filter to forecasts with a known outcome and
+                // warn on any `None` so the data-integrity issue is visible.
+                let scored: Vec<_> = resolved
+                    .iter()
+                    .filter(|r| {
+                        if r.outcome.is_none() {
+                            tracing::warn!(
+                                target: "hkask.mcp.scenarios",
+                                forecast_id = r.forecast_id,
+                                event_id = r.event_id,
+                                "resolved forecast has no outcome — excluding from Brier"
+                            );
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+                if scored.is_empty() {
+                    None
+                } else {
+                    let probs: Vec<f64> = scored.iter().map(|r| r.probability).collect();
+                    let outs: Vec<bool> =
+                        scored.iter().map(|r| r.outcome.unwrap_or(false)).collect();
+                    superforecast::brier_score_multi(&probs, &outs).ok()
+                }
             } else {
                 None
             };
 
-            let calibration = superforecast::compute_calibration_curve(&store).ok();
+            let calibration = superforecast::compute_calibration_curve(&store).ok().map(|c| serde_json::json!({
+                "total_forecasts": c.total_forecasts,
+                "resolved_forecasts": c.resolved_forecasts,
+                "overall_brier": c.overall_brier,
+                "overconfidence_score": c.overconfidence_score,
+                "interpretation": c.interpretation
+            }));
 
             let recent: Vec<_> = store.values().take(20).map(|r| serde_json::json!({
                 "forecast_id": r.forecast_id,
@@ -384,52 +289,39 @@ impl ScenariosServer {
                 "outcome": r.outcome,
             })).collect();
 
-            let tree = self.tree_cache.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let tree = self.tree_cache.lock().unwrap_or_else(|e| e.into_inner()).clone().map(|t| serde_json::json!({
+                "subject": t.subject,
+                "time_horizon": serde_json::to_value(t.time_horizon).unwrap_or_default(),
+                "event_count": t.nodes.len(),
+                "joint_probability": t.joint_probability,
+                "root_ids": t.root_ids,
+                "nodes": t.nodes.iter().map(|n| serde_json::json!({
+                    "id": n.event.id,
+                    "name": n.event.name,
+                    "question": n.event.question,
+                    "probability": n.event.probability,
+                    "marginal_probability": n.marginal_probability,
+                    "certainty_tier": serde_json::to_value(n.event.certainty_tier()).unwrap_or_default(),
+                    "basis": n.event.basis,
+                    "parent_ids": n.event.depends_on.iter().flat_map(|d| d.parent_event_ids.clone()).collect::<Vec<_>>(),
+                    "children": [],
+                    "sub_question_count": n.event.sub_questions.len(),
+                    "has_base_rate": n.event.base_rate.is_some(),
+                    "brier_score": n.event.brier_score
+                })).collect::<Vec<_>>()
+            }));
 
-            let output = serde_json::json!({
-                "pipeline": {
-                    "forecast_count": total,
-                    "resolved_count": resolved_count,
-                    "pending_count": pending_count,
-                    "overall_brier": overall_brier,
-                    "recent_forecasts": recent
-                },
-                "calibration": calibration.map(|c| serde_json::json!({
-                    "total_forecasts": c.total_forecasts,
-                    "resolved_forecasts": c.resolved_forecasts,
-                    "overall_brier": c.overall_brier,
-                    "overconfidence_score": c.overconfidence_score,
-                    "interpretation": c.interpretation
-                })),
-                "event_tree": tree.map(|t| serde_json::json!({
-                    "subject": t.subject,
-                    "time_horizon": serde_json::to_value(t.time_horizon).unwrap_or_default(),
-                    "event_count": t.nodes.len(),
-                    "joint_probability": t.joint_probability,
-                    "root_ids": t.root_ids,
-                    "nodes": t.nodes.iter().map(|n| serde_json::json!({
-                        "id": n.event.id,
-                        "name": n.event.name,
-                        "question": n.event.question,
-                        "probability": n.event.probability,
-                        "marginal_probability": n.marginal_probability,
-                        "certainty_tier": serde_json::to_value(n.event.certainty_tier()).unwrap_or_default(),
-                        "basis": n.event.basis,
-                        "parent_ids": n.event.depends_on.iter().flat_map(|d| d.parent_event_ids.clone()).collect::<Vec<_>>(),
-                        "children": [],
-                        "sub_question_count": n.event.sub_questions.len(),
-                        "has_base_rate": n.event.base_rate.is_some(),
-                        "brier_score": n.event.brier_score
-                    })).collect::<Vec<_>>()
-                })),
-                "provenance": {
-                    "server": "hkask-mcp-scenarios",
-                    "version": "0.31.0"
-                },
-                "ontology_anchor": "dublin-core"
-            });
+            let output = build_status_response(
+                total,
+                resolved_count,
+                pending_count,
+                overall_brier,
+                calibration,
+                recent,
+                tree,
+            );
 
-            self.record_experience("scenario_status", &format!("forecasts={}, resolved={}", total, resolved_count), "success", output.clone());
+            self.record_experience("scenario_status");
             Ok(output)
         }).await
     }
@@ -441,9 +333,17 @@ impl ScenariosServer {
     /// individual tools. The pipeline assembles their outputs into one envelope.
     #[tool(description = "Run the complete scenario pipeline in a single call.")]
     pub async fn scenario_full(&self, Parameters(req): Parameters<FullPipelineRequest>) -> String {
-        execute_tool_semantic(self, "scenario_full", Some(Self::ontology_anchor("scenario_full")), async {
-            let events: Vec<ScenarioEvent> = serde_json::from_str(&req.events)
-                .map_err(|e| McpToolError::invalid_argument(format!("invalid events JSON: {}", e)))?;
+        execute_tool_semantic(self, "scenario_full", Self::ontology_anchor("scenario_full"), async {
+            let events = &req.events;
+            // The pipeline anchors synthesis on the first event, so an empty
+            // array is refused up front rather than indexed later. `build_event_tree`
+            // also rejects empty input, but the synthesis step at step 5 is
+            // reachable independently of it.
+            let Some(first_event_id) = events.first().map(|e| e.id.clone()) else {
+                return Err(McpToolError::invalid_argument(
+                    "events must contain at least one scenario event",
+                ));
+            };
 
             // Step 1: Triage
             let triage_results: Vec<_> = events.iter().map(|e| {
@@ -452,16 +352,25 @@ impl ScenariosServer {
             }).collect();
 
             // Step 2: Quantify
-            let tree = superforecast::build_event_tree(&events)
-                .map_err(|e| McpToolError::invalid_argument(e.to_string()))?;
+            let tree = superforecast::build_event_tree(events)
+                .map_err(map_scenario_error)?;
 
             // Step 3: Sensitivity
             let sensitivity = superforecast::sensitivity_ranking(&tree);
 
             // Step 4: Calibrate
             let calibration: Vec<_> = events.iter().map(|e| {
-                let fermi = superforecast::calibrate_from_fermi(&e.sub_questions)
-                    .unwrap_or(0.5);
+                let fermi = match superforecast::calibrate_from_fermi(&e.sub_questions) {
+                    Ok(fermi_estimate) => fermi_estimate,
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "hkask.mcp.scenarios",
+                            %error,
+                            "Fermi calibration failed, defaulting to 0.5"
+                        );
+                        0.5
+                    }
+                };
                 let (cal, conf) = if let (Some(br), Some(_)) = (e.base_rate, e.reference_class.as_ref()) {
                     superforecast::outside_view_adjustment(br, fermi, 1)
                 } else { (fermi, 0.5) };
@@ -469,9 +378,27 @@ impl ScenariosServer {
             }).collect();
 
             // Step 5: Synthesize (if perspectives provided)
-            let synth = req.perspectives.as_deref()
-                .and_then(|s| serde_json::from_str::<Vec<Perspective>>(s).ok())
-                .and_then(|ps| if ps.len() >= 2 { superforecast::synthesize_perspectives(&events[0].id, &ps).ok() } else { None });
+            let synth = req.perspectives.as_deref().and_then(|perspectives| {
+                if perspectives.len() < 2 {
+                    tracing::warn!(
+                        target: "hkask.mcp.scenarios",
+                        "scenario_full: fewer than 2 perspectives provided; skipping synthesis"
+                    );
+                    None
+                } else {
+                    match superforecast::synthesize_perspectives(&first_event_id, perspectives) {
+                        Ok(synthesis) => Some(synthesis),
+                        Err(error) => {
+                            tracing::warn!(
+                                target: "hkask.mcp.scenarios",
+                                %error,
+                                "scenario_full: perspective synthesis failed; skipping"
+                            );
+                            None
+                        }
+                    }
+                }
+            });
 
             // Step 6: Assess
             let deps = events.iter().filter(|e| !e.depends_on.is_empty()).count();
@@ -504,83 +431,259 @@ impl ScenariosServer {
                 "provenance": {
                     "tool": "scenario_full",
                     "server": "hkask-mcp-scenarios",
-                    "version": "0.31.0",
+                    "version": SERVER_VERSION,
                     "pipeline_steps": ["triage", "quantify", "sensitivity", "calibrate", "synthesize", "assess"],
                     "delegates_to": ["triage_question", "build_event_tree", "sensitivity_ranking", "calibrate_from_fermi", "outside_view_adjustment", "synthesize_perspectives", "assess_project"]
                 },
-                "ontology_anchor": "dublin-core"
+                "ontology": dc_bibo::DATASET
             });
 
-            self.record_experience("scenario_full", &format!("subject={}", req.subject), "success", output.clone());
+            self.record_experience("scenario_full");
             Ok(output)
         })
         .await
     }
 
-    /// Bridge: convert companies MCP server output into scenario events.
-    /// Takes a Schwartz 2x2 calibration from hkask-mcp-companies and converts
-    /// the scenario projections into binomial ScenarioEvents with Fermi
-    /// sub-questions derived from growth/margin assumptions.
+    /// Bridge: convert a prediction-market record into a scenario event.
+    /// Caller-mediated: the agent pastes the annotated MarketRecord JSON
+    /// from hkask-mcp-prediction-markets. The domain-bias correction is
+    /// applied deterministically here; low reliability or weak match
+    /// confidence withholds the base rate.
     #[tool(
-        description = "Convert companies MCP server output into scenario events for forecast tracking."
+        description = "Convert a prediction-market record (from hkask-mcp-prediction-markets market_lookup/market_match) into a ScenarioEvent anchored on the market-implied base rate. Applies the domain-bias correction deterministically; withholds base_rate on low reliability or weak match confidence."
     )]
-    pub async fn scenario_from_companies(
+    pub async fn scenario_from_markets(
         &self,
-        Parameters(req): Parameters<CompaniesBridgeRequest>,
+        Parameters(req): Parameters<MarketsBridgeRequest>,
     ) -> String {
-        execute_tool_semantic(self, "scenario_from_companies", Some(Self::ontology_anchor("scenario_from_companies")), async {
-            let horizon = parse_time_horizon(req.time_horizon.as_deref());
-            let companies_json: serde_json::Value = serde_json::from_str(&req.companies_output)
-                .map_err(|e| McpToolError::invalid_argument(format!("invalid companies output JSON: {}", e)))?;
+        execute_tool_semantic(self, "scenario_from_markets", Self::ontology_anchor("scenario_from_markets"), async {
+            let record: hkask_mcp_prediction_markets::types::MarketRecord =
+                serde_json::from_value(req.market_record.into())
+                    .map_err(|e| McpToolError::invalid_argument(format!("invalid market record JSON: {e}")))?;
 
-            let events = superforecast::convert_companies_output(&req.symbol, &companies_json, horizon)
-                .map_err(|e| McpToolError::invalid_argument(e.to_string()))?;
+            let (event, warnings) = {
+                let store = self.forecast_store.lock().unwrap_or_else(|e| e.into_inner());
+                superforecast::convert_market_record(
+                    &record,
+                    req.match_confidence.as_deref(),
+                    Some(&store),
+                )
+            }
+            .map_err(map_scenario_error)?;
 
             let output = serde_json::json!({
-                "symbol": req.symbol,
-                "source": "hkask-mcp-companies calibrate_forecast output",
-                "time_horizon": horizon.display(),
-                "event_count": events.len(),
-                "events": events.iter().map(|e| {
-                    serde_json::json!({
-                        "id": e.id,
-                        "name": e.name,
-                        "question": e.question,
-                        "probability": e.probability,
-                        "sub_questions": e.sub_questions.iter().map(|sq| {
-                            serde_json::json!({
-                                "question": sq.question,
-                                "estimate": sq.estimate,
-                                "confidence": sq.confidence,
-                            })
-                        }).collect::<Vec<_>>(),
-                    })
-                }).collect::<Vec<_>>(),
-                "pipeline": [
-                    "1. companies.calibrate_forecast → Schwartz 2x2 scenario analysis",
-                    "2. scenario_from_companies → convert to ScenarioEvents (this tool)",
-                    "3. scenario_quantify → resolve conditional probability tree",
-                    "4. scenario_calibrate → Fermi decomposition + base rate calibration",
-                    "5. scenario_synthesize → dragonfly-eye aggregation if multiple analysts",
-                    "6. scenario_score → Brier scoring when outcomes are known",
-                ],
-                "bridge_note": "The companies server specializes in financial modeling (FIBO-anchored). The scenarios server specializes in forecast tracking (Tetlock/Chermack). This tool bridges them: financial projections become trackable forecasts.",
-                "provenance": {
-                    "tool": "scenario_from_companies",
-                    "server": "hkask-mcp-scenarios",
-                    "version": "0.31.0",
-                    "source": "hkask-mcp-companies calibrate_forecast",
-                    "ontology_anchor": "fibo-to-dublin-core"
+                "event": {
+                    "id": event.id,
+                    "name": event.name,
+                    "question": event.question,
+                    "deadline": event.deadline.to_string(),
+                    "probability": event.probability,
+                    "base_rate": event.base_rate,
+                    "basis": event.basis,
+                    "reference_class": event.reference_class,
                 },
-                "ontology_anchor": "dublin-core"
+                "warnings": warnings,
+                "provenance": {
+                    "tool": "scenario_from_markets",
+                    "server": "hkask-mcp-scenarios",
+                    "version": SERVER_VERSION,
+                    "source": format!("{:?}:{}", record.source, record.market_id),
+                    "ontology_identifier": record.ontology.state.identifier,
+                },
+                "bridge_note": "The prediction-markets server supplies annotated market-implied probabilities; this bridge anchors a trackable ScenarioEvent on them. base_rate is None when the reliability/match gates refuse the anchor — do not substitute the raw price.",
+                "ontology": dc_bibo::DATASET
             });
 
-            self.record_experience(
-                "scenario_from_companies",
-                &format!("symbol={}, events={}", req.symbol, events.len()),
-                "success",
-                output.clone(),
-            );
+            Ok(output)
+        })
+        .await
+    }
+
+    /// Bridge: compose a SET of prediction-market records into a dependent
+    /// event tree (T4a). Per-record gates from `scenario_from_markets` apply;
+    /// dependency edges are caller-authored (the server computes marginals
+    /// but never invents conditional probabilities).
+    ///
+    /// MATURITY NOTE: this is the detailed end of the scenario-modeling
+    /// ladder. The simple path — companies `scenario_analysis` (Schwartz 2x2)
+    /// → `scenario_impact_valuation` on hkask-mcp-companies → single-market
+    /// `scenario_from_markets` — is the intended on-ramp; an analyst typically
+    /// arrives at a full tree only after research (company, industry, economy,
+    /// technology, management, domain experts) reveals which events actually
+    /// condition each other. The 2x2 mode is retained as a first-class citizen,
+    /// not a legacy path.
+    #[tool(
+        description = "Compose a set of prediction-market records (from hkask-mcp-prediction-markets) into a validated EventTree with caller-authored dependency edges. Each record passes the scenario_from_markets gates; question-overlap duplicates are flagged; cycles and CPT-size violations are rejected. Returns the resolved tree (marginals, joint probability) plus composition warnings. Detailed-mode tool: the simpler 2x2 path (companies scenario_analysis → scenario_impact_valuation on hkask-mcp-companies) is the intended on-ramp before wiring full trees."
+    )]
+    pub async fn scenario_from_markets_set(
+        &self,
+        Parameters(req): Parameters<MarketsSetBridgeRequest>,
+    ) -> String {
+        execute_tool_semantic(self, "scenario_from_markets_set", Self::ontology_anchor("scenario_from_markets_set"), async {
+            let records: Vec<hkask_mcp_prediction_markets::types::MarketRecord> =
+                serde_json::from_value(req.market_records.into())
+                    .map_err(|e| McpToolError::invalid_argument(format!("invalid market records JSON array: {e}")))?;
+
+            let confidences = req.match_confidences.unwrap_or_else(|| vec![None; records.len()]);
+            let specs: Vec<superforecast::DependencySpec> = req
+                .dependency_specs
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| superforecast::DependencySpec {
+                    child_market_id: s.child_market_id,
+                    parent_market_ids: s.parent_market_ids,
+                    conditionals: s.conditionals,
+                })
+                .collect();
+
+            let (tree, warnings) = {
+                let store = self.forecast_store.lock().unwrap_or_else(|e| e.into_inner());
+                superforecast::compose_market_tree(&records, &confidences, &specs, Some(&store))
+            }
+            .map_err(map_scenario_error)?;
+
+            let nodes: Vec<serde_json::Value> = tree
+                .nodes
+                .iter()
+                .map(|n| serde_json::json!({
+                    "id": n.event.id,
+                    "question": n.event.question,
+                    "marginal_probability": n.marginal_probability,
+                    "depends_on": n.event.depends_on.iter().map(|d| serde_json::json!({
+                        "parent_event_ids": d.parent_event_ids,
+                        "conditionals": d.conditionals,
+                    })).collect::<Vec<_>>(),
+                    "base_rate": n.event.base_rate,
+                    "variance_contribution": n.variance_contribution,
+                }))
+                .collect();
+
+            let output = serde_json::json!({
+                "tree": {
+                    "subject": tree.subject,
+                    "root_ids": tree.root_ids,
+                    "topo_order": tree.topo_order,
+                    "joint_probability": tree.joint_probability,
+                    "nodes": nodes,
+                },
+                "warnings": warnings,
+                "provenance": {
+                    "tool": "scenario_from_markets_set",
+                    "server": "hkask-mcp-scenarios",
+                    "version": SERVER_VERSION,
+                    "market_count": records.len(),
+                    "dependency_edge_count": specs.len(),
+                },
+                "bridge_note": "Dependency edges and their conditionals are caller-authored; the server validates structure and computes marginals/joints but never invents conditional probabilities. base_rate is None on records refused by the per-market gates.",
+                "ontology": dc_bibo::DATASET
+            });
+
+            Ok(output)
+        })
+        .await
+    }
+
+    /// Bridge: compose CMP indices into an EventTree (R1).
+    ///
+    /// Takes CMP index probabilities (from hkask-mcp-prediction-markets
+    /// build_cmp_indices) and composes them into a validated EventTree. Each
+    /// CMP index becomes a root ScenarioEvent with its index probability as the
+    /// prior. The tree cites the index (family, orientation, tenor, venue) in
+    /// the provenance — not a decaying contract.
+    ///
+    /// Optional dependency edges between CMP indices (e.g. "oil price increase
+    /// → inflation increase") enable the H3 joint coherence test.
+    #[tool(
+        description = "Compose CMP (Constant-Maturity Prediction) indices into a validated EventTree. Each CMP index becomes a root event with its index probability as the prior. Optional dependency edges between CMP indices (e.g. oil→inflation) enable joint probability computation for coherence testing. The tree cites the CMP index identity (family, tenor, orientation, venue) in the provenance — not a decaying contract. Input: an array of ProvenancedCmpIndex objects (from build_cmp_indices), observation date, optional dependency specs."
+    )]
+    pub async fn scenario_from_cmp_indices(
+        &self,
+        Parameters(req): Parameters<CmpBridgeRequest>,
+    ) -> String {
+        execute_tool_semantic(self, "scenario_from_cmp_indices", Self::ontology_anchor("scenario_from_cmp_indices"), async {
+            let indices: Vec<hkask_mcp_prediction_markets::cmp_index_builder::ProvenancedCmpIndex> =
+                serde_json::from_value(req.cmp_indices.into())
+                    .map_err(|e| McpToolError::invalid_argument(format!("invalid cmp_indices JSON array: {e}")))?;
+
+            let observation_date = chrono::NaiveDate::parse_from_str(&req.observation_date, "%Y-%m-%d")
+                .map_err(|e| McpToolError::invalid_argument(format!(
+                    "invalid observation_date '{}': {e} — expected YYYY-MM-DD",
+                    req.observation_date
+                )))?;
+
+            let deps: Vec<superforecast::CmpDependencySpec> = req
+                .dependency_specs
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| superforecast::CmpDependencySpec {
+                    child_id: s.child_id,
+                    parent_ids: s.parent_ids,
+                    conditionals: s.conditionals,
+                })
+                .collect();
+
+            let tree = if deps.is_empty() {
+                superforecast::compose_cmp_tree(&indices, observation_date)
+            } else {
+                superforecast::compose_cmp_tree_with_deps(&indices, observation_date, &deps)
+            }
+            .map_err(map_scenario_error)?;
+
+            let nodes: Vec<serde_json::Value> = tree
+                .nodes
+                .iter()
+                .map(|n| serde_json::json!({
+                    "id": n.event.id,
+                    "question": n.event.question,
+                    "marginal_probability": n.marginal_probability,
+                    "depends_on": n.event.depends_on.iter().map(|d| serde_json::json!({
+                        "parent_event_ids": d.parent_event_ids,
+                        "conditionals": d.conditionals,
+                    })).collect::<Vec<_>>(),
+                    "base_rate": n.event.base_rate,
+                    "basis": n.event.basis,
+                    "variance_contribution": n.variance_contribution,
+                }))
+                .collect();
+
+            // Extract CMP provenance from the event IDs (cmp:{family}:{tenor}:{orientation}).
+            let cmp_provenance: Vec<serde_json::Value> = tree
+                .nodes
+                .iter()
+                .filter_map(|n| {
+                    let id = &n.event.id;
+                    if !id.starts_with("cmp:") {
+                        return None;
+                    }
+                    Some(serde_json::json!({
+                        "id": id,
+                        "basis": n.event.basis,
+                        "reference_class": n.event.reference_class,
+                    }))
+                })
+                .collect();
+
+            let output = serde_json::json!({
+                "tree": {
+                    "subject": tree.subject,
+                    "root_ids": tree.root_ids,
+                    "topo_order": tree.topo_order,
+                    "joint_probability": tree.joint_probability,
+                    "nodes": nodes,
+                },
+                "cmp_provenance": cmp_provenance,
+                "provenance": {
+                    "tool": "scenario_from_cmp_indices",
+                    "server": "hkask-mcp-scenarios",
+                    "version": SERVER_VERSION,
+                    "cmp_index_count": indices.len(),
+                    "dependency_edge_count": deps.len(),
+                    "observation_date": req.observation_date,
+                },
+                "bridge_note": "CMP indices are constant-maturity, constant-orientation synthetic portfolios. The tree cites the index identity, not a decaying contract. Dependency edges and their conditionals are caller-authored; the server validates structure and computes marginals/joints but never invents conditional probabilities.",
+                "ontology": dc_bibo::DATASET
+            });
+
             Ok(output)
         })
         .await
@@ -594,16 +697,11 @@ impl ScenariosServer {
         &self,
         Parameters(req): Parameters<CrossValidateRequest>,
     ) -> String {
-        execute_tool_semantic(self, "scenario_cross_validate", Some(Self::ontology_anchor("scenario_cross_validate")), async {
-            let sq_a: Vec<SubQuestion> = serde_json::from_str(&req.sub_questions_a)
-                .map_err(|e| McpToolError::invalid_argument(format!("invalid sub_questions_a JSON: {}", e)))?;
-            let sq_b: Vec<SubQuestion> = serde_json::from_str(&req.sub_questions_b)
-                .map_err(|e| McpToolError::invalid_argument(format!("invalid sub_questions_b JSON: {}", e)))?;
-
+        execute_tool_semantic(self, "scenario_cross_validate", Self::ontology_anchor("scenario_cross_validate"), async {
             let validation = superforecast::cross_validate(
                 &req.event_id,
-                &req.source_a, req.estimate_a, &sq_a,
-                &req.source_b, req.estimate_b, &sq_b,
+                &req.source_a, req.estimate_a, &req.sub_questions_a,
+                &req.source_b, req.estimate_b, &req.sub_questions_b,
                 req.review_threshold,
             );
 
@@ -649,19 +747,14 @@ impl ScenariosServer {
                     "1. Feed the aggregated estimate into scenario_synthesize for dragonfly-eye integration. 2. Use scenario_quantify for downstream computation. 3. Track via scenario_score."
                 },
                 "methodology": {
-                    "ontology_anchor": "dublin-core",
+                    "ontology": dc_bibo::DATASET,
                     "framework": "Cross-validation between LLM reasoning (superforecasting skill) and computational verification (scenarios server)",
                     "threshold_rationale": "0.15 divergence threshold based on Tetlock's incremental belief updating (Commandment 4): superforecasters typically move probabilities in 0.05-0.10 increments. A 0.15 divergence suggests fundamentally different assumptions, not just calibration noise.",
                     "reference": "Tetlock & Gardner, Superforecasting (2015), Ch. 5-6"
                 }
             });
 
-            self.record_experience(
-                "scenario_cross_validate",
-                &format!("event={}, divergence={:.3}, review={}", req.event_id, validation.divergence, validation.requires_review),
-                "success",
-                output.clone(),
-            );
+            self.record_experience("scenario_cross_validate");
             Ok(output)
         })
         .await
@@ -672,14 +765,11 @@ impl ScenariosServer {
         description = "Start a conversational framing session for a scenario project. Generates a 7-turn conversational protocol with natural openings (not numbered questions) designed using behavioral psychology and improv coaching postures. Turns: (1) What is on your mind? (foot-in-the-door), (2) What decision hangs on this? (curiosity gap), (3) When do you need to act? (temporal anchoring), (4) What is NOT on the table? (loss aversion — exclusions first), (5) Who would say I told you so? (social proof + contrarian), (6) What does good enough look like? (peak-end begins), (7) What assumptions could break everything? (peak-end closes). Each turn has improv mode guidance (Plussing, Yes And, Yes But, Coaching) and behavioral psychology notes. The agent acts as a coach, not an interviewer. Run this FIRST — before scenario_brainstorm."
     )]
     pub async fn scenario_frame(&self, Parameters(req): Parameters<FrameRequest>) -> String {
-        execute_tool_semantic(self, "scenario_frame", Some(Self::ontology_anchor("scenario_frame")), async {
+        execute_tool_semantic(self, "scenario_frame", Self::ontology_anchor("scenario_frame"), async {
             let protocol = templates::generate_framing_session(&req.subject);
 
             // If prior answers were provided, merge them into the template
-            let prior: Option<serde_json::Value> = req
-                .prior_answers
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok());
+            let prior: Option<serde_json::Value> = req.prior_answers.map(|v| v.into());
 
             let mut output = protocol;
             if let Some(ref prior) = prior
@@ -690,13 +780,17 @@ impl ScenariosServer {
                         serde_json::json!("Prior answers from a previous framing session. Use these to skip turns already covered. If a prior answer seems stale or incomplete, revisit that turn naturally. Don't reference the prior answer directly — just ask the turn's opening question again."),
                     );
                 }
+            // Emit the ontology anchor at the top level (consistent with
+            // scenario_status and scenario_build). scenario_frame classifies
+            // as "pko" (it's a procedural coaching protocol).
+            if let Some(obj) = output.as_object_mut() {
+                obj.insert(
+                    "ontology".to_string(),
+                    serde_json::json!(Self::ontology_anchor("scenario_frame").unwrap_or(dc_bibo::DATASET)),
+                );
+            }
 
-            self.record_experience(
-                "scenario_frame",
-                &format!("subject={}", req.subject),
-                "success",
-                output.clone(),
-            );
+            self.record_experience("scenario_frame");
             Ok(output)
         })
         .await
@@ -704,18 +798,17 @@ impl ScenariosServer {
 
     /// Structure completed framing conversation answers into a FramingDocument.
     #[tool(
-        description = "Structure completed framing conversation answers into a typed FramingDocument. Accepts the subject and a JSON blob with answers from the 7-turn conversational protocol (from scenario_frame). Produces a validated FramingDocument with: focal_question, decision_at_stake, time_horizon, action_deadline, in_scope, out_of_scope, stakeholders (as personas for brainstorming), use_case, success_criteria, constraints, surfaced_assumptions, and exploration_prompts. The output feeds directly into scenario_brainstorm as the frame. Run AFTER the framing conversation is complete and BEFORE scenario_brainstorm."
+        description = "Structure completed framing conversation answers into a typed FramingDocument. Accepts the subject and an object with answers from the 7-turn conversational protocol (from scenario_frame). Produces a validated FramingDocument with: focal_question, decision_at_stake, time_horizon, action_deadline, in_scope, out_of_scope, stakeholders (as personas for brainstorming), use_case, success_criteria, constraints, surfaced_assumptions, and exploration_prompts. The output feeds directly into scenario_brainstorm as the frame. Run AFTER the framing conversation is complete and BEFORE scenario_brainstorm."
     )]
     pub async fn scenario_frame_document(
         &self,
         Parameters(req): Parameters<FrameDocumentRequest>,
     ) -> String {
-        execute_tool_semantic(self, "scenario_frame_document", Some(Self::ontology_anchor("scenario_frame_document")), async {
-            let answers: serde_json::Value = serde_json::from_str(&req.answers)
-                .map_err(|e| McpToolError::invalid_argument(format!("invalid answers JSON: {}", e)))?;
+        execute_tool_semantic(self, "scenario_frame_document", Self::ontology_anchor("scenario_frame_document"), async {
+            let answers: serde_json::Value = req.answers.into();
 
             let document = superforecast::structure_framing_document(&req.subject, &answers)
-                .map_err(|e| McpToolError::invalid_argument(e.to_string()))?;
+                .map_err(map_scenario_error)?;
 
             let output = serde_json::json!({
                 "subject": req.subject,
@@ -750,12 +843,7 @@ impl ScenariosServer {
                 ]
             });
 
-            self.record_experience(
-                "scenario_frame_document",
-                &format!("subject={}, stakeholders={}", req.subject, document.stakeholders.len()),
-                "success",
-                output.clone(),
-            );
+            self.record_experience("scenario_frame_document");
             Ok(output)
         })
         .await
@@ -769,7 +857,7 @@ impl ScenariosServer {
         &self,
         Parameters(req): Parameters<BrainstormRequest>,
     ) -> String {
-        execute_tool_semantic(self, "scenario_brainstorm", Some(Self::ontology_anchor("scenario_brainstorm")), async {
+        execute_tool_semantic(self, "scenario_brainstorm", Self::ontology_anchor("scenario_brainstorm"), async {
             let horizon = parse_time_horizon(req.time_horizon.as_deref());
             let research = req.research_context.as_deref().unwrap_or("No research context provided. Use scenario_research to gather web search results first, or provide context manually.");
 
@@ -839,7 +927,7 @@ impl ScenariosServer {
                     "step_8": "Use scenario_calibrate for Fermi decomposition per event, scenario_synthesize for multi-analyst aggregation, and scenario_assess for project evaluation."
                 },
                 "methodology": {
-                    "ontology_anchor": "dublin-core",
+                    "ontology": dc_bibo::DATASET,
                     "framework": "Cognitive Process Model for Scenario Construction",
                     "divergent_phase": "High-temperature ideation from multiple personas (Schwartz: imagination + Chermack: stakeholder diversity)",
                     "grounding_phase": "Evidence anchoring and base rate calibration (Tetlock Commandments 2-3: Fermi-ize + outside view)",
@@ -855,23 +943,20 @@ impl ScenariosServer {
                 }
             });
 
-            self.record_experience(
-                "scenario_brainstorm",
-                &format!("subject={}, personas={}", req.subject, protocol.personas.len()),
-                "success",
-                output.clone(),
-            );
+            self.record_experience("scenario_brainstorm");
             Ok(output)
         })
         .await
     }
-    /// If research text is provided, structures it into candidate events with
-    /// dependency suggestions. Without research, returns a template for LLM completion.
+    /// Returns a scenario event-tree scaffold/template for LLM completion.
+    /// Always returns an extraction template (event schema, dependency format,
+    /// certainty tiers, Tetlock commandments); the agent fills it against
+    /// research_text if provided. Does not itself parse research into final events.
     #[tool(
-        description = "Build a scenario event tree scaffold from web research. Returns an extraction template (not final events) with: event schema, dependency format, certainty tier definitions, and Tetlock's 10 commandments as methodology. The agent (LLM) fills in the event_extraction_prompt against research_text to produce ScenarioEvent JSON. Without research_text, returns a structural template. The ultimate pipeline artifact: events with calibrated probabilities, conditional dependency chains, and connections to driver/decision factors from the framing document. Feeds into scenario_quantify for probability resolution."
+        description = "Build a scenario event tree scaffold from web research. Returns an extraction template (not final events) with: event schema, dependency format, certainty tier definitions, and Tetlock's 10 commandments as methodology. The agent (LLM) fills in the event_extraction_prompt against research_text to produce ScenarioEvent objects. Without research_text, returns a structural template. The ultimate pipeline artifact: events with calibrated probabilities, conditional dependency chains, and connections to driver/decision factors from the framing document. Feeds into scenario_quantify for probability resolution."
     )]
     pub async fn scenario_build(&self, Parameters(req): Parameters<BuildEventsRequest>) -> String {
-        execute_tool_semantic(self, "scenario_build", Some(Self::ontology_anchor("scenario_build")), async {
+        execute_tool_semantic(self, "scenario_build", Self::ontology_anchor("scenario_build"), async {
             let horizon = parse_time_horizon(req.time_horizon.as_deref());
             let scenario_type = parse_scenario_type(req.scenario_type.as_deref());
             let max_events = req.max_events.unwrap_or(6);
@@ -954,7 +1039,7 @@ impl ScenariosServer {
                     "possible": {"range": "0-32%", "description": "Could happen but unlikely"}
                 },
                 "methodology": {
-                    "ontology_anchor": "dublin-core",
+                    "ontology": Self::ontology_anchor("scenario_build").unwrap_or(dc_bibo::DATASET),
                     "framework": "MAIA event-based scenario planning (Tetlock Superforecasting + Schwartz imagination)",
                     "research_pipeline": "1. Web search (brave/firecrawl/tavily) → 2. scenario_build (this tool) → 3. scenario_quantify (resolve tree) → 4. scenario_calibrate (Fermi probabilities)",
                     "tetlock_commandments": [
@@ -970,15 +1055,11 @@ impl ScenariosServer {
                         "10. Master error-balancing"
                     ],
                     "reference": "Tetlock & Gardner, Superforecasting (2015); Schwartz, The Art of the Long View (1991)"
-                }
+                },
+                "ontology": Self::ontology_anchor("scenario_build").unwrap_or(dc_bibo::DATASET)
             });
 
-            self.record_experience(
-                "scenario_build",
-                &format!("subject={}, context_len={}", req.subject, context_str.len()),
-                "success",
-                output.clone(),
-            );
+            self.record_experience("scenario_build");
             Ok(output)
         })
         .await
@@ -989,7 +1070,7 @@ impl ScenariosServer {
         description = "Extract candidate scenario events from raw web research text. Provide research_text (raw output from web searches about a subject) and this tool returns structured event suggestions with dependency hints. Each candidate event includes: suggested name, yes/no question framing, deadline suggestion, dependency hints, and Fermi sub-question scaffolding. The output is a draft that needs probability assignment and refinement, then feeds into scenario_quantify. Use this after web searching (brave_web_search, firecrawl_search, tavily_search) and before scenario_quantify."
     )]
     pub async fn scenario_research(&self, Parameters(req): Parameters<ResearchRequest>) -> String {
-        execute_tool_semantic(self, "scenario_research", Some(Self::ontology_anchor("scenario_research")), async {
+        execute_tool_semantic(self, "scenario_research", Self::ontology_anchor("scenario_research"), async {
             let horizon = parse_time_horizon(req.time_horizon.as_deref());
             let scenario_type = parse_scenario_type(req.scenario_type.as_deref());
             let max_events = req.max_events.unwrap_or(6);
@@ -1088,18 +1169,13 @@ impl ScenariosServer {
                     "step_5": "Use scenario_score to Brier-score outcomes and close the calibration loop"
                 },
                 "methodology": {
-                    "ontology_anchor": "dublin-core",
+                    "ontology": dc_bibo::DATASET,
                     "framework": "MAIA event-based scenario planning — research → events → tree → calibrate → track",
                     "reference": "Tetlock & Gardner, Superforecasting (2015) — Commandments 1-4"
                 }
             });
 
-            self.record_experience(
-                "scenario_research",
-                &format!("subject={}, words={}, themes={}", req.subject, word_count, theme_hints.len()),
-                "success",
-                output.clone(),
-            );
+            self.record_experience("scenario_research");
             Ok(output)
         })
         .await
@@ -1108,20 +1184,15 @@ impl ScenariosServer {
     /// Quantify an event tree: compute marginal probabilities, joint probability,
     /// and build the full resolved tree with sensitivity rankings.
     #[tool(
-        description = "Quantify a scenario event tree. Takes a JSON array of ScenarioEvent objects with conditional dependencies and computes: (1) topological sort of dependency graph, (2) marginal probabilities for each event via conditional probability propagation, (3) joint probability of the full event chain, (4) variance contribution per event (sensitivity proxy), (5) sensitivity ranking. Detects cycles and missing parent references. Returns the full resolved EventTree."
+        description = "Quantify a scenario event tree. Takes an array of ScenarioEvent objects with conditional dependencies and computes: (1) topological sort of dependency graph, (2) marginal probabilities for each event via conditional probability propagation, (3) joint probability of the full event chain, (4) variance contribution per event (sensitivity proxy), (5) sensitivity ranking. Detects cycles and missing parent references. Returns the full resolved EventTree. To render this tree inline for the user, emit a fenced `graph` code block whose body is a JSON object: {\"viz\":\"event_tree\", \"subject\":..., \"joint_probability\":..., \"nodes\":[{\"id\",\"name\",\"question\",\"marginal_probability\",\"certainty_tier\",\"depends_on\":[{\"parent_event_ids\":[...],\"conditionals\":[...]}]}]} — the conversation view renders it as an interactive event-tree DAG (pan/zoom; click a node to set evidence and re-propagate). Pass through the fields this tool returns; keep `depends_on[].conditionals` intact so the DAG can re-propagate when evidence is set."
     )]
     pub async fn scenario_quantify(&self, Parameters(req): Parameters<QuantifyRequest>) -> String {
-        execute_tool_semantic(self, "scenario_quantify", Some(Self::ontology_anchor("scenario_quantify")), async {
-            let events: Vec<ScenarioEvent> = serde_json::from_str(&req.events)
-                .map_err(|e| McpToolError::invalid_argument(format!("invalid events JSON: {}", e)))?;
-
-            let tree = superforecast::build_event_tree(&events)
-                .map_err(|e| McpToolError::invalid_argument(e.to_string()))?;
+        execute_tool_semantic(self, "scenario_quantify", Self::ontology_anchor("scenario_quantify"), async {
+            let tree = superforecast::build_event_tree(&req.events)
+                .map_err(map_scenario_error)?;
 
             // Cache for TUI status queries
-            if let Ok(mut cache) = self.tree_cache.lock() {
-                *cache = Some(tree.clone());
-            }
+            *self.tree_cache.lock().unwrap_or_else(|e| e.into_inner()) = Some(tree.clone());
 
             let sensitivity = superforecast::sensitivity_ranking(&tree);
             let most_uncertain = sensitivity.first().map(|(id, _)| format!("Event '{}' contributes the most uncertainty", id));
@@ -1165,12 +1236,58 @@ impl ScenariosServer {
                 "framework": "Conditional probability tree. Each node's marginal is computed via full joint-table marginalization under parent independence: P(E) = Sum_a P(E|a) * Product_i P(p_i)^{a_i} * (1-P(p_i))^{1-a_i}. Root nodes use their intrinsic probability. Joint = product of all-nodes-occur conditionals."
             });
 
-            self.record_experience(
-                "scenario_quantify",
-                &format!("events={}", tree.nodes.len()),
-                "success",
-                output.clone(),
-            );
+            self.record_experience("scenario_quantify");
+            Ok(output)
+        })
+        .await
+    }
+
+    /// Tree-level Bayesian propagation (T5): update one event's prior and
+    /// recompute every descendant marginal and the joint. The propagation
+    /// journal is the tâtonnement record (Bhattacharya Prop. 6).
+    #[tool(
+        description = "Update one event's prior probability and propagate through the event tree: all descendant marginals and the joint probability are recomputed. Returns the updated tree plus a propagation journal (per-node before/after deltas) — the tâtonnement record of the update round. CPTs are untouched; only the named event's prior changes."
+    )]
+    pub async fn scenario_propagate(
+        &self,
+        Parameters(req): Parameters<PropagateRequest>,
+    ) -> String {
+        execute_tool_semantic(self, "scenario_propagate", Self::ontology_anchor("scenario_propagate"), async {
+            let result = superforecast::propagate_prior_update(&req.events, &req.event_id, req.new_prior)
+                .map_err(map_scenario_error)?;
+
+            let nodes: Vec<serde_json::Value> = result
+                .tree
+                .nodes
+                .iter()
+                .map(|n| serde_json::json!({
+                    "id": n.event.id,
+                    "marginal_probability": n.marginal_probability,
+                    "update_count": n.event.update_count,
+                }))
+                .collect();
+
+            let output = serde_json::json!({
+                "tree": {
+                    "subject": result.tree.subject,
+                    "topo_order": result.tree.topo_order,
+                    "joint_probability": result.tree.joint_probability,
+                    "nodes": nodes,
+                },
+                "journal": result.journal,
+                "joint_before": result.joint_before,
+                "joint_after": result.joint_after,
+                "provenance": {
+                    "tool": "scenario_propagate",
+                    "server": "hkask-mcp-scenarios",
+                    "version": SERVER_VERSION,
+                    "updated_event": req.event_id,
+                    "changed_nodes": result.journal.len(),
+                },
+                "framework": "Tree-level Bayesian propagation: the named event's prior is revised; every descendant marginal is recomputed via CPT marginalization under parent independence; the journal records each changed node (one tâtonnement round, Bhattacharya Prop. 6, arXiv:2211.03244).",
+                "ontology": dc_bibo::DATASET
+            });
+
             Ok(output)
         })
         .await
@@ -1181,7 +1298,7 @@ impl ScenariosServer {
         description = "Bayesian update for a scenario event. Apply Bayes' theorem: P(H|E) = P(E|H) × P(H) / P(E). Provide prior probability, evidence likelihood (how likely is the evidence if the hypothesis is true?), and evidence base rate (how common is this evidence in general?). Returns the posterior probability and the magnitude of the update."
     )]
     pub async fn scenario_update(&self, Parameters(req): Parameters<UpdateRequest>) -> String {
-        execute_tool_semantic(self, "scenario_update", Some(Self::ontology_anchor("scenario_update")), async {
+        execute_tool_semantic(self, "scenario_update", Self::ontology_anchor("scenario_update"), async {
             if !(0.0..=1.0).contains(&req.prior_probability) {
                 return Err(McpToolError::invalid_argument("prior_probability must be in [0, 1]"));
             }
@@ -1219,12 +1336,7 @@ impl ScenariosServer {
                 "reference": "Tetlock & Gardner, Superforecasting (2015), Ch. 5"
             });
 
-            self.record_experience(
-                "scenario_update",
-                &format!("event={}, delta={:.3}", req.event_id, delta),
-                "success",
-                output.clone(),
-            );
+            self.record_experience("scenario_update");
             Ok(output)
         })
         .await
@@ -1232,22 +1344,12 @@ impl ScenariosServer {
 
     /// Score a forecast against known outcomes using Brier scoring.
     #[tool(
-        description = "Score a scenario forecast against known outcomes using Brier scoring. Takes events JSON and outcomes (array of {event_id, occurred} pairs). Computes Brier score per event and aggregate. Provides human-readable interpretation: excellent (<0.05), good (<0.10), fair (<0.20), poor (<0.33), worse_than_climatology (≥0.33). Calibration tracking closes the superforecasting loop."
+        description = "Score a scenario forecast against known outcomes using Brier scoring. Takes an array of ScenarioEvent objects and an array of outcomes (each with event_id and occurred boolean). Computes Brier score per event and aggregate. Provides human-readable interpretation: excellent (<0.05), good (<0.10), fair (<0.20), poor (<0.33), worse_than_climatology (≥0.33). Calibration tracking closes the superforecasting loop."
     )]
     pub async fn scenario_score(&self, Parameters(req): Parameters<ScoreRequest>) -> String {
-        execute_tool_semantic(self, "scenario_score", Some(Self::ontology_anchor("scenario_score")), async {
-            let events: Vec<ScenarioEvent> = serde_json::from_str(&req.events)
-                .map_err(|e| McpToolError::invalid_argument(format!("invalid events JSON: {}", e)))?;
-
-            #[derive(Deserialize)]
-            struct OutcomeEntry {
-                event_id: String,
-                occurred: bool,
-            }
-            let outcomes: Vec<OutcomeEntry> = serde_json::from_str(&req.outcomes)
-                .map_err(|e| McpToolError::invalid_argument(format!("invalid outcomes JSON: {}", e)))?;
-
-            let outcome_pairs: Vec<(String, bool)> = outcomes
+        execute_tool_semantic(self, "scenario_score", Self::ontology_anchor("scenario_score"), async {
+            let events = &req.events;
+            let outcome_pairs: Vec<(String, bool)> = req.outcomes
                 .into_iter()
                 .map(|o| (o.event_id, o.occurred))
                 .collect();
@@ -1255,7 +1357,7 @@ impl ScenariosServer {
             let forecast_date = chrono::Utc::now().date_naive();
             let result = superforecast::score_forecast(
                 &req.forecast_id,
-                &events,
+                events,
                 &outcome_pairs,
                 forecast_date,
             );
@@ -1292,21 +1394,26 @@ impl ScenariosServer {
                 } else {
                     "Poorly calibrated — your forecasts are not beating a coin flip. Revisit your outside-view base rates and inside-view adjustments."
                 },
-                "auto_update_suggestions": superforecast::auto_update_suggestions(&events, &outcome_pairs),
+                "auto_update_suggestions": superforecast::auto_update_suggestions(events, &outcome_pairs),
                 "update_guidance": "The auto_update_suggestions above show suggested probability adjustments based on forecast error direction. Apply them via scenario_update to close the feedback loop. Each adjustment is clamped to ±15% and respects [0.01, 0.99] bounds.",
                 "reference": "Brier (1950). Score = (p - o)² where p = forecast probability, o = outcome (1 if occurred, 0 if not). Lower is better."
             });
 
-            // Store forecasts and resolve outcomes for calibration tracking (P2)
+            // Store forecasts and resolve outcomes for calibration tracking (P2).
+            // Each new record is inserted via `insert` (which appends to the
+            // journal — durable). Outcome updates on existing records are also
+            // done via `insert` (not `get_mut`) so the outcome is durably
+            // journaled, not just in-memory. `persist()` at the end is a
+            // belt-and-suspenders full snapshot.
             {
                 let mut store = self.forecast_store.lock().unwrap_or_else(|e| e.into_inner());
                 let now = chrono::Utc::now().date_naive();
-                for event in &events {
+                for event in events {
                     let key = format!("{}:{}", req.forecast_id, event.id);
                     let event_outcome = outcome_pairs.iter().find(|(eid, _)| eid == &event.id);
                     if store.get(&key).is_none() {
                         store.insert(key.clone(), types::StoredForecastRecord {
-                            schema_version: 1,
+                            schema_version: 2,
                             forecast_id: req.forecast_id.clone(),
                             event_id: event.id.clone(),
                             event_name: event.name.clone(),
@@ -1315,24 +1422,24 @@ impl ScenariosServer {
                             created_at: now,
                             outcome: None,
                             resolved_at: None,
+                            category: Some(event.scenario_type.as_str().to_string()),
                         });
                     }
-                    if let Some((_, occurred)) = event_outcome
-                        && let Some(record) = store.get_mut(&key)
-                    {
-                        record.outcome = Some(*occurred);
-                        record.resolved_at = Some(now);
+                    if let Some((_, occurred)) = event_outcome {
+                        // Re-insert the record with the outcome set — this
+                        // appends to the journal (durable), unlike `get_mut`
+                        // which only mutates in-memory.
+                        if let Some(mut record) = store.get(&key).cloned() {
+                            record.outcome = Some(*occurred);
+                            record.resolved_at = Some(now);
+                            store.insert(key.clone(), record);
+                        }
                     }
                 }
                 store.persist();
             }
 
-            self.record_experience(
-                "scenario_score",
-                &format!("forecast={}, brier={:.3}", req.forecast_id, result.brier_score),
-                "success",
-                output.clone(),
-            );
+            self.record_experience("scenario_score");
             Ok(output)
         })
         .await
@@ -1346,17 +1453,14 @@ impl ScenariosServer {
         &self,
         Parameters(req): Parameters<CalibrateRequest>,
     ) -> String {
-        execute_tool_semantic(self, "scenario_calibrate", Some(Self::ontology_anchor("scenario_calibrate")), async {
-            let sub_questions: Vec<SubQuestion> = serde_json::from_str(&req.sub_questions)
-                .map_err(|e| McpToolError::invalid_argument(format!("invalid sub_questions JSON: {}", e)))?;
-
-            if sub_questions.is_empty() {
+        execute_tool_semantic(self, "scenario_calibrate", Self::ontology_anchor("scenario_calibrate"), async {
+            if req.sub_questions.is_empty() {
                 return Err(McpToolError::invalid_argument("at least one sub_question is required"));
             }
 
             // Stage 1: Fermi decomposition
-            let fermi_estimate = superforecast::calibrate_from_fermi(&sub_questions)
-                .map_err(|e| McpToolError::invalid_argument(e.to_string()))?;
+            let fermi_estimate = superforecast::calibrate_from_fermi(&req.sub_questions)
+                .map_err(map_scenario_error)?;
 
             // Stage 2+3: Outside/inside view blending (if base rate provided)
             let (calibrated, confidence) = if let (Some(base_rate), Some(_ref_class), Some(ref_count)) =
@@ -1407,7 +1511,7 @@ impl ScenariosServer {
                 } else {
                     "Open: fewer than 5 resolved forecasts — no calibration adjustment applied yet. Record outcomes via scenario_score to close the loop."
                 },
-                "sub_questions": sub_questions.iter().map(|sq| serde_json::json!({
+                "sub_questions": req.sub_questions.iter().map(|sq| serde_json::json!({
                     "question": sq.question,
                     "estimate": sq.estimate,
                     "confidence": sq.confidence,
@@ -1429,12 +1533,7 @@ impl ScenariosServer {
                 "reference": "Tetlock & Gardner, Superforecasting (2015), Ch. 4-6"
             });
 
-            self.record_experience(
-                "scenario_calibrate",
-                &format!("question={}, calibrated={:.3}", req.question, calibrated),
-                "success",
-                output.clone(),
-            );
+            self.record_experience("scenario_calibrate");
             Ok(output)
         })
         .await
@@ -1442,18 +1541,16 @@ impl ScenariosServer {
 
     /// Sensitivity ranking: which events drive outcome uncertainty.
     #[tool(
-        description = "Rank events by their contribution to outcome uncertainty. For each event, computes variance contribution (|P - 0.5|) — events closer to 50/50 contribute more uncertainty. Returns events ranked from most uncertain to most certain. Useful for identifying which events to spend calibration effort on."
+        description = "Rank events by their contribution to outcome uncertainty. For each event, computes an uncertainty score (1 - variance contribution; higher = more uncertainty) — events closer to 50/50 contribute more uncertainty. Returns events ranked from most uncertain to most certain. Useful for identifying which events to spend calibration effort on."
     )]
     pub async fn scenario_sensitivity(
         &self,
         Parameters(req): Parameters<SensitivityRequest>,
     ) -> String {
-        execute_tool_semantic(self, "scenario_sensitivity", Some(Self::ontology_anchor("scenario_sensitivity")), async {
-            let events: Vec<ScenarioEvent> = serde_json::from_str(&req.events)
-                .map_err(|e| McpToolError::invalid_argument(format!("invalid events JSON: {}", e)))?;
-
-            let tree = superforecast::build_event_tree(&events)
-                .map_err(|e| McpToolError::invalid_argument(e.to_string()))?;
+        execute_tool_semantic(self, "scenario_sensitivity", Self::ontology_anchor("scenario_sensitivity"), async {
+            let events = &req.events;
+            let tree = superforecast::build_event_tree(events)
+                .map_err(map_scenario_error)?;
 
             let ranking = superforecast::sensitivity_ranking(&tree);
 
@@ -1481,12 +1578,7 @@ impl ScenariosServer {
                 "methodology": "Variance contribution proxy: |P - 0.5| × 2. Events at 50% contribute maximum uncertainty; events at 0% or 100% contribute none."
             });
 
-            self.record_experience(
-                "scenario_sensitivity",
-                &format!("events={}", events.len()),
-                "success",
-                output.clone(),
-            );
+            self.record_experience("scenario_sensitivity");
             Ok(output)
         })
         .await
@@ -1500,12 +1592,9 @@ impl ScenariosServer {
         &self,
         Parameters(req): Parameters<SynthesizeRequest>,
     ) -> String {
-        execute_tool_semantic(self, "scenario_synthesize", Some(Self::ontology_anchor("scenario_synthesize")), async {
-            let perspectives: Vec<Perspective> = serde_json::from_str(&req.perspectives)
-                .map_err(|e| McpToolError::invalid_argument(format!("invalid perspectives JSON: {}", e)))?;
-
-            let synthesis = superforecast::synthesize_perspectives(&req.event_id, &perspectives)
-                .map_err(|e| McpToolError::invalid_argument(e.to_string()))?;
+        execute_tool_semantic(self, "scenario_synthesize", Self::ontology_anchor("scenario_synthesize"), async {
+            let synthesis = superforecast::synthesize_perspectives(&req.event_id, &req.perspectives)
+                .map_err(map_scenario_error)?;
 
             let output = serde_json::json!({
                 "event_id": synthesis.event_id,
@@ -1539,7 +1628,7 @@ impl ScenariosServer {
                 "reference": "Tetlock & Gardner, Superforecasting (2015), Ch. 7 — Dragonfly-Eye"
             });
 
-            self.record_experience("scenario_synthesize", &format!("event={}", req.event_id), "success", output.clone());
+            self.record_experience("scenario_synthesize");
             Ok(output)
         })
         .await
@@ -1553,7 +1642,7 @@ impl ScenariosServer {
         &self,
         Parameters(req): Parameters<CalibrationRequest>,
     ) -> String {
-        execute_tool_semantic(self, "scenario_calibration", Some(Self::ontology_anchor("scenario_calibration")), async {
+        execute_tool_semantic(self, "scenario_calibration", Self::ontology_anchor("scenario_calibration"), async {
             let store = self.forecast_store.lock().unwrap_or_else(|e| e.into_inner());
 
             let filtered_store = req
@@ -1563,7 +1652,7 @@ impl ScenariosServer {
             let curve = superforecast::compute_calibration_curve(
                 filtered_store.as_ref().unwrap_or(&store),
             )
-            .map_err(|e| McpToolError::invalid_argument(e.to_string()))?;
+            .map_err(map_scenario_error)?;
 
             let output = serde_json::json!({
                 "subject": req.subject,
@@ -1601,7 +1690,7 @@ impl ScenariosServer {
                 "reference": "Brier (1950); Murphy (1973) — decomposition of Brier score into reliability, resolution, and uncertainty components"
             });
 
-            self.record_experience("scenario_calibration", "calibration_curve", "success", output.clone());
+            self.record_experience("scenario_calibration");
             Ok(output)
         })
         .await
@@ -1612,7 +1701,7 @@ impl ScenariosServer {
         description = "Triage a forecasting question (Tetlock Commandment 1). Evaluates whether a question is worth the full superforecasting pipeline. Scores three dimensions: clarity (specificity + deadline), data availability (reference class exists?), and resolution criteria (will we know the answer?). Classifies into: clocklike (easy, base-rate suffices), goldilocks (worth full pipeline), cloudlike (too vague, refine the question)."
     )]
     pub async fn scenario_triage(&self, Parameters(req): Parameters<TriageRequest>) -> String {
-        execute_tool_semantic(self, "scenario_triage", Some(Self::ontology_anchor("scenario_triage")), async {
+        execute_tool_semantic(self, "scenario_triage", Self::ontology_anchor("scenario_triage"), async {
             let assessment = superforecast::triage_question(
                 &req.question,
                 req.has_deadline.unwrap_or(false),
@@ -1639,7 +1728,7 @@ impl ScenariosServer {
                 "reference": "Tetlock & Gardner, Superforecasting (2015), Ch. 3 — Triage and the Goldilocks Zone"
             });
 
-            self.record_experience("scenario_triage", &req.question, "success", output.clone());
+            self.record_experience("scenario_triage");
             Ok(output)
         })
         .await
@@ -1650,7 +1739,7 @@ impl ScenariosServer {
         description = "Assess a scenario project's effectiveness (Chermack Phase 5). Evaluates the project across all five phases: Preparation (stakeholder engagement), Exploration (perspective diversity), Development (causal structure), Implementation (strategies applied), and Project Assessment (learning + calibration). Combines quantitative metrics (Brier scores, disagreement, event count, dependency ratio) with qualitative assessment. Answers Chermack's core question: did the scenario project improve decision quality? Returns per-phase scores, gaps, strengths, learning evidence, and actionable recommendations."
     )]
     pub async fn scenario_assess(&self, Parameters(req): Parameters<AssessRequest>) -> String {
-        execute_tool_semantic(self, "scenario_assess", Some(Self::ontology_anchor("scenario_assess")), async {
+        execute_tool_semantic(self, "scenario_assess", Self::ontology_anchor("scenario_assess"), async {
             let perspective_count = req.perspective_count.unwrap_or(1);
             let disagreement = req.disagreement_score.unwrap_or(0.0);
             let event_count = req.event_count.unwrap_or(0);
@@ -1681,7 +1770,7 @@ impl ScenariosServer {
                 calibration_curve: curve.as_ref(),
                 strategies_generated: strategies_gen,
                 strategies_implemented: strategies_impl,
-                learning_events: learning_events.clone(),
+                learning_events: learning_events,
                 has_early_warning_indicators: has_indicators,
             });
 
@@ -1733,7 +1822,7 @@ impl ScenariosServer {
                     "interpretation": c.interpretation,
                 })),
                 "methodology": {
-                    "ontology_anchor": "dublin-core",
+                    "ontology": dc_bibo::DATASET,
                     "framework": "Chermack's Performance-Based Scenario System (2011)",
                     "five_phases": [
                         "Phase 1: Project Preparation — scope, stakeholders, resources (Chermack, Ch. 5)",
@@ -1747,12 +1836,7 @@ impl ScenariosServer {
                 }
             });
 
-            self.record_experience(
-                "scenario_assess",
-                &format!("project={}, score={:.2}", req.project_id, assessment.overall_score),
-                "success",
-                output.clone(),
-            );
+            self.record_experience("scenario_assess");
             Ok(output)
         })
         .await
@@ -1762,6 +1846,62 @@ impl ScenariosServer {
 
 #[rmcp::tool_handler(router = Self::combined_router())]
 impl rmcp::ServerHandler for ScenariosServer {}
+
+#[cfg(test)]
+mod tool_surface_tests {
+    use super::*;
+
+    // Pins the registered tool-surface count end-to-end. Catches silent
+    // registration drops — a `#[tool]` impl block without `#[tool_router]`, or
+    // a sub-router missing from `combined_router()`, silently registers nothing
+    // (`cargo check` passes on an unwired orphan). Mirrors the swarm pin.
+    #[test]
+    fn tool_surface_is_exactly_21_registered_tools() {
+        let n = ScenariosServer::combined_router().list_all().len();
+        assert_eq!(n, 21, "scenarios registered tool surface changed; got {n}");
+    }
+
+    // Coverage: every registered tool must have a non-None ontology anchor.
+    // Catches the silent-drop failure mode where a new tool is added to the
+    // router without a corresponding arm in ontology_anchor. The count pin
+    // above catches addition; this test catches anchoring.
+    #[test]
+    fn ontology_anchor_covers_all_registered_tools() {
+        let router = ScenariosServer::combined_router();
+        for tool in router.list_all() {
+            assert!(
+                ScenariosServer::ontology_anchor(&tool.name).is_some(),
+                "ontology_anchor returned None for registered tool '{}'; \
+                 add an explicit arm or adjust the fallback",
+                tool.name
+            );
+        }
+    }
+
+    // Regression: the ontology anchor must not collapse to a single constant.
+    // Pipeline-process tools (frame/brainstorm/build) anchor on PKO; computed
+    // outputs (quantify/score) anchor on Dublin Core.
+    #[test]
+    fn ontology_anchor_distinguishes_process_from_data() {
+        use hkask_bridge_ontology::{dc_bibo, pko};
+        let frame = ScenariosServer::ontology_anchor("scenario_frame");
+        let quantify = ScenariosServer::ontology_anchor("scenario_quantify");
+        assert_ne!(
+            frame, quantify,
+            "scenario_frame (PKO) and scenario_quantify (DC) must anchor on distinct ontologies"
+        );
+        assert_eq!(
+            frame,
+            Some(pko::PROCEDURE),
+            "scenario_frame must anchor on PKO Procedure"
+        );
+        assert_eq!(
+            quantify,
+            Some(dc_bibo::DATASET),
+            "scenario_quantify must anchor on Dublin Core Dataset"
+        );
+    }
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1792,23 +1932,191 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
     hkask_mcp_server::run_server(
         "hkask-mcp-scenarios",
         SERVER_VERSION,
-        |_ctx| {
+        |ctx| {
+            // D28 — Standardized Artifact Storage. Default data dir is
+            // `{kask_data_dir}/mcp/scenarios/`. Override via
+            // `HKASK_SCENARIOS_DATA`.
+            let scenarios_data_dir = std::env::var("HKASK_SCENARIOS_DATA")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| {
+                    hkask_types::agent_paths::resolve_under_data_dir(std::path::Path::new(
+                        hkask_types::agent_paths::MCP_DIR,
+                    ))
+                    .join("scenarios")
+                });
             Ok(ScenariosServer::new(
-                hkask_types::WebID::new(),
+                ctx.webid,
                 std::sync::Arc::new(std::sync::Mutex::new(superforecast::ForecastStore::new(
-                    std::env::var("HKASK_SCENARIOS_DATA")
-                        .ok()
-                        .map(std::path::PathBuf::from),
+                    Some(scenarios_data_dir),
                 ))),
-                reqwest::Client::new(),
                 std::sync::Mutex::new(None),
                 std::sync::Mutex::new(HashSet::new()),
             ))
         },
-        vec![CredentialRequirement::optional(
-            "HKASK_SCENARIOS_DATA",
-            "Path to the scenarios data directory (in-memory if absent)",
-        )],
+        vec![],
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    fn empty_server() -> ScenariosServer {
+        ScenariosServer::new(
+            hkask_types::WebID::default(),
+            Arc::new(Mutex::new(superforecast::ForecastStore::new(None))),
+            Mutex::new(None),
+            Mutex::new(HashSet::new()),
+        )
+    }
+
+    #[tokio::test]
+    async fn scenario_status_emits_dispatchable_provenance() {
+        let server = empty_server();
+        let response = server.scenario_status(Parameters(StatusRequest {})).await;
+
+        // Unwrap the {"content": <value>} envelope via the shared seam
+        // (see the repo .rules "MCP tool responses are content envelopes" trap).
+        let content = hkask_types::tool_response::parse_tool_response(&response)
+            .expect("scenario_status returns a content envelope");
+        let provenance = content
+            .get("provenance")
+            .expect("scenario_status emits a provenance block");
+        let tool = provenance
+            .get("tool")
+            .and_then(|t| t.as_str())
+            .expect("provenance.tool is a non-empty string");
+        assert!(!tool.is_empty(), "provenance.tool must be non-empty");
+        assert_eq!(tool, "scenario_status");
+        assert_eq!(
+            provenance.get("server").and_then(|s| s.as_str()),
+            Some("hkask-mcp-scenarios")
+        );
+        // args is the (empty) StatusRequest; span_id is null (not surfaced).
+        assert!(provenance.get("args").is_some(), "provenance.args present");
+        assert!(
+            provenance.get("span_id").is_some(),
+            "provenance.span_id present"
+        );
+    }
+
+    #[tokio::test]
+    async fn scenario_full_refuses_empty_events_without_panicking() {
+        // Two perspectives reach the synthesis step, which anchors on the first
+        // event id. An empty events array previously indexed `events[0]` and
+        // panicked the tool future; it must now be refused as invalid input.
+        let server = empty_server();
+        let response = server
+            .scenario_full(Parameters(FullPipelineRequest {
+                subject: "test".to_string(),
+                events: vec![],
+                perspectives: Some(vec![
+                    Perspective {
+                        source: "a".to_string(),
+                        probability: 0.5,
+                        fermi_sub_questions: vec![],
+                        base_rate: None,
+                        reference_class: None,
+                        rationale: None,
+                        historical_brier: None,
+                    },
+                    Perspective {
+                        source: "b".to_string(),
+                        probability: 0.6,
+                        fermi_sub_questions: vec![],
+                        base_rate: None,
+                        reference_class: None,
+                        rationale: None,
+                        historical_brier: None,
+                    },
+                ]),
+                perspective_count: None,
+                strategies_generated: None,
+                strategies_implemented: None,
+                learning_events: None,
+                has_early_warning_indicators: None,
+            }))
+            .await;
+
+        assert!(
+            response.contains("at least one scenario event"),
+            "empty events must be refused with a clear message, got: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scenario_score_populates_category_for_per_domain_calibration() {
+        // B1: `scenario_score` previously wrote `category: None` on every
+        // `StoredForecastRecord`, so `resolved_by_category` always returned
+        // empty and `domain_bias_delta` was permanently 0.0 — the entire
+        // per-domain calibration subsystem (~90 LOC in superforecast.rs) was
+        // unreachable. This test pins that the stored record carries the
+        // event's `scenario_type` as its category and that ≥5 same-category
+        // resolutions produce a non-zero δ.
+        let server = empty_server();
+
+        // 6 underconfident forecasts: p=0.3, all occurred (outcome=true).
+        // bias = expected − hit_rate = 0.3 − 1.0 = −0.7 (underconfident) → δ > 0.
+        let events: Vec<ScenarioEvent> = (0..6)
+            .map(|i| ScenarioEvent {
+                id: format!("evt-{i}"),
+                name: format!("Event {i}"),
+                question: format!("Will {i} occur?"),
+                deadline: chrono::NaiveDate::from_ymd_opt(2026, 12, 31).unwrap(),
+                time_horizon: types::TimeHorizon::Strategic,
+                scenario_type: types::ScenarioType::CompanyAnalysis,
+                subject: "TEST".to_string(),
+                probability: 0.3,
+                basis: None,
+                depends_on: vec![],
+                sub_questions: vec![],
+                base_rate: None,
+                reference_class: None,
+                brier_score: None,
+                update_count: 0,
+            })
+            .collect();
+        let outcomes: Vec<OutcomeEntry> = (0..6)
+            .map(|i| OutcomeEntry {
+                event_id: format!("evt-{i}"),
+                occurred: true,
+            })
+            .collect();
+
+        let _response = server
+            .scenario_score(Parameters(ScoreRequest {
+                forecast_id: "fcst-1".to_string(),
+                events,
+                outcomes,
+            }))
+            .await;
+
+        let store = server
+            .forecast_store
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Every stored record must carry the scenario_type as its category.
+        assert!(
+            store
+                .records
+                .values()
+                .all(|r| r.category.as_deref() == Some("company_analysis")),
+            "scenario_score must populate category from scenario_type; got: {:?}",
+            store
+                .records
+                .values()
+                .map(|r| &r.category)
+                .collect::<Vec<_>>()
+        );
+        // ≥5 same-category resolved forecasts must yield a non-zero δ.
+        let delta = superforecast::domain_bias_delta(Some(&store), "company_analysis");
+        assert!(
+            delta > 0.0,
+            "underconfident domain with 6 resolved forecasts must get δ > 0, got {delta}"
+        );
+    }
 }

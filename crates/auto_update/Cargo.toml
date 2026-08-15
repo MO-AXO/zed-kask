@@ -19,6 +19,7 @@ db.workspace = true
 futures-lite.workspace = true
 gpui.workspace = true
 http_client.workspace = true
+
 log.workspace = true
 paths.workspace = true
 release_channel.workspace = true
@@ -37,7 +38,9 @@ which.workspace = true
 [dev-dependencies]
 ctor.workspace = true
 clock= { workspace = true, "features" = ["test-support"] }
+db = { workspace = true, features = ["test-support"] }
 futures.workspace = true
 gpui = { workspace = true, "features" = ["test-support"] }
 parking_lot.workspace = true
+settings = { workspace = true, features = ["test-support"] }
 zlog.workspace = true

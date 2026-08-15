@@ -1,12 +1,6 @@
 {# goal: Apply PICO framework to structure the research question into Population, Intervention, Comparison, and Outcome elements. #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- structure
-- specify
-- select
-- elicit
-- extract
 contract:
   input:
     research_question: string
@@ -20,7 +14,6 @@ contract:
     outcome: object
     structured_question: string
     pico_completeness: object
-energy_cap: 6144
 visibility: Public
 ---
 {# Template: hypothesis-framer/pico-structure.j2 #}

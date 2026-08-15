@@ -7,14 +7,14 @@ description = "Unified corpus MCP server — gather, process, and output: docume
 
 [dependencies]
 # Shared infrastructure
-hkask-mcp-server = { path = "../../crates/hkask-mcp-server" }
-hkask-types = { path = "../../crates/hkask-types" }
+hkask-mcp-server.workspace = true
+hkask-types.workspace = true
 
 # Ontology bridges — vocabulary constants for metadata, provenance, and domain predicates
-hkask-bridge-dublincore = { path = "../../crates/hkask-bridge-dublincore" }
+hkask-bridge-ontology.workspace = true
 
 # OCR pipeline (from markitdown)
-hkask-inference = { path = "../../crates/hkask-inference" }
+hkask-inference.workspace = true
 
 
 image.workspace = true
@@ -24,27 +24,24 @@ reqwest.workspace = true
 
 # Office format backends (S2: backend/pipeline separation)
 # docx-rs: DOCX reader (paragraphs, tables, lists, headings)
-docx-rs = "0.4"
+docx-rs.workspace = true
 # calamine: XLSX/XLS/ODS reader (pure Rust, MIT)
-calamine = "0.36"
+calamine.workspace = true
 # pptx-to-md: PPTX/ODP reader (extracts slide text to markdown)
-pptx-to-md = "0.1"
+pptx-to-md.workspace = true
 
 # Knowledge pipeline (from doc-knowledge)
-hkask-memory = { path = "../../crates/hkask-memory" }
-hkask-storage = { path = "../../crates/hkask-storage" }
-hkask-guard = { path = "../../crates/hkask-guard" }
+hkask-memory.workspace = true
+hkask-storage.workspace = true
 
-# Persona/style services (from replica)
-hkask-services-compose = { path = "../../crates/hkask-services-compose" }
-hkask-services-corpus = { path = "../../crates/hkask-services-corpus" }
-hkask-services-inference = { path = "../../crates/hkask-services-inference" }
-hkask-keystore = { path = "../../crates/hkask-keystore" }
+# Persona/style services (folded in from hkask-services-{compose,corpus,inference,runtime})
+hkask-keystore.workspace = true
+hkask-ledger.workspace = true
 
 # Protocol + utilities
 
 rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
@@ -53,16 +50,20 @@ tracing.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 
-dotenvy.workspace = true
 tempfile.workspace = true
-dirs = "6"
 regex.workspace = true
 minijinja.workspace = true
 
 serde_yaml_neo.workspace = true
 
+# Folded-service dependencies
+uuid.workspace = true
+chrono.workspace = true
+pdf-extract.workspace = true
+anyhow.workspace = true
+
 # Service layer (shared settings, models, paths)
-hkask-services-core = { path = "../../crates/hkask-services-core" }
+hkask-services-core.workspace = true
 
 [lib]
 name = "hkask_mcp_corpus"
@@ -72,9 +73,14 @@ path = "src/hkask_mcp_corpus.rs"
 name = "hkask-mcp-corpus"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dev-dependencies]
 rand.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
-hkask-services-compose = { path = "../../crates/hkask-services-compose" }
-proptest = { git = "https://github.com/proptest-rs/proptest", rev = "3dca198a8fef1b32e3a66f1e1897c955b4dc5b5b", features = ["attr-macro"] }
+proptest.workspace = true
 tempfile.workspace = true
+hkask-test-harness.workspace = true
+serde_json.workspace = true
+dotenvy.workspace = true

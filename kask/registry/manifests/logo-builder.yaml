@@ -1,5 +1,5 @@
 # Logo Builder — Improvement Kata Process Manifest
-# hKask v0.31.0
+# hKask v0.34.0
 # Convergent PDCA loop: Martin discovery → Bokhua formal generation → Peters iterative refinement
 # Converges when logo passes all five Bokhua gates (critique scores ≥ 7/10 per dimension).
 
@@ -14,20 +14,21 @@ manifest:
     until critique scores converge. Produces background-removed transparent
     PNG deliverables.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  threshold: 0.30
-  improvement_gate: threshold_only
-  max_iterations: 5
-  min_iterations: 1
-  convergence_field: step_4_result.normalized_critique_score
+  convergence_mode: ""
+  # No convergence-check compute step: the loop runs N iterations then escalates.
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
+  # target_artifacts_field removed — no compute step to consume it
 
 gas:
-  cap: 150000
+  cap: 250000
   cost_per_iteration: 500
   alert_threshold: 0.8
   hard_limit: true
@@ -40,7 +41,7 @@ rjoule:
 inputs:
   - name: name
     type: string
-    required: true
+    required: false
     description: "Business or brand name"
   - name: industry
     type: string
@@ -62,6 +63,9 @@ inputs:
     type: string
     required: false
     description: "User style preference (if any) — overrides discovery"
+
+ledger:
+  span_namespace: reg.skill.logo-builder
 
 steps:
   # ── Step 1: Understand the Direction ──

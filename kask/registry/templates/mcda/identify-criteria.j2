@@ -1,14 +1,6 @@
 {# goal: Identify and classify decision criteria as benefit or cost dimensions. Validates criteria independence and produces a structured criterion set. #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- identify
-- criteria
-- classify
-- benefit
-- cost
-- independent
-- dimension
 contract:
   input:
     decision_question: string
@@ -18,7 +10,6 @@ contract:
     criteria: array
     criteria_independence_check: object
     criteria_count: integer
-energy_cap: 4096
 visibility: Public
 ---
 {# Template: mcda/identify-criteria.j2 #}

@@ -1,5 +1,5 @@
 # Adversarial Red-Team Process Manifest
-# ℏKask v0.31.0 — Adversarial testing as convergent PDCA
+# ℏKask v0.34.0 — Adversarial testing as convergent PDCA
 
 manifest:
   id: adversarial-red-team
@@ -16,17 +16,19 @@ manifest:
     the same cycle. To test emergent categories, restart the cycle with
     updated adversarial_categories input.
   functional_role: flowdef
-  version: "0.31.0"
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  threshold: 0.05
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: step_4_result.convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
+  target_artifacts_field: "current_artifacts"
 
 gas:
   cap: 100000
@@ -42,7 +44,7 @@ rjoule:
 inputs:
   - name: target_output
     type: string
-    required: true
+    required: false
   - name: target_domain
     type: string
     required: false
@@ -80,7 +82,10 @@ inputs:
     description: >
       hKask defense-in-depth layer catalog. When provided, attacks are designed
       to bypass specific layers. When absent, the select-target template uses
-      the standard 8-layer stack.
+      the standard 7-layer stack.
+
+ledger:
+  span_namespace: reg.skill.adversarial-red-team
 
 steps:
   - ordinal: 1
@@ -89,9 +94,9 @@ steps:
     renderer: minijinja
     template_ref: adversarial-red-team/select-target
     gas_cap: 3000
-    timeout_seconds: 30
+    timeout_seconds: 120
     input_mapping:
-      target_output: "{{ target_output }}"
+      target_output: "{{ task | default(target_output) }}"
       target_domain: "{{ target_domain | default('general') }}"
       adversarial_categories: "{{ adversarial_categories | default(['prompt_injection', 'goal_hijacking', 'context_manipulation', 'authority_override', 'information_extraction', 'tool_misuse', 'data_exfiltration']) }}"
       intensity: "{{ intensity | default('moderate') }}"
@@ -103,7 +108,7 @@ steps:
     renderer: minijinja
     template_ref: adversarial-red-team/generate-adversarial
     gas_cap: 7000
-    timeout_seconds: 90
+    timeout_seconds: 180
     input_mapping:
       target_output: "{{ step_1_result.selected_target | default(target_output) }}"
       domain: "{{ step_1_result.domain | default(target_domain | default('general')) }}"
@@ -121,7 +126,7 @@ steps:
     renderer: minijinja
     template_ref: adversarial-red-team/test-against-target
     gas_cap: 7000
-    timeout_seconds: 90
+    timeout_seconds: 180
     input_mapping:
       target_output: "{{ step_1_result.selected_target | default(target_output) }}"
       domain: "{{ step_1_result.domain | default(target_domain | default('general')) }}"
@@ -130,20 +135,28 @@ steps:
       defense_bypass_targets: "{{ step_1_result.defense_bypass_targets | default([]) }}"
 
   - ordinal: 4
-    action: select
-    description: Compute normalized convergence metric for adversarial cycle.
-    renderer: minijinja
-    template_ref: adversarial-red-team/adversarial-convergence-check
-    gas_cap: 2000
-    timeout_seconds: 30
+    action: compute
+    compute_ref: lisp.eval
+    description: >
+      Compute structural-validity score from step 3's actual output. The
+      convergence signal is the gap between observed resistance_rate and full
+      resistance (1.0): score = 1.0 - resistance_rate. Lower = more converged.
+      If resistance_rate is absent, the form errors (no silent default).
+    gas_cap: 100
+    timeout_seconds: 10
     input_mapping:
-      test_result: "{{ step_3_result }}"
+      form: "(- 1.0 (assoc \"resistance_rate\" step_3_result))"
+      env:
+        step_3_result: "{{ step_3_result }}"
+      max_steps: 10000
+      max_depth: 32
 
   - ordinal: 5
     action: loop
     description: Re-enter adversarial cycle if convergence is not met.
     input_mapping:
       loop_target: "{{ 2 }}"
+      convergence_signal: "{{ step_4_result }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -151,30 +164,3 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: adversarial-red-team/select-target
-      gas_budget: 3000
-    - resource: template
-      action: render
-      template_id: adversarial-red-team/generate-adversarial
-      gas_budget: 7000
-    - resource: template
-      action: render
-      template_id: adversarial-red-team/test-against-target
-      gas_budget: 7000
-    - resource: template
-      action: render
-      template_id: adversarial-red-team/adversarial-convergence-check
-      gas_budget: 2000
-    - resource: manifest
-      action: execute
-      template_id: adversarial-red-team
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true

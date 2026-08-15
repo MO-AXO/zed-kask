@@ -1,15 +1,6 @@
 {# goal: Independent quality gate that evaluates scenario divergence, consistency, and coverage. Separated from the narrative generator to prevent self-assessment bias. Receives scenarios[] from step 4 output and produces calibrated scores. #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- evaluate
-- verify
-- gate
-- divergence
-- consistency
-- coverage
-- quality
-- calibrate
 contract:
   input:
     scenarios: array
@@ -21,7 +12,6 @@ contract:
     consistency_score: number
     coverage_score: number
     parametric_variation_flag: boolean
-energy_cap: 3072
 visibility: Public
 ---
 {# Template: scenario-builder/scenario-quality-gate.j2 #}

@@ -1,5 +1,5 @@
 # Wardley Mapper — Generalized strategic mapping skill
-# ℏKask v0.31.0 — Strategy: component evolution mapping for any system
+# ℏKask v0.34.0 — Strategy: component evolution mapping for any system
 # Functional Role: FlowDef (process orchestration)
 # Steps: inventory_components, classify_evolution, map_value_chain, identify_movement, synthesize_recommendations, convergence_check
 
@@ -20,17 +20,19 @@ manifest:
     platforms. This skill builds the map that prevents strategic blindness.
 
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  threshold: 0.15
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: step_5_result.convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
+  target_artifacts_field: "current_artifacts"
 
 gas:
   cap: 75000
@@ -46,7 +48,7 @@ rjoule:
 inputs:
   - name: target_system
     type: string
-    required: true
+    required: false
     description: Description of the system to map (software platform, business capability, technology stack, etc.).
   - name: component_inventory
     type: string
@@ -56,6 +58,9 @@ inputs:
     type: string
     required: false
     description: Previous Wardley Map for movement/drift detection.
+
+ledger:
+  span_namespace: reg.skill.wardley-mapper
 
 steps:
   - ordinal: 1
@@ -69,7 +74,7 @@ steps:
     gas_cap: 5000
     timeout_seconds: 60
     input_mapping:
-      target_system: "{{ target_system }}"
+      target_system: "{{ task | default(target_system) }}"
       component_inventory: "{{ component_inventory | default('') }}"
 
   - ordinal: 2
@@ -127,24 +132,70 @@ steps:
       current_map: "{{ step_3_result }}"
 
   - ordinal: 6
-    action: select
+    action: compute
+    compute_ref: lisp.eval
     description: >
-      Compute convergence metric. Checks all components classified,
-      map generated, movement identified, recommendations actionable.
-    renderer: minijinja
-    template_ref: wardley-mapper/convergence-check
-    gas_cap: 2000
-    timeout_seconds: 30
+      COMPUTE RECOMMENDATION CONFIDENCE GAP: Deterministic Lisp
+      computation that turns the synthesize-recommendations output into
+      a scalar convergence signal. Lower = more converged (fewer
+      low-confidence recommendations). The score is the fraction of
+      recommendations with confidence < 0.5; an empty recommendation set
+      scores 1.0 (no recommendations = not converged). No
+      `default(1.0)` fallback: missing fields surface as nil and are
+      guarded explicitly.
+    gas_cap: 100
+    timeout_seconds: 10
     input_mapping:
-      recommendations: "{{ step_5_result }}"
+      form: >
+        (let ((recs (assoc "recommendations" step_5_result)))
+          (if (is_null recs)
+              1.0
+              (let ((n (length recs)))
+                (if (= n 0)
+                    1.0
+                    (begin
+                      (define count-low
+                        (lambda (rs acc)
+                          (if (is_null rs)
+                              acc
+                              (let ((conf (assoc "confidence" (car rs))))
+                                (count-low
+                                  (cdr rs)
+                                  (if (numberp conf)
+                                      (if (< conf 0.5) (+ acc 1) acc)
+                                      (+ acc 1)))))))
+                      (let ((low (count-low recs 0)))
+                        (/ low n)))))))
+      env:
+        step_5_result: "{{ step_5_result }}"
 
   - ordinal: 7
+    action: render
+    description: >
+      SURFACE the Wardley Map quadrant chart and recommendations as a markdown
+      string containing a fenced ```mermaid block. This is the cascade's final
+      user-facing output — without this step, map_diagram stays buried inside
+      step_3_result and extract_final_step_result picks a later step (compute/loop)
+      that has no diagram. The render action is deterministic (no LLM call).
+    renderer: minijinja
+    template_ref: wardley-mapper/present-map
+    gas_cap: 100
+    timeout_seconds: 10
+    input_mapping:
+      map_diagram: "{{ step_3_result.map_diagram }}"
+      recommendations: "{{ step_5_result.recommendations }}"
+      rationale: "{{ step_5_result.rationale }}"
+
+  - ordinal: 8
     action: loop
     gas_cap: 200
     timeout_seconds: 10
     description: Re-enter cycle if convergence not met.
     input_mapping:
       loop_target: "{{ 1 }}"
+      # Push the confidence gap from the lisp.eval step (ordinal 6) into
+      # convergence_signal. No default(1.0): a Lisp failure must surface.
+      convergence_signal: "{{ step_6_result }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -152,38 +203,3 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 2
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: wardley-mapper/inventory-components
-      gas_budget: 5000
-    - resource: template
-      action: render
-      template_id: wardley-mapper/classify-evolution
-      gas_budget: 5000
-    - resource: template
-      action: render
-      template_id: wardley-mapper/map-value-chain
-      gas_budget: 5000
-    - resource: template
-      action: render
-      template_id: wardley-mapper/identify-movement
-      gas_budget: 5000
-    - resource: template
-      action: render
-      template_id: wardley-mapper/synthesize-recommendations
-      gas_budget: 5000
-    - resource: template
-      action: render
-      template_id: wardley-mapper/convergence-check
-      gas_budget: 2000
-    - resource: manifest
-      action: execute
-      template_id: wardley-mapper
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true

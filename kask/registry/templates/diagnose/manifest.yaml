@@ -11,20 +11,23 @@ crate:
 
 templates:
   - id: diagnose/diagnose-spec-anchor
-    name: "Anchor a bug diagnosis to functional requirements: classify by MDS…"
+    name: "Anchor a bug diagnosis to the code graph via Dublin Core + PKO ontology"
     path: diagnose-spec-anchor.j2
     type: KnowAct
-    lexicon_terms: [anchor, classify, map, verify, specify]
     description: >
-      Anchor a bug diagnosis to functional requirements: classify by MDS
-      category, map symptom to FR# references, flag spec gaps. Phase 0 of
-      the diagnosis pipeline. Every diagnosis traces to a spec or notes the gap.
+      Anchor a bug diagnosis to the actual code structure using a dual
+      ontology: Dublin Core classifies the THING affected (entity type,
+      identifier, source, subject domain derived from graph position) and
+      PKO classifies the FLOW the bug occurs in (call chain as Procedure,
+      each function as Step, bug as IssueOccurrence at a StepExecution).
+      Uses codegraph_query/traverse/impact MCP tools. Phase 0 of the
+      diagnosis pipeline. Replaces spec-anchoring — the bug is grounded in
+      the real code graph, not a specification document.
 
   - id: diagnose/diagnose-loop
     name: "Build a feedback loop for the bug"
     path: diagnose-loop.j2
     type: KnowAct
-    lexicon_terms: [detect, reproduce, observe, discriminate, orient]
     description: >
       Build a feedback loop for the bug. Evaluate repro strategies, select the
       fastest deterministic signal, and confirm the bug reproduces before hypothesising.
@@ -33,7 +36,6 @@ templates:
     name: "Instrument the code with targeted probes mapped to specific hypotheses"
     path: diagnose-instrument.j2
     type: KnowAct
-    lexicon_terms: [probe, instrument, constrain, isolate, verify]
     description: >
       Instrument the code with targeted probes mapped to specific hypotheses.
       Change one variable at a time. Use tagged diagnostic logs or breakpoints.
@@ -42,17 +44,7 @@ templates:
     name: "Apply fix with regression test (before the fix)"
     path: diagnose-fix.j2
     type: KnowAct
-    lexicon_terms: [fix, verify, audit, document, calibrate]
     description: >
       Apply fix with regression test (before the fix). Verify original repro
       no longer reproduces. Clean up instrumentation. Write post-mortem.
 
-  - id: diagnose/diagnose-convergence-check
-    name: "Compute normalized convergence metric for diagnosis cycles"
-    path: diagnose-convergence-check.j2
-    type: KnowAct
-    lexicon_terms: [evaluate, converge, classify, verify, calibrate]
-    description: >
-      Compute normalized convergence metric for diagnosis cycles.
-      Outputs `convergence_metric` in [0,1], where 0 means root cause and fix
-      confidence are sufficient for exit.

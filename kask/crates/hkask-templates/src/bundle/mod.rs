@@ -2,7 +2,7 @@
 //!
 //! Re-export facade. Submodules organized by concern:
 //! - `manifest`: BundleManifest, BundleManifestStep, BundleSkill, SkillPolarity, ValidationResult
-//! - `config`: ConvergenceConfig, BundleGasConfig, ErrorHandlingConfig, OcapConfig, BundleLedgerConfig, BundleAuditConfig
+//! - `config`: ConvergenceConfig, BundleGasConfig, ErrorHandlingConfig, BundleLedgerConfig, BundleAuditConfig
 //! - `composition`: BundleComplementarity, BundleConflict, ConflictType, ConflictResolution, ComplementarityType
 //! - `cascade`: CascadePhase
 
@@ -13,7 +13,9 @@ pub mod manifest;
 
 pub use composition::*;
 pub use config::*;
-pub use manifest::{BundleManifest, BundleManifestStep, BundleSkill};
+pub use manifest::{
+    BundleManifest, BundleManifestStep, BundleSkill, MAX_CONCURRENCY, OnFailureConfig,
+};
 // cascade types are pub(crate) — not re-exported
 
 /// CRUD for bundle manifests. Read methods return owned values for HashMap/SQLite compat.

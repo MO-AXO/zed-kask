@@ -1,6 +1,7 @@
 ---
 name: skill-maintenance
-description: Skill lifecycle management and maintenance. Registry crate (manifest.yaml + *.j2) is the canonical source of truth; SKILL.md is a generated companion. Audit staleness, coverage gaps, and quality. List, build, validate, install, translate, and prune skills. Pairs with skill-discovery and skill-bundler.
+core: true
+description: "Skill lifecycle management. Registry crate (manifest.yaml + *.j2) is the canonical source of truth; SKILL.md is a generated companion. Audit staleness, coverage gaps, and quality. List, build, validate, install, translate, and prune skills."
 ---
 
 # Skill Maintenance
@@ -22,29 +23,31 @@ Skill lifecycle management and maintenance. Registry crate (manifest.yaml + *.j2
 
 ### skill-maintenance-validate
 
-1. Validate the specified skill or all skills in the registry directory against R1-R12 registry checks, Z1-Z8 companion checks, X1-X4 cross-artifact checks, and E1-E10 executor compliance checks.
-2. Evaluate every check for every targeted skill without omissions, including invariant X5: every `.agents/skills/<name>/` must have a matching `registry/manifests/<name>.yaml`, and vice versa. Report exact mismatches by name.
-3. For executor compliance (E1-E10), verify that every process manifest uses only canonical actions, has gas/rjoule blocks with adequate caps, has a convergence block (for skill category), has valid category, and has resolvable template_refs.
-4. Include specific evidence for any fail results.
-5. Provide actionable fix suggestions for any failures, including mapping non-canonical actions to their canonical equivalents.
-6. Respond with a JSON object containing validation results, pass/fail counts (including executor_compliance), and fix suggestions.
+1. Validate the specified skill or all skills in the registry directory against R1-R12 registry checks, Z1-Z8 companion checks, X1-X4 cross-artifact checks, and E1-E11 executor compliance checks.
+2. Evaluate every check for every targeted skill without omissions, including invariant X4: every `.agents/skills/<name>/` must have a matching `registry/manifests/<name>.yaml`, and vice versa. Report exact mismatches by name.
+3. For executor compliance (E1-E11), verify that every process manifest uses only canonical actions, has gas/rjoule blocks with adequate caps, has a convergence block (for skill category), has valid category, has resolvable template_refs, and has a `ledger.span_namespace` equal to `reg.skill.<manifest.id>` with no abolished `spans:` list (E11).
+4. **Visual artifact surfacing check (E12):** For any skill whose template contracts or SKILL.md description mention a visual artifact (Mermaid diagram, chart, map, sankey, quadrant chart, or any renderable output), verify the process manifest has a `render` step (action: render) whose ordinal is the highest among steps that produce a `step_N_result` (the `loop` action does not produce one). The render step must surface the artifact as a fenced ```mermaid block in its output. Flag skills where the artifact is generated in an intermediate `select` step but not surfaced by a final `render` step — the diagram will be buried in an intermediate `step_N_result` and never reach the chat stream. See the "Visual artifact surfacing" section in create-skill for the full pattern.
+5. Include specific evidence for any fail results.
+6. Provide actionable fix suggestions for any failures, including mapping non-canonical actions to their canonical equivalents.
+7. Respond with a JSON object containing validation results, pass/fail counts (including executor_compliance), and fix suggestions.
 
 ### skill-maintenance-build
 
 1. Generate a complete registry crate (manifest.yaml and .j2 templates) from the user's natural language description.
 2. Ensure the skill name is lowercase, hyphenated, 2-40 characters, verb-noun or noun-noun, and lacks reserved prefixes.
 3. Create at least one .j2 template with valid [inference] frontmatter and a Jinja2 body containing a system prompt and JSON output schema.
-4. Generate a process manifest (registry/manifests/<name>.yaml) with: `category: skill`, `convergence:` block (threshold 0.05-0.30, max_iterations, min_iterations, convergence_field, on_not_reached), `gas:` block (cap proportional to step count), `rjoule:` block (cap > 0 if inference is used), and `steps:` array using only canonical actions.
-5. Derive a SKILL.md companion from the completed registry crate.
-6. Respond with a JSON object containing the manifest, process manifest, template bodies, SKILL.md outline, and validation status (including actions_canonical, gas_block_present, rjoule_block_present, convergence_block_present).
+4. Generate a process manifest (registry/manifests/<name>.yaml) with: `category: skill`, `convergence:` block (convergence_mode, cauchy_epsilon, cauchy_window, max_iterations, min_iterations, on_not_reached), `gas:` block (cap proportional to step count), `rjoule:` block (cap > 0 if inference is used), `steps:` array using only canonical actions, and a `ledger:` block with `span_namespace: reg.skill.<name>` (CI-enforced; no `spans:` list).
+5. **Visual artifact surfacing:** if any template produces a Mermaid diagram, chart, or visual artifact (detectable from the template's contract output fields or the skill description mentioning "diagram", "chart", "visual", or "renders natively in Zed"), add a final `render` step (action: render, renderer: minijinja) with a pure Jinja2 template (no frontmatter) that wraps the artifact in a fenced ```mermaid block. The render step's ordinal must be the highest among steps that produce a `step_N_result` (place it before the `loop` step). See the "Visual artifact surfacing" section in create-skill for the full pattern.
+6. Derive a SKILL.md companion from the completed registry crate.
+7. Respond with a JSON object containing the manifest, process manifest, template bodies, SKILL.md outline, and validation status (including actions_canonical, gas_block_present, rjoule_block_present, convergence_block_present).
 
 ### skill-maintenance-translate
 
 1. Convert the classified source skill into a hKask registry crate (manifest.yaml + .j2 templates) plus a process manifest (registry/manifests/<name>.yaml).
-2. Produce one .j2 file per classified step, mapping cognitive steps to KnowAct, workflow steps to WordAct or FlowDef, reference content to RenderAct, and guardrails to visibility, energy_cap, and constraints.
+2. Produce one .j2 file per classified step, mapping cognitive steps to KnowAct, workflow steps to WordAct or FlowDef, reference content to RenderActand guardrails to visibility and constraints.
 3. Map source actions to canonical hKask actions using the action mapping table (e.g., `call` → `execute`, `classify` → `select`, `run_command` → `execute`, `check` → `validate`).
 4. Generate gas/rjoule budgets based on the translated step count and inference usage (simple: gas 5K-10K/rjoule 1-2; multi-step: gas 50K-150K/rjoule 3-5; media: gas 100K+/rjoule 5+).
-5. Generate a convergence block with threshold appropriate to the skill type (0.05-0.15 for precise, 0.20-0.30 for broad).
+5. Generate a convergence block with `convergence_mode: "cauchy"`, `cauchy_epsilon: 0.03`, `cauchy_window: 3`, `max_iterations: 10`, `min_iterations: 2`.
 6. Map source state to .j2 contract input/output, user-confirmation gates to visibility, and domain references using the domain substitution table.
 7. Mark any references with no hKask equivalent as `[unresolved: no hKask equivalent for <source_ref>]`.
 8. Respond with a JSON object containing the manifest, process manifest, templates, derived SKILL.md, and a translation summary detailing preserved, adapted, dropped, unresolved elements, and action mappings.
@@ -72,7 +75,8 @@ Skill lifecycle management and maintenance. Registry crate (manifest.yaml + *.j2
 2. Apply the staleness signal table (Critical/High/Medium/Low severity) and compute health scores from 0.0 to 1.0 using weighted penalties.
 3. Recommend deprecation or retirement based on health score thresholds (0.00-0.19 retirement, 0.20-0.49 critical, 0.50-0.79 stale warning, 0.80-1.00 active).
 4. Cite every finding from a FlowDef manifest field, .j2 contract/metadata, or grep-verifiable Rust code path — never from SKILL.md alone.
-5. Respond with a JSON object containing staleness report, health scores, coverage gaps, and deprecation recommendations.
+5. **Visual artifact surfacing audit:** for any skill whose templates produce a Mermaid diagram, chart, or visual artifact, check that the process manifest includes a `render` step that surfaces the artifact as the cascade's final output. A skill that generates a diagram in an intermediate `select` step but lacks a surfacing `render` step has a Medium-severity staleness signal: the diagram is silently dropped and the user never sees it. This is the E12 validate check applied as an audit finding.
+6. Respond with a JSON object containing staleness report, health scores, coverage gaps, and deprecation recommendations.
 
 ### skill-maintenance-coverage
 
@@ -82,42 +86,29 @@ Skill lifecycle management and maintenance. Registry crate (manifest.yaml + *.j2
 4. For partial coverage, identify the missing aspects and the extension needed.
 5. Respond with a JSON object containing covered patterns, uncovered patterns, partial coverage, and recommendations.
 
-### skill-maintenance-convergence-check
-
-1. Compute a normalized convergence metric in [0,1] for the maintenance PDCA cycle, where 0 means critical staleness signals are resolved.
-2. Start at 1.0 and adjust downward based on audit and coverage results: critical signals keep metric >= 0.7, medium/low findings set metric in [0.2, 0.6], no critical/high with bounded gaps sets metric <= 0.1.
-3. Identify unresolved critical signals and blockers preventing convergence.
-4. Return a JSON object containing convergence_metric, rationale, blockers, and unresolved_critical_signals.
-
 ## Registry Templates
 
 | Template | Type | Purpose |
 |----------|------|---------|
-| `skill-maintenance-validate.j2` | KnowAct | Validate skills against registry format and quality checks. Check manifest structure, .j2 frontmatter (template_type, contract, visibility, energy_cap). SKILL.md is validated as secondary companion. |
+| `skill-maintenance-validate.j2` | KnowAct | Validate skills against registry format and quality checks. Check manifest structure, .j2 frontmatter (template_type, contract, visibility). SKILL.md is validated as secondary companion. |
 | `skill-maintenance-build.j2` | KnowAct | Scaffold a new registry crate from a user description. Generate manifest.yaml with crate metadata, template entries, and lexicon_terms. Generate companion SKILL.md from the registry crate. Validate and confirm before writing. |
 | `skill-maintenance-translate.j2` | KnowAct | Forward translation: convert a classified source skill into a hKask registry crate (manifest.yaml + *.j2 templates). Map source elements to hKask equivalents, drop concepts with no equivalent, produce validated output with translation summary. |
 | `skill-maintenance-reverse.j2` | KnowAct | Reverse translation: generate a SKILL.md companion from a registry crate. Read manifest.yaml for crate metadata, read .j2 templates for methodology, produce a markdown companion suitable for the Zed coding agent. |
 | `skill-maintenance-prose.j2` | KnowAct | Prose-only derivation: synthesize the "When to Use" and "Instructions" sections of a SKILL.md from a registry crate, emitted as raw markdown. Used by the skill-maintenance skill or agent panel alongside the mechanically-built skeleton (frontmatter, templates table, constraints) — the LLM only writes the prose that needs synthesis, not the structural parts copied from the registry. |
 | `skill-maintenance-audit.j2` | KnowAct | Run staleness and health audit for target scope. Checks R1-R12 registry rules, Z1-Z8 companion checks, X1-X4 cross-artifact checks. Used by the FlowDef manifest as step 1 of the maintenance PDCA loop. |
 | `skill-maintenance-coverage.j2` | KnowAct | Run corpus coverage analysis for uncovered/partial capabilities. Maps common task patterns against the existing skill corpus, identifies what is covered, uncovered, and partial. Used by the FlowDef manifest as step 2 of the maintenance PDCA loop. |
-| `skill-maintenance-convergence-check.j2` | KnowAct | Compute normalized convergence metric for maintenance PDCA cycles. Measures critical signal count, coverage gaps, and regression library growth. Used by the FlowDef manifest as step 3 of the maintenance PDCA loop. |
-| `logic-load-goal.j2` | WordAct | Parse the annotated goal: block from a .j2 or manifest.yaml file. (logic_audit mode, folded from skill-logic-audit) |
-| `logic-critique-template.j2` | KnowAct | Adversarial critique of a template body against its stated goal. For each flaw, provide location, claim, anchor to goal, severity, and suggested fix. (logic_audit mode) |
-| `logic-critique-critique.j2` | KnowAct | Soundness filter — separate valid, goal-anchored concerns from spurious ones. (logic_audit mode) |
-| `logic-compose-proposal.j2` | KnowAct | Compose a concrete revised artifact and unified diff from calibrated concerns. (logic_audit mode) |
-| `logic-user-choice.j2` | KnowAct | Present the proposal to the user and capture accept/reject/counter-proposal. (logic_audit mode) |
-| `logic-convergence-check.j2` | KnowAct | Compute convergence metric for logic audit cycle. Converged when no material flaws remain. (logic_audit mode) |
+
 
 ## Constraints
 
-- `skill-maintenance-validate.j2`: Public. R1-R12 mandatory; Z1-Z8 secondary; X1-X4 cross-artifact; E1-E10 executor compliance mandatory. R1-R5 failures are critical; E1/E2/E4/E5/E6/E7/E9 failures are critical; Z5/Z6/Z7 failures are high; missing SKILL.md (Z1) is info, not failure.
-- `skill-maintenance-build.j2`: Public. Name must be lowercase, hyphenated, 2-40 chars, verb-noun or noun-noun, no reserved prefixes. Process manifest must have gas/rjoule/convergence blocks and canonical actions.
-- `skill-maintenance-translate.j2`: Public. template_type must be KnowAct/WordAct/FlowDef/RenderAct; visibility must be Private/Public/Shared; energy_cap must be 2048-8192. Source actions must be mapped to canonical actions. Process manifest must have gas/rjoule/convergence blocks.
+- `skill-maintenance-validate.j2`: Public. R1-R12 mandatory; Z1-Z8 secondary; X1-X4 cross-artifact; E1-E11 executor compliance mandatory; E12 visual artifact surfacing mandatory. R1-R5 failures are critical; E1/E2/E4/E5/E6/E7/E9/E11 failures are critical; E12 failures are high (diagram silently dropped — user never sees visualization); Z5/Z6/Z7 failures are high; missing SKILL.md (Z1) is info, not failure.
+- `skill-maintenance-build.j2`: Public. Name must be lowercase, hyphenated, 2-40 chars, verb-noun or noun-noun, no reserved prefixes. Process manifest must have gas/rjoule/convergence blocks, canonical actions, and a `ledger:` block with `span_namespace: reg.skill.<manifest.id>` (no abolished `spans:` list).
+- `skill-maintenance-translate.j2`: Public. template_type must be KnowAct/WordAct/FlowDef/RenderAct; visibility must be Private/Public/Shared Source actions must be mapped to canonical actions. Process manifest must have gas/rjoule/convergence blocks.
 - `skill-maintenance-reverse.j2`: Public. Every instruction must trace to a manifest field or .j2 body — do not invent content.
 - `skill-maintenance-prose.j2`: Public. Output raw markdown only — no JSON, code fences, frontmatter, or structural sections.
 - `skill-maintenance-audit.j2`: Public. Every finding must cite a FlowDef manifest field, .j2 contract/metadata, or grep-verifiable Rust code path. Recommendations based solely on SKILL.md must be marked confidence: Hypothesis (Speculative) at maximum.
 - `skill-maintenance-coverage.j2`: Public. Every task pattern must appear in exactly one of: covered, uncovered, or partial. Do not recommend `ignore` for uncovered patterns with critical or high impact.
-- `skill-maintenance-convergence-check.j2`: Public. Metric in [0,1]; threshold 0.15; max 3 iterations.
+- **`lisp.eval` is available for custom deterministic compute steps.** When auditing or building skill manifests, recommend `compute_ref: lisp.eval` for skills that need custom convergence formulas, scoring functions, or data transformations that don't fit the built-in `compute_ref`s. No Rust change needed — the manifest is the unit of authorship. Security: gated to `category: skill` manifests only. The interpreter supports both prefix (`(+ a b)`) and infix (`a + b`) operator notation — recommend infix for simple scoring expressions, prefix for complex nested logic.
 - Registry is authoritative — when this SKILL.md disagrees with registry templates, the registry wins.
 
 ## Canonical Action Set (ManifestExecutor)
@@ -167,17 +158,7 @@ smaller). Sub-manifests should declare their own `gas` and `rjoule` blocks.
 
 ## Convergence Block Requirements
 
-Every `category: skill` manifest must have a `convergence:` block:
-
-```yaml
-convergence:
-  threshold: 0.15           # 0.05-0.30; 0.05-0.15 precise, 0.20-0.30 broad
-  improvement_gate: threshold_only  # threshold_only | both | either
-  max_iterations: 3         # max PDCA iterations before forced exit
-  min_iterations: 1          # min iterations before exit allowed
-  convergence_field: step_N_result.convergence_metric  # context field to read
-  on_not_reached: escalate   # abort | escalate
-```
+Every `category: skill` manifest must have a `convergence:` block. Convergence is detected deterministically via the Cauchy criterion — the iterates have stopped moving. No LLM convergence-check template is used.
 
 Non-skill categories (`qa-script`, `runtime-config`, `daemon-process`,
 `pipeline`) may have convergence blocks but are not required to.

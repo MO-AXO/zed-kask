@@ -16,7 +16,15 @@ use serde::{Deserialize, Serialize};
 pub fn settings_path() -> std::path::PathBuf {
     let mut path = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     path.push("hkask");
-    let _ = std::fs::create_dir_all(&path);
+    if let Err(e) = std::fs::create_dir_all(&path) {
+        tracing::warn!(
+            target: "hkask.services_core",
+            error = %e,
+            path = %path.display(),
+            "Failed to create hkask config directory — \
+             save_settings will fail if the directory doesn't exist."
+        );
+    }
     path.push("settings.json");
     path
 }
@@ -52,7 +60,9 @@ pub struct HkaskSettings {
 }
 
 fn default_embedding_model() -> String {
-    "DeepInfra/Qwen/Qwen3-Embedding-0.6B".to_string()
+    // Single source of truth: hkask_inference::model_constants::DEFAULT_EMBEDDING_MODEL.
+    // Do not duplicate the model id here — resolve via the canonical constant.
+    hkask_inference::model_constants::DEFAULT_EMBEDDING_MODEL.to_string()
 }
 
 fn default_classifier_model() -> String {
@@ -62,7 +72,9 @@ fn default_classifier_model() -> String {
 }
 
 fn default_ocr_model() -> String {
-    "RunPod/kask-ocr".to_string()
+    // Single source of truth: hkask_inference::model_constants::DEFAULT_OCR_MODEL.
+    // Do not duplicate the model id here — resolve via the canonical constant.
+    hkask_inference::model_constants::DEFAULT_OCR_MODEL.to_string()
 }
 
 fn default_chunk_max_tokens() -> usize {

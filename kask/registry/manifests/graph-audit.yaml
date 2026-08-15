@@ -1,5 +1,5 @@
 # Graph Audit Process Manifest
-# hKask v0.31.0 — Unified graph analysis (code + semantic + dual) as convergent PDCA
+# hKask v0.34.0 — Unified graph analysis (code + semantic + dual) as convergent PDCA
 #
 # Merged from codegraph + semantic-graph-audit + zoom-out (context-expansion).
 # Three modes selected by the `mode` input:
@@ -19,20 +19,22 @@ manifest:
     grill-me lenses. Dual mode: extract code graph then audit its health.
     Any userpod may invoke this skill.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  threshold: 0.25
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
+  target_artifacts_field: "current_artifacts"
 
 gas:
-  cap: 100000
+  cap: 150000
   cost_per_iteration: 100
   alert_threshold: 0.8
   hard_limit: true
@@ -45,7 +47,7 @@ rjoule:
 inputs:
   - name: mode
     type: string
-    required: true
+    required: false
     description: >
       Analysis mode: code, semantic, or dual.
       code: query/traverse/analyze the codebase graph via MCP tools.
@@ -121,6 +123,7 @@ steps:
     gas_cap: 4096
     timeout_seconds: 120
     input_mapping:
+      mode: "{{ task | default(mode) }}"
       target: "{{ target }}"
       goal: "{{ goal }}"
       project_stats: "{{ project_stats | default({}) }}"
@@ -135,7 +138,7 @@ steps:
     renderer: minijinja
     template_ref: graph-audit/code-query
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
       goal: "{{ goal }}"
       discovery: "{{ step_1_result }}"
@@ -151,7 +154,7 @@ steps:
     renderer: minijinja
     template_ref: graph-audit/code-analyze
     gas_cap: 6144
-    timeout_seconds: 120
+    timeout_seconds: 150
     input_mapping:
       goal: "{{ goal }}"
       discovery: "{{ step_1_result }}"
@@ -168,7 +171,7 @@ steps:
     renderer: minijinja
     template_ref: graph-audit/code-context
     gas_cap: 2048
-    timeout_seconds: 60
+    timeout_seconds: 120
     input_mapping:
       goal: "{{ goal }}"
       context_result: "{{ context_results | default({}) }}"
@@ -185,7 +188,7 @@ steps:
     renderer: minijinja
     template_ref: graph-audit/semantic-classify
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
       nodes: "{{ nodes }}"
       edges: "{{ edges }}"
@@ -200,7 +203,7 @@ steps:
     renderer: minijinja
     template_ref: graph-audit/semantic-analyze
     gas_cap: 8192
-    timeout_seconds: 120
+    timeout_seconds: 180
     input_mapping:
       nodes: "{{ nodes }}"
       edges: "{{ edges }}"
@@ -216,7 +219,7 @@ steps:
     renderer: minijinja
     template_ref: graph-audit/semantic-detect
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
       nodes: "{{ nodes }}"
       edges: "{{ edges }}"
@@ -232,7 +235,7 @@ steps:
     renderer: minijinja
     template_ref: graph-audit/semantic-report
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
       nodes: "{{ nodes }}"
       edges: "{{ edges }}"
@@ -252,7 +255,7 @@ steps:
     renderer: minijinja
     template_ref: graph-audit/semantic-classify
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
       nodes: "{{ step_3_result.symbols | default([]) }}"
       edges: "{{ step_3_result.dependencies | default([]) }}"
@@ -266,7 +269,7 @@ steps:
     renderer: minijinja
     template_ref: graph-audit/semantic-analyze
     gas_cap: 8192
-    timeout_seconds: 120
+    timeout_seconds: 180
     input_mapping:
       nodes: "{{ step_3_result.symbols | default([]) }}"
       edges: "{{ step_3_result.dependencies | default([]) }}"
@@ -281,7 +284,7 @@ steps:
     renderer: minijinja
     template_ref: graph-audit/semantic-detect
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
       nodes: "{{ step_3_result.symbols | default([]) }}"
       edges: "{{ step_3_result.dependencies | default([]) }}"
@@ -296,7 +299,7 @@ steps:
     renderer: minijinja
     template_ref: graph-audit/semantic-report
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
       nodes: "{{ step_3_result.symbols | default([]) }}"
       edges: "{{ step_3_result.dependencies | default([]) }}"
@@ -306,20 +309,31 @@ steps:
       domain: "code: {{ goal | default('codebase') }}"
 
   # === CONVERGENCE — mode-specific ===
+  # Code mode: lisp.eval computes a structural score from step 3's
+  # quality_findings count, then the ConvergenceTracker checks it (Cauchy criterion).
   - ordinal: 13
-    action: select
+    action: compute
     condition: "{{ mode | default('code') == 'code' }}"
+    compute_ref: lisp.eval
     description: >
-      CODE CONVERGENCE: Compute coverage saturation metric for code mode.
-    renderer: minijinja
-    template_ref: graph-audit/code-convergence-check
-    gas_cap: 2000
-    timeout_seconds: 30
+      COMPUTE CODE-ANALYSIS GAP (code mode): Deterministic Lisp
+      computation that turns the code-analyze step's output into a
+      scalar convergence signal. Lower = more converged (fewer quality
+      findings). The score is `min(quality_findings_count / 10, 1.0)` —
+      capped at 1.0 so a flood of findings doesn't overflow. No
+      `default(1.0)` fallback: a missing `quality_findings` field
+      surfaces as nil and is guarded to 0 ("no findings reported"),
+      which is a real measurement, not a phantom 1.0.
+    gas_cap: 100
+    timeout_seconds: 10
     input_mapping:
-      primary_result: "{{ step_3_result | default(step_2_result) }}"
-      discovery_result: "{{ step_1_result | default({}) }}"
-      query_result: "{{ step_2_result | default({}) }}"
-      context_result: "{{ step_4_result | default({}) }}"
+      form: >
+        (let ((findings (assoc "quality_findings" step_3_result)))
+          (let ((n (if (is_null findings) 0 (length findings))))
+            (let ((raw (/ n 10)))
+              (if (> raw 1.0) 1.0 raw))))
+      env:
+        step_3_result: "{{ step_3_result }}"
 
   - ordinal: 14
     action: select
@@ -330,7 +344,7 @@ steps:
     renderer: minijinja
     template_ref: graph-audit/semantic-report
     gas_cap: 2000
-    timeout_seconds: 30
+    timeout_seconds: 150
     input_mapping:
       nodes: "{{ nodes }}"
       edges: "{{ edges }}"
@@ -339,43 +353,85 @@ steps:
       structural_issues: "{{ step_7_result }}"
       domain: "{{ domain }}"
 
+  # Semantic mode: lisp.eval computes a structural score from the
+  # semantic-report's blockers array length (deterministic count),
+  # replacing the phantom LLM-generated convergence_metric.
   - ordinal: 15
-    action: select
-    condition: "{{ mode == 'dual' }}"
+    action: compute
+    condition: "{{ mode == 'semantic' }}"
+    compute_ref: lisp.eval
     description: >
-      DUAL CONVERGENCE: Compute combined convergence metric from code coverage
-      (steps 1-4) and graph health (steps 9-12). Both must be sufficient.
-    renderer: minijinja
-    template_ref: graph-audit/dual-convergence-check
-    gas_cap: 2000
-    timeout_seconds: 30
+      COMPUTE SEMANTIC-REPORT GAP (semantic mode): Deterministic Lisp
+      computation that turns the semantic-report step's output into a
+      scalar convergence signal. Lower = more converged (fewer blockers).
+      The score is `min(blockers_count / 5, 1.0)` — capped at 1.0. No
+      `default(1.0)` fallback: a missing `blockers` field surfaces as
+      nil and is guarded to 0 ("no blockers reported"), which is a real
+      measurement, not a phantom 1.0.
+    gas_cap: 100
+    timeout_seconds: 10
     input_mapping:
-      code_coverage_result: "{{ step_3_result | default({}) }}"
-      graph_health_result: "{{ step_12_result | default({}) }}"
+      form: >
+        (let ((blockers (assoc "blockers" step_14_result)))
+          (let ((n (if (is_null blockers) 0 (length blockers))))
+            (let ((raw (/ n 5)))
+              (if (> raw 1.0) 1.0 raw))))
+      env:
+        step_14_result: "{{ step_14_result }}"
 
+  # Dual mode: lisp.eval computes a structural score from the dual
+  # semantic-report's blockers array length.
   - ordinal: 16
+    action: compute
+    condition: "{{ mode == 'dual' }}"
+    compute_ref: lisp.eval
+    description: >
+      COMPUTE DUAL-REPORT GAP (dual mode): Deterministic Lisp
+      computation that turns the dual semantic-report step's (ordinal 12)
+      output into a scalar convergence signal. Lower = more converged
+      (fewer blockers). The score is `min(blockers_count / 5, 1.0)` —
+      capped at 1.0. No `default(1.0)` fallback: a missing `blockers`
+      field surfaces as nil and is guarded to 0.
+    gas_cap: 100
+    timeout_seconds: 10
+    input_mapping:
+      form: >
+        (let ((blockers (assoc "blockers" step_12_result)))
+          (let ((n (if (is_null blockers) 0 (length blockers))))
+            (let ((raw (/ n 5)))
+              (if (> raw 1.0) 1.0 raw))))
+      env:
+        step_12_result: "{{ step_12_result }}"
+
+  - ordinal: 17
     action: loop
     condition: "{{ mode | default('code') == 'code' }}"
     description: Re-enter code mode cycle if convergence is not met.
     input_mapping:
       loop_target: "{{ 1 }}"
-      convergence_metric: "{{ step_13_result.convergence_metric | default(1.0) }}"
+      # Push the code-analysis gap from the lisp.eval step (ordinal 13)
+      # into convergence_signal. No default(1.0): a Lisp failure must surface.
+      convergence_signal: "{{ step_13_result }}"
 
-  - ordinal: 17
+  - ordinal: 18
     action: loop
     condition: "{{ mode == 'semantic' }}"
     description: Re-enter semantic mode cycle if convergence is not met.
     input_mapping:
       loop_target: "{{ 5 }}"
-      convergence_metric: "{{ step_14_result.convergence_metric | default(1.0) }}"
+      # Push the semantic-report gap from the lisp.eval step (ordinal 16)
+      # into convergence_signal. No default(1.0): a Lisp failure must surface.
+      convergence_signal: "{{ step_16_result }}"
 
-  - ordinal: 18
+  - ordinal: 19
     action: loop
     condition: "{{ mode == 'dual' }}"
     description: Re-enter dual mode cycle if convergence is not met.
     input_mapping:
       loop_target: "{{ 1 }}"
-      convergence_metric: "{{ step_15_result.convergence_metric | default(1.0) }}"
+      # Push the dual-report gap from the lisp.eval step (ordinal 17)
+      # into convergence_signal. No default(1.0): a Lisp failure must surface.
+      convergence_signal: "{{ step_17_result }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -383,97 +439,6 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: graph-audit/code-discover
-      gas_budget: 4096
-    - resource: template
-      action: render
-      template_id: graph-audit/code-query
-      gas_budget: 4096
-    - resource: template
-      action: render
-      template_id: graph-audit/code-analyze
-      gas_budget: 6144
-    - resource: template
-      action: render
-      template_id: graph-audit/code-context
-      gas_budget: 2048
-    - resource: template
-      action: render
-      template_id: graph-audit/code-convergence-check
-      gas_budget: 2000
-    - resource: template
-      action: render
-      template_id: graph-audit/semantic-classify
-      gas_budget: 4096
-    - resource: template
-      action: render
-      template_id: graph-audit/semantic-analyze
-      gas_budget: 8192
-    - resource: template
-      action: render
-      template_id: graph-audit/semantic-detect
-      gas_budget: 4096
-    - resource: template
-      action: render
-      template_id: graph-audit/semantic-report
-      gas_budget: 4096
-    - resource: template
-      action: render
-      template_id: graph-audit/dual-convergence-check
-      gas_budget: 2000
-    - resource: mcp
-      action: call
-      tool: codegraph_query
-      gas_budget: 2000
-    - resource: mcp
-      action: call
-      tool: codegraph_traverse
-      gas_budget: 2000
-    - resource: mcp
-      action: call
-      tool: codegraph_impact
-      gas_budget: 2000
-    - resource: mcp
-      action: call
-      tool: codegraph_analysis
-      gas_budget: 2000
-    - resource: mcp
-      action: call
-      tool: codegraph_context
-      gas_budget: 2000
-    - resource: mcp
-      action: call
-      tool: codegraph_structure
-      gas_budget: 1000
-    - resource: mcp
-      action: call
-      tool: codegraph_stats
-      gas_budget: 1000
-    - resource: mcp
-      action: call
-      tool: codegraph_reindex
-      gas_budget: 4000
-    - resource: mcp
-      action: call
-      tool: codegraph_feedback
-      gas_budget: 1000
-    - resource: mcp
-      action: call
-      tool: codegraph_index_embeddings
-      gas_budget: 3000
-    - resource: manifest
-      action: execute
-      template_id: graph-audit
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true
 
 ledger:
   emit_spans: true

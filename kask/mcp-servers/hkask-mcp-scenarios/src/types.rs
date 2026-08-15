@@ -184,6 +184,20 @@ pub enum ScenarioType {
     EconomicPotential,
 }
 
+impl ScenarioType {
+    /// Snake-case category label matching the serde serialization, used as
+    /// the `category` on `StoredForecastRecord` so per-domain calibration
+    /// (`domain_bias_delta`) can group resolved forecasts by scenario type.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CompanyUpdate => "company_update",
+            Self::CompanyAnalysis => "company_analysis",
+            Self::EmergingEconomic => "emerging_economic",
+            Self::EconomicPotential => "economic_potential",
+        }
+    }
+}
+
 // ── Certainty tiers (MAIA three-level system) ──────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -199,12 +213,13 @@ pub enum CertaintyTier {
 
 impl CertaintyTier {
     pub fn from_probability(p: f64) -> Self {
-        if p >= 0.67 {
-            Self::Proximate
-        } else if p >= 0.33 {
-            Self::Probable
-        } else {
-            Self::Possible
+        // Delegate the thresholds to `hkask_forecast::certainty_tier` so the
+        // server's tiering and the graph widget's node coloring share one
+        // source of truth and cannot drift.
+        match hkask_forecast::certainty_tier(p) {
+            "proximate" => Self::Proximate,
+            "probable" => Self::Probable,
+            _ => Self::Possible,
         }
     }
 
@@ -344,8 +359,9 @@ pub struct DragonflySynthesis {
 /// A single stored forecast awaiting or having received an outcome.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredForecastRecord {
-    /// Schema version for forward-compatible deserialization (current: 1).
+    /// Schema version for forward-compatible deserialization (current: 2).
     /// Old files without this field default to 0.
+    /// v2 adds `category` for per-domain calibration.
     #[serde(default)]
     pub schema_version: u32,
     pub forecast_id: String,
@@ -357,6 +373,12 @@ pub struct StoredForecastRecord {
     /// None = still pending, Some = outcome known
     pub outcome: Option<bool>,
     pub resolved_at: Option<NaiveDate>,
+    /// Domain category (e.g. "Politics", "Sports") for per-domain calibration.
+    /// `None` for records that predate the field (schema v0/v1) or for
+    /// forecasts with no natural category. Per-domain bias correction
+    /// only applies when enough resolved forecasts share a category.
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 /// One bin in a calibration curve — forecasts in a probability range
@@ -641,6 +663,10 @@ impl ScenarioEvent {
                 self.probability,
             ));
         }
+        // Parent IDs must be unique across the union of all dependency groups:
+        // the marginalizer treats each group as an independent channel, so a
+        // repeated parent would be double-counted with no signal to the caller.
+        let mut seen_parent_ids = std::collections::HashSet::new();
         for dep in &self.depends_on {
             // Validate parent IDs are non-empty
             if dep.parent_event_ids.is_empty() {
@@ -648,6 +674,16 @@ impl ScenarioEvent {
                     self.name.clone(),
                     "parent_event_ids must not be empty".into(),
                 ));
+            }
+            for parent_id in &dep.parent_event_ids {
+                if !seen_parent_ids.insert(parent_id.as_str()) {
+                    return Err(ScenarioError::InvalidDependency(
+                        self.name.clone(),
+                        format!(
+                            "parent '{parent_id}' appears in more than one dependency group (or twice in one group)"
+                        ),
+                    ));
+                }
             }
             // Validate conditionals length = 2^n
             let expected_len = 1usize << dep.parent_event_ids.len();

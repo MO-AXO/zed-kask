@@ -4,6 +4,12 @@
 //! `UserFunctionalExpectation (expect:) → GoalPrinciple [P{N}] → ConstrainingPrinciple [P{N}] → REQ: → Test`
 //!
 //! Tested seam: `strip_html`, `ResponseCache`, and request type deserialization (no external API calls).
+//!
+//! GAP (N-R7): No test fixtures for provider response parsing exist yet. The providers in
+//! `research::providers` parse raw HTTP responses from Brave, Tavily, SerpAPI, Exa, Firecrawl,
+//! and Browserbase into `CompoundSearchResult` / `RankedResult`. Those parse paths are
+//! currently untested here — adding fixture-based parsing tests (recorded response JSON →
+//! expected typed output) is a follow-up effort.
 
 use hkask_mcp_research::ResearchServer;
 use hkask_mcp_research::research::{RateLimiter, ResponseCache, build_provider_pool};
@@ -161,11 +167,10 @@ fn test_server() -> ResearchServer {
     )
 }
 
-/// Parse the success envelope `{"content": <value>}`; falls back to the raw
-/// value for non-envelope outputs.
+/// Parse the success envelope `{"content": <value>}` via the canonical
+/// `hkask_types::tool_response::parse_tool_response` seam.
 fn parse_content(out: &str) -> serde_json::Value {
-    let v: serde_json::Value = serde_json::from_str(out).expect("tool output is JSON");
-    v.get("content").cloned().unwrap_or(v)
+    hkask_types::tool_response::parse_tool_response(out).expect("tool output is JSON")
 }
 
 /// Extract the `kind` field from an error envelope, if present.

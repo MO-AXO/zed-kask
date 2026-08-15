@@ -3,6 +3,7 @@
 //! Extracted from main.rs — these are the tool input structs that derive
 //! Deserialize + JsonSchema for MCP parameter deserialization.
 
+use hkask_mcp_server::AnyJsonValue;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -205,6 +206,10 @@ pub struct ResultFeedbackRequest {
     /// Omit if you just want to leave a score without comments.
     #[serde(default)]
     pub comments: String,
+    /// Explicit data provider that produced the result (e.g. "fmp", "eodhd").
+    /// When omitted, the provider is inferred from the symbol/query.
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -212,6 +217,42 @@ pub struct DcfValuationRequest {
     pub symbol: String,
     /// Optional parent forecast ID for a same-symbol revision.
     pub revision_of: Option<String>,
+    /// Stage 1 years (1–3, default 3)
+    #[schemars(range(min = 1, max = 3))]
+    pub stage1_years: Option<u8>,
+    /// Stage 2 years (2–7, default 7)
+    #[schemars(range(min = 2, max = 7))]
+    pub stage2_years: Option<u8>,
+    /// Discount rate / WACC (0.05–0.30, default 0.10)
+    #[schemars(range(min = 0.05, max = 0.30))]
+    pub discount_rate: Option<f64>,
+    /// Terminal growth rate (0.00–0.10, default 0.025; must be below discount rate)
+    #[schemars(range(min = 0.0, max = 0.10))]
+    pub terminal_growth: Option<f64>,
+
+    /// Override revenue growth rate (-0.50–1.00). Calibrated from history if omitted.
+    #[schemars(range(min = -0.50, max = 1.00))]
+    pub revenue_growth: Option<f64>,
+    /// Override gross margin (0.05–0.95). Calibrated from history if omitted.
+    #[schemars(range(min = 0.05, max = 0.95))]
+    pub gross_margin: Option<f64>,
+    /// Override D&A as % of revenue (0.00–0.20). Calibrated from history if omitted.
+    #[schemars(range(min = 0.0, max = 0.20))]
+    pub da_to_revenue: Option<f64>,
+    /// Override capex as % of revenue (0.00–0.30). Calibrated from history if omitted.
+    #[schemars(range(min = 0.0, max = 0.30))]
+    pub capex_to_revenue: Option<f64>,
+    /// Override NWC as % of revenue (-0.20–0.50). Calibrated from history if omitted.
+    #[schemars(range(min = -0.20, max = 0.50))]
+    pub nwc_to_revenue: Option<f64>,
+    /// Override effective tax rate (0.00–1.00). Calibrated from history if omitted.
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub tax_rate: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EquityDurationRequest {
+    pub symbol: String,
     /// Stage 1 years (1–3, default 3)
     #[schemars(range(min = 1, max = 3))]
     pub stage1_years: Option<u8>,
@@ -265,6 +306,13 @@ pub struct ScenarioAnalysisRequest {
     pub discount_rate: Option<f64>,
     /// Terminal growth rate (default 0.025)
     pub terminal_growth: Option<f64>,
+    /// Optional event tree JSON (from hkask-mcp-scenarios
+    /// `scenario_from_markets_set` / `scenario_propagate` output — the
+    /// `tree` object). When present, the four quadrant probabilities come
+    /// from the tree's root-event marginals (detailed mode); when absent,
+    /// the plain 2×2 range is returned without probabilities (simple mode,
+    /// the default on-ramp).
+    pub event_tree: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -481,6 +529,19 @@ projection_overrides_from_request!(
     discount_rate,
     terminal_growth,
 );
+projection_overrides_from_request!(
+    EquityDurationRequest,
+    stage1_years,
+    stage2_years,
+    revenue_growth,
+    gross_margin,
+    da_to_revenue,
+    capex_to_revenue,
+    nwc_to_revenue,
+    tax_rate,
+    discount_rate,
+    terminal_growth,
+);
 impl From<&ScenarioAnalysisRequest> for ProjectionAssumptionOverrides {
     fn from(request: &ScenarioAnalysisRequest) -> Self {
         Self {
@@ -532,12 +593,114 @@ impl From<&ComparableAnalysisRequest> for ProjectionAssumptionOverrides {
         }
     }
 }
+projection_overrides_from_request!(
+    ScenarioImpactValuationRequest,
+    stage1_years,
+    stage2_years,
+    revenue_growth,
+    gross_margin,
+    da_to_revenue,
+    capex_to_revenue,
+    nwc_to_revenue,
+    tax_rate,
+    discount_rate,
+    terminal_growth,
+);
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ResearchSearchRequest {
     pub symbol: String,
     /// Research query (e.g., "management guidance 2025", "competition market share")
     pub query: String,
+}
+
+// ── Scenario impact valuation request ─────────────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ScenarioImpactValuationRequest {
+    pub symbol: String,
+    /// JSON string of the resolved scenario event tree from `scenario_quantify`
+    /// (hkask-mcp-scenarios). Must contain `nodes` (array with `id`,
+    /// `marginal_probability`, `depends_on`) and optionally `topological_order`.
+    pub scenario_tree: String,
+    /// JSON array of per-node impact mappings. Each entry has `node_id`,
+    /// `yes_deltas` (additive DCF assumption deltas when the node resolves
+    /// Yes), and optional `no_deltas` (deltas when No, default zero).
+    pub impact_mappings: String,
+    pub stage1_years: Option<u8>,
+    pub stage2_years: Option<u8>,
+    pub discount_rate: Option<f64>,
+    pub terminal_growth: Option<f64>,
+    pub revenue_growth: Option<f64>,
+    pub gross_margin: Option<f64>,
+    pub da_to_revenue: Option<f64>,
+    pub capex_to_revenue: Option<f64>,
+    pub nwc_to_revenue: Option<f64>,
+    pub tax_rate: Option<f64>,
+}
+
+// ── Company transcript request (earnings + corpus modes) ──────────────
+
+/// Fetch mode for `company_transcript`.
+///
+/// `earnings` fetches FMP earnings-call transcripts (the existing behavior).
+/// `corpus` fetches non-earnings company transcripts (investor-day keynotes,
+/// executive interviews) via SerpAPI YouTube, channel-allowlisted per the
+/// company manifest. Corpus mode does NOT segment — it normalizes to
+/// pipeline-ready records and hands off to the corpus pipeline.
+#[derive(Debug, Default, Deserialize, JsonSchema, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscriptMode {
+    /// FMP earnings-call transcript: fetch + coverage-honest.
+    #[default]
+    Earnings,
+    /// Non-earnings company transcripts via SerpAPI YouTube (channel-allowlisted).
+    /// Normalize-only, no segmentation. Pipeline-ready JSONL output.
+    Corpus,
+}
+
+/// Request for `company_transcript`.
+///
+/// Temporal key is `(year, quarter)` — the FMP `date` field is unreliable
+/// (probe-verified: AAPL 2023Q1 returns `date: "2012-03-19"`). Callers must
+/// not rely on `date` for ordering or deduplication.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CompanyTranscriptRequest {
+    pub symbol: String,
+    /// Fetch mode. `earnings` (default) hits FMP; `corpus` hits SerpAPI YouTube.
+    #[serde(default)]
+    pub mode: TranscriptMode,
+    /// Calendar year (e.g. 2024). Required for `earnings` mode when
+    /// `quarters_back` is not used. Ignored for `corpus` mode.
+    pub year: Option<u32>,
+    /// Calendar quarter 1–4. Required for `earnings` mode when `quarters_back`
+    /// is not used. Ignored for `corpus` mode.
+    pub quarter: Option<u8>,
+    /// Fetch the last N quarters ending at `(year, quarter)`. Default 1.
+    /// Per-quarter failures are collected into `coverage.missing`, not
+    /// propagated as whole-tool failure. Ignored for `corpus` mode.
+    #[serde(default = "default_transcript_quarters_back")]
+    pub quarters_back: u32,
+    /// Search query for `corpus` mode (e.g. "Satya Nadella keynote").
+    /// Required for `corpus` mode; ignored for `earnings` mode.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Channel allowlist for `corpus` mode (e.g. ["Microsoft", "Microsoft Investor Relations"]).
+    /// Videos from channels NOT on this list are excluded and logged, never silently kept.
+    /// Required for `corpus` mode; ignored for `earnings` mode.
+    #[serde(default)]
+    pub channels_allowlist: Vec<String>,
+    /// Max results for `corpus` mode (default 5). Ignored for `earnings` mode.
+    #[serde(default = "default_corpus_max_results")]
+    pub max_results: u32,
+}
+
+fn default_transcript_quarters_back() -> u32 {
+    1
+}
+
+fn default_corpus_max_results() -> u32 {
+    5
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -547,9 +710,14 @@ pub struct ScreenerRequest {
     /// Maximum results (default 20)
     #[serde(default = "default_screener_limit")]
     pub limit: u32,
-    /// Override specific criteria directly (bypasses prompt parsing for these fields)
+    /// Override specific criteria directly (bypasses prompt parsing for these fields).
+    ///
+    /// Accepts arbitrary JSON. Typed as [`AnyJsonValue`] (not `serde_json::Value`)
+    /// so the generated tool input schema is the empty object `{}` rather than the
+    /// bare boolean `true` schemars emits for `Value` — Ollama rejects boolean
+    /// property schemas with `400 cannot unmarshal bool into ... api.ToolProperty`.
     #[serde(default)]
-    pub criteria_overrides: serde_json::Value,
+    pub criteria_overrides: AnyJsonValue,
 }
 
 fn default_screener_limit() -> u32 {
@@ -574,4 +742,52 @@ pub struct EpValuationRequest {
     pub moat_result: Option<crate::economic_profit::FadeHorizon>,
     /// Stage 1 years: hold current EP constant before fade (1–5, default 3).
     pub stage1_years: Option<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hkask_mcp_server::find_boolean_schema_positions;
+    use schemars::schema_for;
+
+    /// `criteria_overrides` is typed [`AnyJsonValue`] so its schema is the empty
+    /// object `{}`, never the bare boolean `true` that `serde_json::Value`
+    /// produces. Ollama's Go API rejects boolean property schemas with
+    /// `400 cannot unmarshal bool into ... api.ToolProperty`, failing the whole
+    /// chat-completion request. The scanner asserts the *entire* generated
+    /// schema is free of bare-boolean property values, so a future field on this
+    /// struct that reverts to `serde_json::Value` is caught here, not at runtime.
+    #[test]
+    fn screener_request_schema_has_no_boolean_property_values() {
+        let schema = schema_for!(ScreenerRequest);
+        let value = serde_json::to_value(&schema).expect("schema serializes");
+        let violations = find_boolean_schema_positions(&value);
+        assert!(
+            violations.is_empty(),
+            "ScreenerRequest schema has bare-boolean property values \
+             (Ollama/Gemini would reject): {violations:?}"
+        );
+    }
+
+    #[test]
+    fn equity_duration_request_schema_has_no_boolean_property_values() {
+        let schema = schema_for!(EquityDurationRequest);
+        let value = serde_json::to_value(&schema).expect("schema serializes");
+        let violations = find_boolean_schema_positions(&value);
+        assert!(
+            violations.is_empty(),
+            "EquityDurationRequest schema has bare-boolean property values: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn company_transcript_request_schema_has_no_boolean_property_values() {
+        let schema = schema_for!(CompanyTranscriptRequest);
+        let value = serde_json::to_value(&schema).expect("schema serializes");
+        let violations = find_boolean_schema_positions(&value);
+        assert!(
+            violations.is_empty(),
+            "CompanyTranscriptRequest schema has bare-boolean property values: {violations:?}"
+        );
+    }
 }

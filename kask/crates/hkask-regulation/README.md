@@ -1,6 +1,6 @@
 # hkask-regulation — Regulation System
 
-Homeostatic self-regulation engine for hKask. Regulation enforces Ashby's Law of Requisite Variety through variety sensing, algedonic alerts, energy budgets, OCAP governance, and sovereignty enforcement (Loop 6).
+Homeostatic self-regulation engine for hKask. Regulation enforces Ashby's Law of Requisite Variety through variety sensing, algedonic alerts, per-agent tool-call caps, OCAP governance, and sovereignty enforcement (Loop 6).
 
 ## Public Modules
 
@@ -8,18 +8,11 @@ Homeostatic self-regulation engine for hKask. Regulation enforces Ashby's Law of
 |--------|---------|
 | `runtime` | `RegulationLedger` — central Regulation state machine |
 | `cybernetics_loop` | Loop 6 main sense→compute→act cycle |
-| `energy` | Gas budgets (`hJoules`), `GasBudget`, `GasCost` |
-| `energy_budget_management` | Budget registration, reservation, settlement |
-
-| `governed_tool` | Tool invocation membrane — Regulation-gated MCP calls |
-| `algedonic` | Algedonic signal channel (positive/negative valence) |
-| `circuit_breaker` | Regulation circuit breaker |
-| `types::loops` | `CurationInput`, `LoopAction`, `CuratorDirective` |
-| `seam_watcher` | Seam drift detection and inventory |
-| `slo_manager` | SLO evaluation, error budgets, breach escalation |
-| `storage_guard` | Autonomous disk space management (Loop 7) |
-| `wallet_manager` | Wallet-backed energy budgets |
-| `runtime_policy` | Layer 6 defense — pre-execution policy check (VeriGuard/AgentGuard) |
+| `energy` | Per-agent tool-call caps (`CallCap`, `CallCapManager`) |
+| `metacognition` | Curator's sense→compare→compute→act governance loop |
+| `set_points` | Loop 6 set-points config & loaders |
+| `sensor_provider` | Pluggable metric sensors (Fermi Extractor pattern) — public for cross-loop registration |
+| `types::loops` | `CurationInput`, `ExperienceClassification`, `RegulatoryAction` |
 
 ## Key Types
 
@@ -27,21 +20,21 @@ Homeostatic self-regulation engine for hKask. Regulation enforces Ashby's Law of
 |------|-------------|
 | `RegulationLedger` | Central Regulation state machine with health, variety, alerts |
 | `CyberneticsLoop` | Loop 6 regulation cycle |
-
-The OCAP-gated tool invocation membrane (`McpRuntime::invoke` / `ToolGovernance`) lives in `hkask-mcp`; it consumes this crate's `CyberneticsLoop`, `GasBudget`, and `ToolStats` primitives via the hold-settle pattern.
-
-| `GasBudget` | Energy budget with hJoule accounting |
-| `CircuitBreaker` | Fail-open regulation circuit breaker |
+| `CallCap` | Per-agent tool-call cap (ceiling + remaining + reset cycle) |
+| `CallCapManager` | Registry of per-agent `CallCap`s with curation overrides |
 | `SetPoints` | Configurable regulatory thresholds |
-| `SloManager` | SLO evaluation with error budget tracking |
-| `StorageGuardLoop` | Autonomous disk space reclamation |
-| `RuntimePolicy` | Pre-execution policy check trait (Allow/Block/RequireHuman/Log) |
-| `DefaultPolicy` | FIDES taint flow + rate limiting + human-in-the-loop enforcement |
+
+The `runtime_policy` module (`DefaultPolicy`, `PolicyVerdict`) was removed
+2026-08-12. Its FIDES `Source`→`Sink` block read two constants — every tool was
+labelled `Pure`, and the untrusted-input flag was always false — so the only
+pre-execution check it could apply was an unconfigured rate limit. The live tool
+gates are `McpRuntime::invoke` (call metering) and the per-agent `mcp_tools`
+allowlist.
+
+The OCAP-gated tool invocation membrane (`McpRuntime::invoke`) lives in `hkask-mcp`; it consumes this crate's `CyberneticsLoop`, `CallCapManager`, and `ToolStats` primitives via the call-charge pattern (`CyberneticsLoop::charge_call`).
 
 ## Dependencies
 
-- `hkask-types` — foundation types (WebID, NuEvent, InfrastructureError)
-- `hkask-ports` — hexagonal port traits (InferencePort, CircuitBreakerPort)
-- `hkask-storage` — persistence (via ports)
+- `hkask-types` — foundation types (WebID, NuEvent, InfrastructureError, `InferencePort`)
 - `hkask-capability` — OCAP delegation tokens
 - `tokio`, `tracing`, `serde`, `chrono`

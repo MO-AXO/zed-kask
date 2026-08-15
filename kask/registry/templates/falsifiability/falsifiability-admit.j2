@@ -1,12 +1,6 @@
 {# goal: Popper admissibility gate — rule out unfalsifiable targets before generating hypotheses. #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- admit
-- classify
-- rule_out
-- test
-- gate
 contract:
   input:
     target: string
@@ -20,7 +14,6 @@ contract:
     falsifying_observation: string
     ruled_out_reason: string
     refined_target: string
-energy_cap: 3072
 visibility: Public
 ---
 {# Template: falsifiability/falsifiability-admit.j2 #}
@@ -32,7 +25,7 @@ visibility: Public
 temperature = 0.2
 work_effort = "medium"
 verbosity = "standard"
-max_tokens = 2048
+max_tokens = 4096
 thinking_budget = "full"
 
 You are a falsifiability admissibility gate. Your single job is to decide whether the target

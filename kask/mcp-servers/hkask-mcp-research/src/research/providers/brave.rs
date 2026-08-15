@@ -8,11 +8,11 @@ pub struct BraveProvider {
 }
 
 impl BraveProvider {
-    pub fn new(api_key: String) -> Self {
-        Self {
-            client: super::provider_http_client(),
+    pub fn new(api_key: String) -> Result<Self, WebError> {
+        Ok(Self {
+            client: super::provider_http_client()?,
             api_key,
-        }
+        })
     }
 }
 #[async_trait]
@@ -55,7 +55,7 @@ impl WebSearchProvider for BraveProvider {
                 429 => WebError::RateLimited(format!("Brave rate limited: {status}")),
                 _ => WebError::ProviderError(format!(
                     "Brave API error {status}: {}",
-                    body.chars().take(200).collect::<String>()
+                    hkask_inference::openai_compat::sanitize_error_body(&body)
                 )),
             });
         }

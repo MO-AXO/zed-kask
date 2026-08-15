@@ -1,19 +1,8 @@
 ---
 name: create-skill
+core: true
 visibility: public
-description: >
-  Create a new kask skill as a complete registry crate: manifest.yaml + .j2
-  templates + process manifest (FlowDef with gas/rjoule/convergence blocks)
-  + SKILL.md companion. Overrides the built-in Zed create-skill, which
-  only produces SKILL.md files. The kask-native version produces the full
-  registry-first structure with ontological grounding: a research phase
-  finds academic/industry anchors for the skill's domain, the PDCA shape
-  emerges from those anchors (not from a generic template), and the
-  artifacts are annotated with ontology references (PKO, Dublin Core,
-  GOLEM, MovieLabs OMC, ESO, or domain-specific ontologies). Delegates to
-  skill-maintenance-build for mechanical scaffolding and
-  skill-maintenance-validate for post-creation validation. Any userpod
-  may invoke this skill.
+description: "Create a new kask skill as a complete registry crate: manifest.yaml + .j2 templates + process manifest + SKILL.md companion. Overrides the built-in Zed create-skill, which only produces SKILL.md files."
 ---
 
 # Create Skill (kask-native)
@@ -106,9 +95,15 @@ annotated with the ontology terms that define its domain's process.
    template contract's input/output types. PKO's Procedure, Step,
    StepExecution become contract fields. ESO's Event, Situation, Role
    become contract fields.
-3. **Span namespaces**: the ontology's concepts become span names.
-   `reg.gradient.detect` follows the gradient ontology; `reg.bughunt.oracle`
-   follows the Weinberg oracle concept.
+3. **Span namespaces**: the ontology's concepts become span names. There are
+   two distinct namespaces — do not conflate them:
+   - `ledger.span_namespace` (process manifest): MUST be `reg.skill.<manifest.id>`
+     (CI-enforced by `scripts/check-skill-span-namespace.sh`; the `spans:` list is
+     abolished). E.g. `reg.skill.bug-hunt`.
+   - per-template `generates_spans` (template manifest + .j2): the ontology-derived
+     short name, e.g. `reg.gradient.detect` follows the gradient ontology,
+     `reg.bughunt.oracle` follows the Weinberg oracle concept. These are NOT gated
+     by the CI script and may use a shortened form distinct from `manifest.id`.
 4. **Convergence criteria**: the ontology's quality criteria become the
    convergence metric. PKO's execution completeness becomes a coverage
    metric. The gradient-hunter's fractal recurrence becomes a
@@ -123,7 +118,7 @@ specific to skill creation:
 Plan:   Phase 1 — Research     → Find academic/industry ontological anchors for the skill's domain
 Plan:   Phase 2 — Describe     → Capture purpose, name, PDCA shape (emergent from anchors), delegates, ontology
 Do:     Phase 3 — Scaffold    → Generate manifest.yaml + .j2 templates + process manifest + SKILL.md
-Check:  Phase 4 — Validate    → Run skill-maintenance-validate against R1-R12, Z1-Z8, X1-X4, E1-E10
+Check:  Phase 4 — Validate    → Run skill-maintenance-validate against R1-R12, Z1-Z8, X1-X4, E1-E11
 Check:  Phase 5 — Converge     → Check validation passed; if not, re-enter at Research with fixes
 Act:    Phase 6 — Loop        → If validation failed, re-enter at Phase 1 with the failure report
 ```
@@ -171,7 +166,10 @@ which is exactly what we want to avoid.
    research phase, not a generic template. Each phase is grounded in an
    ontological anchor.
 4. Identify which skills this skill will compose (delegates).
-5. Identify the span namespace (reg.<skill_name>.*).
+5. Identify the per-template span namespace (`reg.<skill_name>.<phase>`,
+   ontology-derived). The ledger `span_namespace` is deterministic — always
+   `reg.skill.<manifest.id>` — and is injected by the scaffold phase; do not
+   "choose" it.
 6. Identify the ontology annotations for each artifact.
 
 ### Phase 3 — Scaffold (delegate to skill-maintenance-build)
@@ -185,10 +183,44 @@ Delegate to `skill-maintenance-build` to generate the full registry crate:
 4. **SKILL.md companion** with ontology references in the description
    and constraints
 
+### Visual artifact surfacing (Phase 3 gate)
+
+If the skill produces a visual artifact (Mermaid diagram, chart, map, or any
+renderable output) in an intermediate `select` step, the process manifest **must
+include a final `render` step** that surfaces the artifact as the cascade's
+final output. Without it, the artifact stays buried in an intermediate
+`step_N_result` and `extract_final_step_result` picks a later step (compute/loop)
+that has no diagram — the user never sees the visualization.
+
+The pattern:
+
+1. An intermediate `select` step generates the visual artifact source (e.g.,
+   `map_diagram` containing `quadrantChart ...`, or `mermaid_source` containing
+   `sankey-beta ...`).
+2. A final `render` step (RenderAct, `action: render`) takes the artifact source
+   via `input_mapping` and wraps it in a fenced ```mermaid block as a markdown
+   string. This step is deterministic (no LLM call, `gas_cap: 100`).
+3. The `loop` step comes **after** the render step. The render step's ordinal
+   must be the highest among steps that produce a `step_N_result` (the `loop`
+   action does not produce one), so `extract_final_step_result` picks it.
+4. The render template is a pure Jinja2 file (no `[inference]` frontmatter) — the
+   `render` action calls `render_minijinja` on the full file content, so
+   frontmatter would appear in the output.
+
+Detection criteria — add a render step if **any** of these are true:
+- A template's `contract.output` includes a field whose description says "mermaid",
+  "diagram", "chart", "graph", "visual", or "plot".
+- A template instructs the model to "generate a Mermaid ... chart/diagram".
+- The skill's SKILL.md description mentions "renders natively in Zed", "visual",
+  "diagram", or "chart".
+
+Skills that do NOT produce visual artifacts (pure reasoning, extraction, audit,
+code review, etc.) do not need a render step.
+
 ### Phase 4 — Validate (delegate to skill-maintenance-validate)
 
 Delegate to `skill-maintenance-validate` to check the scaffolded crate
-against R1-R12, Z1-Z8, X1-X4, E1-E10.
+against R1-R12, Z1-Z8, X1-X4, E1-E11.
 
 ### Phase 5 — Converge
 
@@ -204,20 +236,20 @@ were insufficient or the PDCA shape didn't emerge correctly from them.
 | `create-skill-research.j2` | `KnowAct` | Search academic/industry literature for the skill's domain. Find ontological anchors (process ontologies, quality criteria, entity types, existing ontologies). Derive the PDCA shape from the anchors. |
 | `create-skill-describe.j2` | `KnowAct` | Capture the skill's purpose, name, PDCA shape (emergent from anchors), delegates, span namespace, ontology annotations. |
 | `create-skill-scaffold.j2` | `KnowAct` | Generate the full registry crate structure with ontology-annotated artifacts. Delegates to skill-maintenance-build. |
-| `create-skill-validate.j2` | `KnowAct` | Validate the scaffolded crate against R1-R12, Z1-Z8, X1-X4, E1-E10. Delegates to skill-maintenance-validate. |
-| `create-skill-convergence-check.j2` | `KnowAct` | Check validation passed; emit next_research_focus if not converged. |
+| `create-skill-validate.j2` | `KnowAct` | Validate the scaffolded crate against R1-R12, Z1-Z8, X1-X4, E1-E11. Delegates to skill-maintenance-validate. |
 | `create-skill-ontologies.yaml` | `RenderAct` | Reference: ontology reference set (PKO, Dublin Core, GOLEM, MovieLabs OMC, ESO) with domain mappings and annotation patterns. |
 
 ## Constraints
 
 - All flow templates are `KnowAct` type with `Public` visibility. Reference documents are `RenderAct`.
-- Energy caps: research (6144), describe (4096), scaffold (8192), validate (4096), convergence-check (2048).
+- Energy caps: research (6144), describe (4096), scaffold (8192), validate (4096).
 - Gas cap: 150,000 per invocation. Maximum 3 iterations.
 - **The skill's PDCA shape must emerge from its ontological anchors, not from a generic template.** The research phase is mandatory — no skill is scaffolded without ontological grounding.
 - **Each skill is idiosyncratic.** Do not generalize the shape across skills. A gradient-hunter is not a bug-hunt is not a self-improvement cycle.
 - The skill name must be lowercase, hyphenated, 2-40 characters, verb-noun or noun-noun, no reserved prefixes.
 - The process manifest must use only canonical actions.
-- The convergence block is mandatory for `category: skill` manifests. Threshold must be in [0.05, 0.30].
+- The convergence block is mandatory for `category: skill` manifests. Use `convergence_mode: "cauchy"` with `cauchy_epsilon: 0.03`, `cauchy_window: 3`, `max_iterations: 10`, `min_iterations: 2`.
 - The gas and rjoule blocks are mandatory. rjoule.cap must be > 0 if any step uses `action: select`.
 - The SKILL.md description must be ≤1024 bytes.
+- **`lisp.eval` is available for custom deterministic compute steps.** When a skill needs a convergence formula, scoring function, or data transformation that doesn't fit the built-in `compute_ref`s (`kata.convergence_check`, `kata.object_gap`, etc.), use `compute_ref: lisp.eval` with an inline Lisp form. No Rust change needed — the manifest is the unit of authorship. See the manifest's comment block for an example. Security: gated to `category: skill` manifests only. The interpreter supports both prefix (`(+ a b)`) and infix (`a + b`) operator notation — use infix for simple scoring expressions (e.g., `score_a * 0.6 + score_b * 0.4`), prefix for complex nested logic with `let`, `if`, and `assoc`.
 - Registry is authoritative — when this SKILL.md disagrees with registry templates, the registry wins.

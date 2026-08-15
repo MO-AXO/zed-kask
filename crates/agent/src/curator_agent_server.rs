@@ -1,5 +1,5 @@
 //! Curator agent server — an overlay on the Zed Agent that adds
-//! metacognition, curator tools, and regulatory monitoring.
+//! curator tools and regulatory context.
 //!
 //! The Curator is NOT a separate agent with its own system prompt. It IS
 //! the Zed Agent — same coding tools, same system prompt, same model —
@@ -8,8 +8,10 @@
 //! - **Curator tools**: `curator_status` for checking regulation health
 //! - **Curator context**: appended to the system prompt via `static_context`,
 //!   describing the Curator's role and current system state
-//! - **Background metacognition**: a detached task that runs the
-//!   sense→compare→compute→act governance loop
+//!
+//! The background metacognition loop (sense→compare→compute→act) is spawned
+//! once, process-globally, in `crates/zed/src/main.rs` — not by this server.
+//! Every Curator thread reads from that shared loop via `CuratorStatusTool`.
 //!
 //! This overlay design means the Curator can do everything the Zed Agent can
 //! (write code, run terminals, edit files) while also having access to the
@@ -24,9 +26,7 @@ use fs::Fs;
 use gpui::{App, Entity, SharedString, Task};
 use project::{AgentId, Project};
 
-use crate::{
-    CURATOR_AGENT_ID, NativeAgent, NativeAgentConnection, ThreadStore, templates::Templates,
-};
+use crate::{CURATOR_AGENT_ID, ThreadStore};
 
 /// The Curator's static context — appended to the system prompt.
 ///
@@ -34,14 +34,15 @@ use crate::{
 /// `Thread::static_context` and rendered after the project context section.
 /// The Zed Agent's system prompt remains intact — the Curator gets all the
 /// coding instructions PLUS this regulatory context.
-const CURATOR_STATIC_CONTEXT: &str = "\
+pub const CURATOR_STATIC_CONTEXT: &str = "\
 ## Curator Role\n\
 \n\
 You are also the Curator — the cybernetic regulator for the hKask system.\n\
 In addition to your coding agent capabilities, you:\n\
 - Monitor system health via the `curator_status` tool\n\
 - Apply metacognitive self-calibration when thresholds are breached\n\
-- Issue CuratorDirectives to adjust thresholds, capabilities, and energy budgets\n\
+- Issue CuratorDirectives via the `curator_directive` tool to adjust
+  thresholds, capabilities, and energy budgets
 - Escalate domain-level concerns to the user for human review\n\
 \n\
 ### Methodology\n\
@@ -62,16 +63,51 @@ You are anchored on the following methodologies:\n\
 /// Like `NativeAgentServer`, but:
 /// 1. Injects curator static context into each thread's system prompt
 /// 2. Registers the `curator_status` tool on each thread
-/// 3. Runs a background metacognition task
+///
+/// The optional `extra_static_context` is appended to
+/// `CURATOR_STATIC_CONTEXT` when the connection establishes. This is used by
+/// the kask panel to inject a per-tab system prompt describing which MCP
+/// server's tools are in scope for the conversation.
 #[derive(Clone)]
 pub struct CuratorAgentServer {
     fs: Arc<dyn Fs>,
     thread_store: Entity<ThreadStore>,
+    extra_static_context: Option<SharedString>,
+    /// Per-tab MCP server scope — when set, `connect` applies
+    /// `NativeAgent::set_mcp_server_scope`, filtering the thread's
+    /// context-server tools to this server only.
+    mcp_server_scope: Option<SharedString>,
 }
 
 impl CuratorAgentServer {
     pub fn new(fs: Arc<dyn Fs>, thread_store: Entity<ThreadStore>) -> Self {
-        Self { fs, thread_store }
+        Self {
+            fs,
+            thread_store,
+            extra_static_context: None,
+            mcp_server_scope: None,
+        }
+    }
+
+    /// Set extra static context appended to `CURATOR_STATIC_CONTEXT`.
+    ///
+    /// Used by the kask panel to inject a per-tab system prompt that tells
+    /// the curator which MCP server's tools are in scope. The extra context
+    /// is rendered after the base curator context, so the curator sees both
+    /// its regulatory role AND the per-tab tool scope.
+    pub fn with_extra_static_context(mut self, context: SharedString) -> Self {
+        self.extra_static_context = Some(context);
+        self
+    }
+
+    /// Restrict new sessions' MCP tools to one server — the enforcement
+    /// half of the per-tab scoping (the prompt is the declaration half).
+    ///
+    /// The name must match the server's `ContextServerId` (e.g.
+    /// `"companies"`). Kask panel passes the tab's server id.
+    pub fn with_mcp_server_scope(mut self, server: SharedString) -> Self {
+        self.mcp_server_scope = Some(server);
+        self
     }
 }
 
@@ -90,31 +126,32 @@ impl AgentServer for CuratorAgentServer {
         _project: Entity<Project>,
         cx: &mut App,
     ) -> Task<Result<Rc<dyn acp_thread::AgentConnection>>> {
-        log::debug!("CuratorAgentServer::connect");
         let fs = self.fs.clone();
         let thread_store = self.thread_store.clone();
+        let extra_context = self.extra_static_context.clone();
+        let mcp_server_scope = self.mcp_server_scope.clone();
         cx.spawn(async move |cx| {
-            log::debug!("Creating templates for Curator agent");
-            let templates = Templates::new();
-
-            log::debug!("Creating native agent entity for Curator");
-            let agent = cx.update(|cx| NativeAgent::new(thread_store, templates, fs, cx));
-
-            // Set the Curator static context — this is appended to the system
-            // prompt, NOT a full override. The Zed Agent's coding instructions
-            // remain intact.
+            // Build the shared NativeAgent connection, then apply the curator
+            // overlay before handing it back. The overlay is the only
+            // curator-specific behavior; the spawn sequence is shared with
+            // NativeAgentServer via `build_connection` so the two cannot drift.
+            let templates = crate::templates::Templates::new();
+            let agent = cx.update(|cx| crate::NativeAgent::new(thread_store, templates, fs, cx));
             cx.update(|cx| {
-                agent.update(cx, |agent, cx| {
-                    agent
-                        .set_curator_static_context(SharedString::from(CURATOR_STATIC_CONTEXT), cx);
+                agent.update(cx, |agent, _cx| {
+                    let context = match extra_context {
+                        Some(extra) => {
+                            SharedString::from(format!("{CURATOR_STATIC_CONTEXT}\n{extra}"))
+                        }
+                        None => SharedString::from(CURATOR_STATIC_CONTEXT),
+                    };
+                    agent.set_curator_static_context(context);
+                    if let Some(scope) = mcp_server_scope {
+                        agent.set_mcp_server_scope(scope);
+                    }
                 });
             });
-
-            // Create the connection wrapper
-            let connection = NativeAgentConnection(agent);
-            log::debug!("CuratorAgentServer connection established successfully");
-
-            Ok(Rc::new(connection) as Rc<dyn acp_thread::AgentConnection>)
+            Ok(Rc::new(crate::NativeAgentConnection(agent)) as Rc<dyn acp_thread::AgentConnection>)
         })
     }
 

@@ -12,16 +12,10 @@ pub struct SemanticScholarProvider {
 }
 
 impl SemanticScholarProvider {
-    pub fn new() -> Self {
-        Self {
-            client: super::provider_http_client(),
-        }
-    }
-}
-
-impl Default for SemanticScholarProvider {
-    fn default() -> Self {
-        Self::new()
+    pub fn new() -> Result<Self, WebError> {
+        Ok(Self {
+            client: super::provider_http_client()?,
+        })
     }
 }
 
@@ -63,7 +57,7 @@ impl WebSearchProvider for SemanticScholarProvider {
                 429 => WebError::RateLimited(format!("Semantic Scholar rate limited: {status}")),
                 _ => WebError::ProviderError(format!(
                     "Semantic Scholar error {status}: {}",
-                    body.chars().take(200).collect::<String>()
+                    hkask_inference::openai_compat::sanitize_error_body(&body)
                 )),
             });
         }

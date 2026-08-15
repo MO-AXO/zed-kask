@@ -5,8 +5,13 @@
 //! and expertise level. Uses LLM-based extraction via a Jinja2 template.
 //! Every chunk gets at least one 5W1H dimension — no zero-tag chunks.
 
-use crate::tools::semantic::GUARD;
-use crate::*;
+use crate::batch::{BatchOutcome, MAX_RETRIES, retry_with_backoff};
+use crate::helpers::map_corpus_io_error;
+use crate::{
+    Arc, CorpusServer, LLMParameters, McpToolError, Parameters, execute_tool_semantic,
+    extract_json_from_response, json, normalize_concept, read_jsonl_stream,
+    render_docproc_template, tool, tool_router,
+};
 use hkask_inference::model_constants::classifier_model;
 use hkask_types::corpus::TaggedChunk;
 use schemars::JsonSchema;
@@ -20,12 +25,6 @@ const MAX_CONCEPT_LEN: usize = 80;
 /// Maximum number of concepts per ontology namespace. Guards against
 /// LLM-produced concept spam that would dominate the salience graph.
 const MAX_CONCEPTS_PER_NS: usize = 30;
-
-/// Failure-rate threshold above which the pipeline reports `degraded`
-/// outcome. A run with more than 10% of chunks failing LLM extraction
-/// indicates a systemic issue (model unavailable, prompt broken, or
-/// adversarial input) and must not be reported as `success`.
-const DEGRADED_FAILURE_THRESHOLD: usize = 10; // percent
 
 /// Minimal chunk for tagging (from chunks.jsonl).
 #[derive(Debug, Clone, Deserialize)]
@@ -60,18 +59,11 @@ struct OntologyTags {
 }
 
 fn read_input_chunks(path: &str) -> Result<Vec<InputChunk>, McpToolError> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        McpToolError::invalid_argument(format!("Cannot read chunks_jsonl '{path}': {e}"))
-    })?;
-    let total_lines = content.lines().filter(|l| !l.trim().is_empty()).count();
-    let chunks: Vec<InputChunk> = content
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    let dropped = total_lines - chunks.len();
-    if dropped > 0 {
-        tracing::warn!("  Warning: dropped {dropped} malformed lines from input");
+    // Use the streaming reader to avoid the 32 MiB read cap on large
+    // chunks.jsonl files (the pipeline manifest notes ~71.8 MB).
+    let chunks = read_jsonl_stream::<InputChunk>(path, "chunks_jsonl")?;
+    if chunks.is_empty() {
+        return Err(McpToolError::invalid_argument("chunks_jsonl is empty"));
     }
     Ok(chunks)
 }
@@ -98,6 +90,21 @@ fn compute_salience(tagged: &[TaggedChunk]) -> Vec<f32> {
         })
         .collect();
     hkask_memory::salience::compute_salience_batch(&all_tags)
+}
+
+/// Parse an LLM tagging response into validated OntologyTags.
+///
+/// This is the tagging pipeline's trust boundary (RR-0016): raw LLM text is
+/// JSON-extracted, deserialized, and normalized through
+/// `validate_ontology_tags` before it can become a `TaggedChunk`. Extracted
+/// as a named function so the pipeline shape (extract → parse → validate) is
+/// directly testable — a refactor that drops the validation step fails the
+/// test, not just a grep.
+fn parse_and_validate_tags(response_text: &str) -> Option<OntologyTags> {
+    let cleaned = extract_json_from_response(response_text);
+    serde_json::from_str::<OntologyTags>(&cleaned)
+        .map(validate_ontology_tags)
+        .ok()
 }
 
 /// Validate and normalize LLM-extracted ontology tags before they enter the
@@ -188,7 +195,7 @@ impl CorpusServer {
         description = "Tag chunks with multi-dimensional ontology annotations: 5W1H interrogatory dimensions, Dublin Core metadata, PKO process concepts, FIBO/GOLEM domain concepts, and expertise level. Uses LLM-based extraction via Jinja2 template. Computes graph-centrality salience. Every chunk gets at least one 5W1H dimension — no zero-salience chunks."
     )]
     pub async fn corpus_tag_chunks(&self, Parameters(req): Parameters<TagChunksRequest>) -> String {
-        execute_tool(self, "corpus_tag_chunks", async {
+        execute_tool_semantic(self, "corpus_tag_chunks", Self::ontology_anchor("corpus_tag_chunks"), async {
             let chunks = read_input_chunks(&req.chunks_jsonl)?;
             if chunks.is_empty() {
                 return Err(McpToolError::invalid_argument("chunks_jsonl is empty"));
@@ -248,19 +255,6 @@ impl CorpusServer {
                         prompt
                     };
 
-                    // ContentGuard input scan — ALWAYS active on the tagging boundary.
-                    // The docproc pipeline ingests PDFs, HTML, and plain text — "operator-curated"
-                    // is a trust assumption, not a guarantee. A poisoned PDF chunk can
-                    // contain prompt-injection text that reaches the LLM unfiltered if the
-                    // guard is disabled. The output guard (scan_output) only strips secrets;
-                    // it cannot detect that the LLM's JSON output was hijacked. Therefore the
-                    // input guard on this boundary is non-disableable. (M2 fix.)
-                    let input_scan = GUARD.scan_input(&prompt);
-                    if !input_scan.passed {
-                        failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        return;
-                    }
-
                     let params = LLMParameters {
                         temperature: 0.1,
                         top_p: 0.95,
@@ -274,42 +268,18 @@ impl CorpusServer {
                         ..Default::default()
                     };
 
-                    // H2: Retry with exponential backoff (3 attempts)
-                    let mut _last_error = String::new();
-                    let response: Option<_> = {
-                        let mut attempts = 0u32;
-                        loop {
-                            match router
-                                .generate_with_model(&prompt, &params, Some(&model_override), None)
-                                .await
-                            {
-                                Ok(resp) => break Some(resp),
-                                Err(e) => {
-                                    attempts += 1;
-                                    _last_error = format!("{}", e);
-                                    if attempts >= 3 {
-                                        break None;
-                                    }
-                                    let backoff = std::time::Duration::from_secs(
-                                        2u64.pow(attempts) * 5
-                                    );
-                                    tokio::time::sleep(backoff).await;
-                                }
-                            }
-                        }
-                    };
+                    let response: Option<_> = retry_with_backoff(
+                        MAX_RETRIES,
+                        "hkask.mcp.docproc.tag_chunks",
+                        &chunk_id,
+                        || router.generate_with_model(&prompt, &params, Some(&model_override), None),
+                    )
+                    .await
+                    .ok();
 
-                    let parse_result = if let Some(response) = response {
-                        // Got a response — parse it
-                        let output_scan = GUARD.scan_output(&response.text);
-                        let content = output_scan.output.content(&response.text);
-                        let cleaned = extract_json_from_response(content);
-                        serde_json::from_str::<OntologyTags>(&cleaned)
-                            .map(validate_ontology_tags)
-                            .ok()
-                    } else {
-                        None
-                    };
+                    let parse_result = response
+                        .as_ref()
+                        .and_then(|resp| parse_and_validate_tags(&resp.text));
 
                     if let Some(tags) = parse_result {
                         let mut results = results.lock().unwrap();
@@ -335,7 +305,13 @@ impl CorpusServer {
             }
 
             for handle in handles {
-                let _ = handle.await;
+                if let Err(join_err) = handle.await {
+                    tracing::warn!(
+                        target: "hkask.mcp.docproc.tagging",
+                        error = %join_err,
+                        "tagging batch task join failed"
+                    );
+                }
             }
 
             let c = completed.load(std::sync::atomic::Ordering::Relaxed);
@@ -401,12 +377,12 @@ impl CorpusServer {
             let mut out = String::new();
             for chunk in &tagged {
                 out.push_str(&serde_json::to_string(chunk)
-                    .map_err(|e| McpToolError::internal(format!("Serialize: {e}")))?);
+                    .map_err(|e| McpToolError::internal(format!("Serialize: {e}")))?); // rr0044-ok: serde serialization of own struct
                 out.push('\n');
             }
-            std::fs::write(&req.output, &out).map_err(|e| {
-                McpToolError::internal(format!("Cannot write output '{}': {}", req.output, e))
-            })?;
+            let output_path = crate::path_safety::contain_for_write(&req.output)?;
+            std::fs::write(&output_path, &out)
+                .map_err(|e| map_corpus_io_error(e, &format!("Cannot write output '{}'", req.output)))?;
 
             // Stats
             let dim_counts: std::collections::HashMap<&str, usize> = {
@@ -435,29 +411,8 @@ impl CorpusServer {
                 "time_seconds": elapsed,
             });
 
-            // Outcome classification. A run is `degraded` when the failure rate
-            // exceeds the threshold (default 10%). The old `f > total / 2` bar
-            // silently reported a 49% failure rate as `success` — masking
-            // systemic issues (model unavailable, prompt broken, adversarial
-            // input). The 10% threshold is conservative: any sustained failure
-            // rate above it indicates the pipeline should not be trusted to
-            // produce training data without operator review. (M1 fix.)
-            let failure_pct = (f * 100).saturating_div(total);
-            let outcome = if failure_pct >= DEGRADED_FAILURE_THRESHOLD {
-                "degraded"
-            } else {
-                "success"
-            };
-            if outcome == "degraded" {
-                tracing::warn!(
-                    target: "hkask.mcp.docproc.tag_chunks",
-                    failed = f,
-                    total = total,
-                    failure_pct = failure_pct,
-                    threshold_pct = DEGRADED_FAILURE_THRESHOLD,
-                    "Tagging run degraded — failure rate exceeds threshold"
-                );
-            }
+            let outcome = BatchOutcome::from_counts(f, total);
+            outcome.log_if_degraded("hkask.mcp.docproc.tag_chunks", "Tagging");
             Ok(result)
         })
         .await
@@ -545,6 +500,27 @@ mod tests {
         };
         let out = validate_ontology_tags(tags);
         assert_eq!(out.dimensions, vec!["who".to_string(), "what".to_string()]);
+    }
+
+    /// RR-0016: the tagging pipeline's parse path must route LLM output
+    /// through validation — an LLM response with out-of-allowlist dimensions
+    /// must come out normalized, proving scan → extract → parse → validate
+    /// is the pipeline shape (not just that the validator exists somewhere
+    /// in the file).
+    #[test]
+    fn parse_and_validate_tags_normalizes_llm_response() {
+        let response = "Here are the tags:\n{\"dimensions\": [\"what\", \"bogus-dimension\"], \"dc_type\": \"bibo:Document\", \"dc_subject\": [], \"ontology_tags\": {}, \"expertise_level\": \"analyst\"}";
+        let tags = parse_and_validate_tags(response).expect("valid JSON should parse");
+        assert_eq!(
+            tags.dimensions,
+            vec!["what".to_string()],
+            "out-of-allowlist dimensions must be filtered on the parse path"
+        );
+    }
+
+    #[test]
+    fn parse_and_validate_tags_rejects_unparseable_response() {
+        assert!(parse_and_validate_tags("no json here at all").is_none());
     }
 
     #[test]

@@ -24,13 +24,8 @@
 #}
 
 [inference]
+max_tokens = 2048
 template_type: KnowAct
-lexicon_terms:
-- charter
-- probe
-- oracle
-- taxonomize
-- report
 contract:
   input:
     target: object
@@ -41,7 +36,6 @@ contract:
     probes_executed: integer
     findings: array
     summary: object
-energy_cap: 8192
 visibility: Public
 
 ---

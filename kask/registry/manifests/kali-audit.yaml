@@ -1,10 +1,10 @@
 # Kali Audit Process Manifest
-# ℏKask v0.31.0 — Security review as convergent PDCA
+# ℏKask v0.34.0 — Security review as convergent PDCA
 # Phased: select-surface → audit → report → convergence-check → loop
 #
 # Standards: OWASP LLM Top 10 (2025), MITRE ATLAS v5.1, NIST SSDF SP 800-218A
-# Sources: Microsoft Research (Spotlighting, FIDES), OpenAI (Instruction Hierarchy),
-#   ANSSI Secure Rust Guidelines, RustSec, Trail of Bits, Thinkst canarytokens
+# Sources: Microsoft Research (FIDES), OpenAI (Instruction Hierarchy),
+#   ANSSI Secure Rust Guidelines, RustSec, Trail of Bits
 #
 # Forward-adaptable design:
 # - Audit template consumes regression library at runtime (coverage grows with library)
@@ -28,20 +28,19 @@ manifest:
     defenses, and surfaces are added as regression entries and defense layers
     without template changes.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  # Rationale: 0.10 — stricter than bug-hunt (0.25) because security findings
-  # are higher-stakes. A 0.10 threshold means no critical/high findings remain
-  # and >= 6/8 defense layers are present. Medium findings are tolerated but flagged.
-  threshold: 0.10
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: step_5_result.convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
+  target_artifacts_field: "current_artifacts"
 
 gas:
   cap: 100000
@@ -57,7 +56,7 @@ rjoule:
 inputs:
   - name: target_surface
     type: string
-    required: true
+    required: false
     description: >
       The surface to audit: `code`, `template`, `supply-chain`, `mcp`, `config`,
       `llm-io`, or `auto` (discover from filesystem).
@@ -92,9 +91,9 @@ steps:
     renderer: minijinja
     template_ref: kali-audit/select-surface
     gas_cap: 2048
-    timeout_seconds: 30
+    timeout_seconds: 120
     input_mapping:
-      target_surface: "{{ target_surface }}"
+      target_surface: "{{ task | default(target_surface) }}"
       target_path: "{{ target_path }}"
       regression_library: "{{ regression_library | default([]) }}"
 
@@ -131,7 +130,7 @@ steps:
     renderer: minijinja
     template_ref: kali-audit/report
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
       findings: "{{ step_2_result.findings | default([]) }}"
       coverage: "{{ step_2_result.coverage | default({}) }}"
@@ -150,7 +149,7 @@ steps:
     renderer: minijinja
     template_ref: kali-audit/taxonomy-map
     gas_cap: 2048
-    timeout_seconds: 60
+    timeout_seconds: 120
     condition: "step_1_result.selected_surface == 'supply-chain'"
     input_mapping:
       findings: "{{ step_2_result.findings | default([]) }}"
@@ -158,34 +157,29 @@ steps:
       selected_surface: "{{ step_1_result.selected_surface | default(target_surface) }}"
 
   - ordinal: 5
-    action: select
+    action: compute
+    compute_ref: lisp.eval
     description: >
-      Compute convergence metric via defense-layer coverage + residual risk +
-      CWE coverage + regression library growth. Converged when metric <= 0.10.
-    renderer: minijinja
-    template_ref: kali-audit/convergence-check
-    gas_cap: 2048
-    timeout_seconds: 30
+      Compute structural-validity score from step 3's actual report output.
+      The convergence signal is the count of open critical + high findings:
+      length(report.findings_by_severity.critical) +
+      length(report.findings_by_severity.high). Lower = more converged
+      (zero critical/high findings = converged clean). If report or any
+      severity array is absent, the form errors (no silent default),
+      surfacing a broken report step rather than masking it with a flat 1.0.
+    gas_cap: 100
+    timeout_seconds: 10
     input_mapping:
-      findings_count: "{{ step_2_result.findings | default([]) | length }}"
-      critical_count: "{{ step_2_result.coverage.checks_failed | default(0) }}"
-      high_count: 0
-      medium_count: 0
-      low_count: 0
-      defense_layers_present: "{{ step_2_result.coverage.defense_layers_present | default([]) }}"
-      defense_layers_total: 8
-      cwe_classes_checked: "{{ step_2_result.coverage.cwe_classes_covered | default([]) }}"
-      cwe_classes_total: 0
-      regression_library_size: "{{ step_1_result.known_regressions | default([]) | length }}"
-      taxonomy_mappings: "{{ step_4_result.taxonomy_mappings | default([]) }}"
-      previous_metric: 1.0
-    fusion: false
+      form: "(+ (length (assoc \"critical\" (assoc \"findings_by_severity\" (assoc \"report\" step_3_result)))) (length (assoc \"high\" (assoc \"findings_by_severity\" (assoc \"report\" step_3_result)))))"
+      env:
+        step_3_result: "{{ step_3_result }}"
 
   - ordinal: 6
     action: loop
     description: Re-enter audit cycle if convergence is not met.
     input_mapping:
       loop_target: "{{ 1 }}"
+      convergence_signal: "{{ step_5_result }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -193,37 +187,6 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: kali-audit/select-surface
-      gas_budget: 2048
-    - resource: template
-      action: render
-      template_id: kali-audit/audit
-      gas_budget: 8192
-    - resource: template
-      action: render
-      template_id: kali-audit/report
-      gas_budget: 4096
-    - resource: template
-      action: render
-      template_id: kali-audit/taxonomy-map
-      gas_budget: 2048
-    - resource: template
-      action: render
-      template_id: kali-audit/convergence-check
-      gas_budget: 2048
-    - resource: manifest
-      action: execute
-      template_id: kali-audit
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true
 
 ledger:
   emit_spans: true

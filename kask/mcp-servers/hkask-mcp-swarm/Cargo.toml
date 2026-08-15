@@ -1,0 +1,64 @@
+[package]
+name = "hkask-mcp-swarm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Agent swarm MCP server — Agent Bestiary World catalogue, workspaces, and Xaman Ek curator"
+
+[lib]
+name = "hkask_mcp_swarm"
+path = "src/hkask_mcp_swarm.rs"
+
+[[bin]]
+name = "hkask-mcp-swarm"
+path = "src/main.rs"
+
+[[test]]
+name = "swarm_gap_properties"
+path = "tests/swarm_gap_properties.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "swarm_live_probes"
+path = "tests/swarm_live_probes.rs"
+required-features = ["test-utils"]
+
+[dependencies]
+hkask-mcp-server.workspace = true
+hkask-bridge-ontology.workspace = true
+hkask-types.workspace = true
+hkask-ledger.workspace = true
+hkask-inference.workspace = true
+hkask-storage.workspace = true
+hkask-memory.workspace = true
+rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
+regex = { workspace = true }
+a2a = { workspace = true }
+tiny_http = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+test-utils = []
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+proptest = { workspace = true }
+hkask-test-harness = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+regex = { workspace = true }

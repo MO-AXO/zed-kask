@@ -1,5 +1,5 @@
 # Grill-Me Process Manifest
-# ℏKask v0.31.0 — Socratic interrogation as convergent PDCA
+# ℏKask v0.34.0 — Socratic interrogation as convergent PDCA
 
 manifest:
   id: grill-me
@@ -10,16 +10,17 @@ manifest:
     generates Socratic challenge rounds, synthesizes assessment,
     computes convergence, and iterates until coverage is sufficient.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  threshold: 0.25
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: step_4_result.convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
 
 gas:
@@ -36,21 +37,13 @@ rjoule:
 inputs:
   - name: topic
     type: string
-    required: true
+    required: false
   - name: start_level
     type: integer
     required: false
 
-fusion:
-  judge: deepseek-v4-pro
-  panel:
-    - Kimi2.7
-    - Qwen3.7 Max
-    - GLM5.2
-  mode: deliberation
-  skills:
-    - essentialist
-  max_rounds: 3
+ledger:
+  span_namespace: reg.skill.grill-me
 
 steps:
   - ordinal: 1
@@ -61,7 +54,7 @@ steps:
     gas_cap: 3000
     timeout_seconds: 30
     input_mapping:
-      topic: "{{ topic }}"
+      topic: "{{ task | default(topic) }}"
       current_level: "{{ start_level | default(1) }}"
       solid_ratio: 0.0
       total_questions: 0
@@ -72,44 +65,98 @@ steps:
     renderer: minijinja
     template_ref: grill-me/grill-me-round
     gas_cap: 7000
-    timeout_seconds: 90
+    timeout_seconds: 150
     input_mapping:
       topic: "{{ topic }}"
       current_level: "{{ step_1_result.new_level | default(start_level | default(1)) }}"
-      round_number: 1
+      round_number: "{{ prev_step_2_result.round_number | default(0) + 1 }}"
       mode: "interrogate"
-      previous_answers: "{{ [] }}"
-      assessment_so_far: "{{ {} }}"
+      previous_answers: "{{ prev_step_2_result.all_answers | default([]) }}"
+      assessment_so_far: "{{ prev_step_2_result.assessment | default({}) }}"
 
+  # ── Step 3: Lisp deterministic step — question-level coverage check ──
+  # The LLM generates questions across 5 difficulty levels (Recall, Mechanism,
+  # Rationale, Edge Cases, Synthesis) but is unreliable at checking whether its
+  # question set actually spans enough levels — it often reports "covers 4 levels"
+  # when all questions are Recall-level. This Lisp step deterministically counts
+  # distinct levels present in the generated questions and flags insufficient
+  # coverage (< 3 distinct levels). Returns a list of defect strings — empty =
+  # passed, non-empty = step 4 (assess) notes the coverage gap.
+  #
+  # This is the symbolic-neural scaffolding pattern: deterministic Lisp prunes
+  # the LLM's probabilistic question generation by checking structural diversity
+  # the LLM cannot reliably self-evaluate.
   - ordinal: 3
+    action: compute
+    compute_ref: lisp.eval
+    description: >
+      Lisp question-level coverage check. Deterministically counts distinct
+      difficulty levels (Recall, Mechanism, Rationale, Edge Cases, Synthesis)
+      present in the generated questions. Flags insufficient coverage (< 3
+      distinct levels). Returns a list of defect strings. No LLM round-trip.
+    gas_cap: 100
+    timeout_seconds: 10
+    input_mapping:
+      form: >
+        (let ((questions (assoc "questions" step_2_result)))
+          (if (is_null questions)
+              (list "no_questions_field")
+              (begin
+                (define count-level
+                  (lambda (qs level-name count)
+                    (if (is_null qs)
+                        count
+                        (let ((q (car qs)))
+                          (let ((ql (assoc "level" q)))
+                            (let ((ql-str (if (is_null ql) "" ql)))
+                              (count-level
+                                (cdr qs)
+                                level-name
+                                (if (string= ql-str level-name) (+ count 1) count))))))))
+                (define n-recall (count-level questions "Recall" 0))
+                (define n-mechanism (count-level questions "Mechanism" 0))
+                (define n-rationale (count-level questions "Rationale" 0))
+                (define n-edge (count-level questions "Edge Cases" 0))
+                (define n-synthesis (count-level questions "Synthesis" 0))
+                (define distinct
+                  (+ (if (> n-recall 0) 1 0)
+                     (if (> n-mechanism 0) 1 0)
+                     (if (> n-rationale 0) 1 0)
+                     (if (> n-edge 0) 1 0)
+                     (if (> n-synthesis 0) 1 0)))
+                (if (< distinct 3)
+                    (list "insufficient_level_coverage_below_3")
+                    (list)))))
+      env:
+        step_2_result: "{{ step_2_result }}"
+
+  - ordinal: 4
     action: select
     description: Synthesize final assessment and recommendations.
     renderer: minijinja
     template_ref: grill-me/grill-me-assess
     gas_cap: 4000
-    timeout_seconds: 45
+    timeout_seconds: 150
     input_mapping:
       topic: "{{ topic }}"
       all_answers: "{{ step_2_result.all_answers | default(step_2_result.evaluations | default([])) }}"
       assessment: "{{ step_2_result.assessment | default({}) }}"
+      level_coverage_defects: "{{ step_3_result | default([]) }}"
 
-  - ordinal: 4
-    action: select
-    description: Compute normalized convergence metric for grill-me cycle.
-    renderer: minijinja
-    template_ref: shared/convergence-check
-    gas_cap: 2000
-    timeout_seconds: 30
-    input_mapping:
-      primary_result: "{{ step_3_result }}"
-      convergence_description: "knowledge coverage is sufficient"
-      include_blockers: false
-    fusion: false
   - ordinal: 5
     action: loop
-    description: Re-enter interrogation cycle if convergence is not met, recalibrating difficulty from assessment.
+    description: >
+      Re-enter interrogation cycle if convergence is not met, recalibrating
+      difficulty from assessment. The loop re-enters at step 1 (calibrate)
+      so the difficulty level is adjusted before generating the next round.
+      If the Lisp level-coverage check (step 3) found insufficient coverage,
+      the recalibrated level directs the LLM to generate questions at the
+      missing levels.
     input_mapping:
       loop_target: "{{ 1 }}"
+      # Push the recommendation count into convergence_signal so the Cauchy
+      # criterion can detect when the assessment has stopped moving.
+      convergence_signal: "{{ step_4_result.recommendations | default([]) | length }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -117,30 +164,3 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: grill-me/grill-me-escalate
-      gas_budget: 3000
-    - resource: template
-      action: render
-      template_id: grill-me/grill-me-round
-      gas_budget: 7000
-    - resource: template
-      action: render
-      template_id: grill-me/grill-me-assess
-      gas_budget: 4000
-    - resource: template
-      action: render
-      template_id: shared/convergence-check
-      gas_budget: 2000
-    - resource: manifest
-      action: execute
-      template_id: grill-me
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true

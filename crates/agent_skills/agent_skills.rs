@@ -10,23 +10,93 @@ use std::sync::Arc;
 use url::Url;
 use util::paths::component_matches_ignore_ascii_case;
 
-/// First segment of the skills directory path: `.agents`.
+/// First segment of the project-local skills directory path: `.agents`.
+/// Used only for project-local skills (`.agents/skills/` inside a worktree).
+/// Global skills use `{kask_data_dir}/skills/` (D28 — Standardized Artifact Storage).
 pub const AGENTS_DIR_NAME: &str = ".agents";
 
 /// Second segment of the skills directory path: `skills`.
 pub const SKILLS_DIR_NAME: &str = "skills";
 
-/// User-facing display form of the global skills directory path — i.e.
-/// what a human should see in messages and prompts, with the platform's
-/// native path separator and home-directory shorthand.
+/// The canonical list of core skill names. Core skills are always-on,
+/// re-seeded on every startup (overwriting user edits), locked against
+/// editing, and undisableable. They cannot be shadowed by project-local
+/// skills of the same name.
 ///
-/// Windows doesn't recognize `~` as the home directory, so the env-var
-/// form is used there instead.
+/// This list is the single source of truth for which skills are core. It is
+/// consumed by:
+/// - `seed_shipped_skills` — to decide whether to overwrite or seed-once.
+/// - `kask_bridge::seed_registry_to_disk` — same, for manifest.yaml + .j2
+///   templates.
+/// - `apply_skill_overrides` — to enforce unshadowability.
+/// - `skill_tool` — to skip the authorization prompt.
+/// - `settings_ui::skills_setup` — to render core skills with a distinct
+///   visual treatment and hide edit/delete/visibility controls.
+///
+/// A skill is core if it meets ALL of:
+/// 1. System-critical: the skill system, agent loop, curator, or an MCP
+///    server/panel depends on it being present and unmodified.
+/// 2. Called autonomously by code, or hard-delegated to by another core
+///    skill, or named in the Curator's static context as an anchored
+///    methodology.
+/// 3. All delegation targets (hard or optional) of a core skill must also
+///    be core — an editable delegate is a backdoor around consent/trust.
+pub const CORE_SKILL_NAMES: &[&str] = &[
+    // Skill-authoring + maintenance
+    "create-skill",
+    "skill-bundler",
+    "skill-discovery",
+    "skill-logic-audit",
+    "skill-maintenance",
+    "skill-router",
+    // Curator methodologies
+    "metacognition",
+    "pragmatic-cybernetics",
+    "pragmatic-semantics",
+    "superforecasting",
+    // Universal quality gates
+    "code-review",
+    "essentialist",
+    "refactor-architecture",
+    // Essentialist delegates
+    "deep-module",
+    "coding-guidelines",
+    // skill-router integration
+    "task-breakdown",
+    // MCP server / panel invocations
+    "swarm-compose-guide",
+    "swarm-intelligence",
+    "swarm-steering",
+    "kanban-task-management",
+    // code-review optional delegates (Q16: editable delegate = backdoor)
+    "kali-audit",
+    "bug-hunt",
+];
+
+/// Returns `true` if the given skill name is a core skill.
+pub fn is_core_skill(name: &str) -> bool {
+    CORE_SKILL_NAMES.contains(&name)
+}
+
+/// Returns `true` if the given skill name is reserved — i.e. it is the name
+/// of a core skill and cannot be used by a user-authored skill. A user
+/// skill (frontmatter `core: false` or missing) whose name is reserved is
+/// refused at load time and at save time, so a hand-edited or
+/// marketplace-installed file can never usurp a core skill's identity.
+/// Legitimate core skills (frontmatter `core: true`) are exempt — they
+/// are the only skills allowed to bear a reserved name.
+pub fn is_reserved_skill_name(name: &str) -> bool {
+    is_core_skill(name)
+}
+
+/// User-facing display form of the global skills directory path.
+///
+/// zed-kask: D28 — global skills live under the kask data root
+/// (`~/.local/share/hkask/skills/`), not the app data root.
 #[cfg(target_os = "windows")]
-pub const GLOBAL_SKILLS_DIR_DISPLAY: &str =
-    concatcp!("%USERPROFILE%\\", AGENTS_DIR_NAME, "\\", SKILLS_DIR_NAME);
+pub const GLOBAL_SKILLS_DIR_DISPLAY: &str = r"%LOCALAPPDATA%\hkask\skills";
 #[cfg(not(target_os = "windows"))]
-pub const GLOBAL_SKILLS_DIR_DISPLAY: &str = concatcp!("~/", AGENTS_DIR_NAME, "/", SKILLS_DIR_NAME);
+pub const GLOBAL_SKILLS_DIR_DISPLAY: &str = "~/.local/share/hkask/skills";
 
 /// Opaque identifier for the project scope a skill was loaded from.
 ///
@@ -122,16 +192,16 @@ pub struct Skill {
     /// is retained for struct compatibility but is always `None` in production.
     #[allow(dead_code)]
     pub embedded_body: Option<&'static str>,
+    /// When `true`, this skill is a core skill: always-on, re-seeded on every
+    /// startup, locked against editing, undisableable, and unshadowable.
+    /// See `SkillMetadata::core` for the full contract.
+    pub core: bool,
 }
 
 /// Indicates where a skill was loaded from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillSource {
-    /// Compiled into the Zed binary. These are always available and have
-    /// the lowest override priority (global and project-local skills can
-    /// shadow them).
-    BuiltIn,
-    /// From ~/.agents/skills/
+    /// From the global skills directory (zed-kask D28: `{kask_data_dir}/skills/`).
     Global,
     /// From {project}/.agents/skills/
     ProjectLocal {
@@ -139,7 +209,7 @@ pub enum SkillSource {
         worktree_root_name: Arc<str>,
     },
     /// Installed from the kask marketplace. Lives under
-    /// `~/.agents/skills/_marketplace/{source_user}/{skill_name}/` so it
+    /// `{global_skills_dir}/_marketplace/{source_user}/{skill_name}/` so it
     /// never overwrites a locally-authored skill of the same name. The
     /// `original_skill_id` is the canonical id (`{source_user}/{skill_name}`)
     /// the marketplace catalog indexes it under.
@@ -155,20 +225,18 @@ pub enum SkillSource {
 
 impl SkillSource {
     /// Precedence for resolving same-named skills. Higher values shadow
-    /// lower ones: `ProjectLocal` > `Global` > `Public` > `BuiltIn`. Two
-    /// sources returning equal precedence (e.g. two project-local skills
-    /// from different worktrees) leave the winner up to the caller, which by
+    /// lower ones: `ProjectLocal` > `Global` > `Public`. Two sources
+    /// returning equal precedence (e.g. two project-local skills from
+    /// different worktrees) leave the winner up to the caller, which by
     /// convention keeps the first one in iteration order.
     ///
     /// Adding a new `SkillSource` variant should be a one-line change
     /// here — every consumer routes through this method so the hierarchy
     /// stays in sync.
-    // zed-kask: `Public` (marketplace-installed) sits between `BuiltIn` and
-    // `Global` so a local skill of the same name wins. Pinned by
-    // `test_skill_source_public_precedence_between_built_in_and_global`.
+    // zed-kask: `Public` (marketplace-installed) sits below `Global` so a
+    // local skill of the same name wins.
     pub fn precedence(&self) -> u8 {
         match self {
-            Self::BuiltIn => 0,
             Self::Public { .. } => 1,
             Self::Global => 2,
             Self::ProjectLocal { .. } => 3,
@@ -195,7 +263,6 @@ impl SkillSource {
     // skills. Pinned by `test_skill_source_public_display_label_is_namespaced`.
     pub fn display_label(&self) -> &str {
         match self {
-            Self::BuiltIn => "built-in",
             Self::Global => "global",
             Self::ProjectLocal {
                 worktree_root_name, ..
@@ -208,7 +275,7 @@ impl SkillSource {
 
     pub fn scope_prefix(&self) -> &str {
         match self {
-            Self::BuiltIn | Self::Global | Self::Public { .. } => "",
+            Self::Global | Self::Public { .. } => "",
             Self::ProjectLocal {
                 worktree_root_name, ..
             } => worktree_root_name.as_ref(),
@@ -230,7 +297,7 @@ impl SkillSource {
     // empty scope. Pinned by `test_skill_source_public_matches_empty_scope`.
     pub fn matches_scope(&self, scope: &str) -> bool {
         match self {
-            Self::BuiltIn | Self::Global | Self::Public { .. } => scope.is_empty(),
+            Self::Global | Self::Public { .. } => scope.is_empty(),
             Self::ProjectLocal {
                 worktree_root_name, ..
             } => !scope.is_empty() && worktree_root_name.as_ref() == scope,
@@ -279,6 +346,13 @@ pub struct SkillMetadata {
     /// dependency, regardless of source.
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// When `true`, this skill is a core skill: always-on, re-seeded on every
+    /// startup (overwriting user edits), locked against editing, and
+    /// undisableable. Core skills cannot be shadowed by project-local skills
+    /// of the same name. The `core` flag is the zed-kask mechanism for
+    /// distinguishing system-critical kask-skills from user kask-skills.
+    #[serde(default)]
+    pub core: bool,
 }
 
 /// Minimal skill info for system prompt.
@@ -357,6 +431,7 @@ pub fn parse_skill_frontmatter(
         visibility: metadata.visibility,
         dependencies: metadata.dependencies,
         embedded_body: None,
+        core: metadata.core,
     })
 }
 
@@ -389,6 +464,17 @@ fn parse_skill_file_content_for_loading(
     let (metadata, body) = extract_skill_frontmatter(content)?;
 
     validate_name(&metadata.name).map_err(anyhow::Error::msg)?;
+    // A non-core skill cannot bear a reserved (core) name. This blocks a
+    // hand-edited or marketplace-installed SKILL.md from usurping a core
+    // skill's identity at load time. Legitimate core skills (frontmatter
+    // `core: true`) pass this check.
+    if is_reserved_skill_name(&metadata.name) && !metadata.core {
+        anyhow::bail!(
+            "skill name '{}' is reserved for a core skill; \
+             a user skill cannot use this name",
+            metadata.name
+        );
+    }
     let load_warnings =
         validate_description_for_loading(&metadata.description).map_err(anyhow::Error::msg)?;
 
@@ -649,7 +735,7 @@ pub async fn load_skills_from_directory(
 }
 
 /// zed-kask: Load marketplace-installed skills from
-/// `~/.agents/skills/_marketplace/{source_user}/{skill_name}/`.
+/// `{global_skills_dir}/_marketplace/{source_user}/{skill_name}/`.
 ///
 /// The marketplace directory has a two-level namespace: `_marketplace/`
 /// contains `{source_user}/` directories, each of which contains
@@ -668,6 +754,10 @@ pub async fn load_marketplace_skills(
 
     // List source_user directories.
     let Ok(mut user_entries) = fs.read_dir(marketplace_dir).await else {
+        log::warn!(
+            "Failed to read marketplace directory: {} — returning empty skill list",
+            marketplace_dir.display()
+        );
         return Vec::new();
     };
     while let Some(Ok(user_path)) = user_entries.next().await {
@@ -682,6 +772,10 @@ pub async fn load_marketplace_skills(
 
         // List skill_name directories under each source_user.
         let Ok(mut skill_entries) = fs.read_dir(&user_path).await else {
+            log::warn!(
+                "Failed to read marketplace user directory: {} — skipping",
+                user_path.display()
+            );
             continue;
         };
         while let Some(Ok(skill_path)) = skill_entries.next().await {
@@ -716,6 +810,10 @@ pub async fn load_marketplace_skills(
 /// names it. See `crates/agent_skills/README.md` for why we don't recurse.
 async fn find_skill_files(fs: &Arc<dyn Fs>, directory: &Path) -> Vec<PathBuf> {
     let Ok(mut entries) = fs.read_dir(directory).await else {
+        log::warn!(
+            "Failed to read skill directory: {} — returning empty",
+            directory.display()
+        );
         return Vec::new();
     };
 
@@ -731,6 +829,10 @@ async fn find_skill_files(fs: &Arc<dyn Fs>, directory: &Path) -> Vec<PathBuf> {
             let fs = fs.clone();
             async move {
                 let Ok(Some(metadata)) = fs.metadata(&entry_path).await else {
+                    log::warn!(
+                        "Failed to stat skill entry: {} — skipping",
+                        entry_path.display()
+                    );
                     return None;
                 };
                 if !metadata.is_dir {
@@ -827,144 +929,135 @@ pub fn read_skill_body_from_content(
     Ok(body.trim().to_string())
 }
 
-/// Content of the built-in `create-skill` SKILL.md, embedded at compile time.
-const CREATE_SKILL_CONTENT: &str = include_str!("builtin/create-skill/SKILL.md");
-
-/// Returns the set of skills that are compiled into the Zed binary.
-pub fn builtin_skills() -> Vec<Skill> {
-    let mut skills = Vec::new();
-    if let Ok(skill) = parse_builtin_skill("create-skill", CREATE_SKILL_CONTENT) {
-        skills.push(skill);
-    }
-    skills
-}
-
-/// Parse a built-in skill from its embedded SKILL.md content. The skill
-/// gets a synthetic `<built-in>` path since it doesn't live on disk.
-fn parse_builtin_skill(name: &str, content: &'static str) -> Result<Skill> {
-    let (metadata, body) = extract_frontmatter(content)?;
-    validate_name(&metadata.name).map_err(anyhow::Error::msg)?;
-    validate_description(&metadata.description).map_err(anyhow::Error::msg)?;
-
-    let synthetic_dir = PathBuf::from(format!("<built-in>/{}", name));
-    let synthetic_path = synthetic_dir.join(SKILL_FILE_NAME);
-
-    Ok(Skill {
-        name: metadata.name,
-        description: metadata.description,
-        source: SkillSource::BuiltIn,
-        directory_path: synthetic_dir,
-        skill_file_path: synthetic_path,
-        load_warnings: Vec::new(),
-        disable_model_invocation: metadata.disable_model_invocation,
-        visibility: metadata.visibility,
-        dependencies: metadata.dependencies,
-        embedded_body: Some(body.trim()),
-    })
-}
-
-/// All built-in skills as `(name, raw_content)` pairs. Used by
-/// `builtin_skill_content` to serve the full SKILL.md without disk I/O.
-const BUILTIN_SKILL_ENTRIES: &[(&str, &str)] = &[("create-skill", CREATE_SKILL_CONTENT)];
-
-/// Look up the full embedded content of a built-in skill by its
-/// synthetic file path. Returns `None` if the path doesn't match any
-/// built-in skill.
-pub fn builtin_skill_content(skill_file_path: &Path) -> Option<&'static str> {
-    BUILTIN_SKILL_ENTRIES.iter().find_map(|(name, content)| {
-        let expected = PathBuf::from(format!("<built-in>/{}", name)).join(SKILL_FILE_NAME);
-        (expected == skill_file_path).then_some(*content)
-    })
-}
-
-// Auto-generated by build.rs — the kask SKILL.md files shipped in this
-// repo's `.agents/skills/` directory, embedded at compile time so they're
-// available as `SkillSource::Global` in every project regardless of install
-// location or CWD.
+// Auto-generated by build.rs — the kask SKILL.md files authored in this
+// repo's `.agents/skills/` directory, compiled in as a **one-time seed
+// payload**. At startup `seed_shipped_skills` writes each one to the user's
+// on-disk global skills directory (`paths::data_dir()/agents/skills/`).
+// The disk copy is the single runtime source of truth — skills are loaded
+// from disk via `load_skills_from_directory`, never from this compiled
+// payload. User edits take effect immediately without recompilation.
 //
 // The SKILL.md is the *interface* (frontmatter parsed for discovery); the
-// *implementation* lives in `kask/registry/manifests/` and is embedded by
-// `hkask-templates/build.rs`.
+// *implementation* (YAML manifests + Jinja2 templates) is seeded to disk by
+// the `hkask-templates` seeding path and resolved from disk at runtime by
+// `BridgeManifestExecutor` and `TemplateRenderer`.
 include!(concat!(env!("OUT_DIR"), "/embedded_global_skills.rs"));
 
-/// Returns the kask skills shipped in this repo, parsed from their
-/// embedded SKILL.md files and tagged `SkillSource::Global`.
+/// Returns the `(name, raw_content)` pairs for the kask skills shipped with
+/// this binary, exactly as authored in `.agents/skills/`. Seed-only: used by
+/// [`seed_shipped_skills`] to materialise the skills on disk. Not used as a
+/// runtime catalog source — the catalog is built from disk.
+pub fn shipped_skill_seed() -> &'static [(&'static str, &'static str)] {
+    SHIPPED_SKILL_SEED_ENTRIES
+}
+
+/// Parse the frontmatter of a SKILL.md content string into [`SkillMetadata`].
+/// Public so the extensions panel can derive `(name, description)` from a
+/// seed entry without a synthetic file path. The seed entry name already
+/// equals the parsed `name` (validated at build time), so callers may use
+/// either as the skill identity.
+pub fn parse_skill_metadata(content: &str) -> Result<SkillMetadata> {
+    let (metadata, _body) = extract_skill_frontmatter(content)?;
+    Ok(metadata)
+}
+
+/// Materialise the shipped kask skills onto the user's disk if missing.
 ///
-/// These are the skills that live at `.agents/skills/` in the
-/// repo. Embedding them at build time means they're available in every
-/// project — not just when a worktree containing `zed-kask/.agents/skills/`
-/// is open and trusted. They load as `Global` (the same tier as
-/// user-installed skills at `~/.agents/skills/`), so a user who installs a
-/// same-named skill at `~/.agents/skills/<name>/` overrides the embedded
-/// copy: `apply_skill_overrides` keeps the first entry on ties, and the
-/// disk-loaded globals are passed in before the embedded globals by
-/// `build_project_context`.
+/// For each shipped skill in [`shipped_skill_seed`], writes
+/// `<skills_dir>/<name>/SKILL.md` when the file does not already exist. Existing
+/// files are **never overwritten** — user edits are sovereign. A user who
+/// deletes a shipped skill will see it re-seeded on the next startup; to
+/// suppress a skill instead, edit its `disable-model-invocation` frontmatter
+/// or remove it from the catalog via the skills UI.
 ///
-/// Each skill gets a synthetic `<embedded-global>/<name>/SKILL.md` path
-/// since the files don't live on the user's disk. The SKILL.md body is
-/// not retained — zed-kask never injects SKILL.md bodies; skills execute
-/// via YAML manifests in the kask registry.
-pub fn embedded_global_skills() -> Vec<Skill> {
-    let mut skills = Vec::with_capacity(EMBEDDED_GLOBAL_SKILL_ENTRIES.len());
-    for (name, content) in EMBEDDED_GLOBAL_SKILL_ENTRIES {
-        match parse_embedded_global_skill(name, content) {
-            Ok(skill) => skills.push(skill),
-            Err(error) => {
-                // A malformed shipped SKILL.md is a build-time bug, not a
-                // runtime user error. Log it so operators can diagnose
-                // which skill failed, but don't abort the whole catalog —
-                // one broken skill shouldn't hide the others.
-                log::warn!(
-                    "Failed to parse embedded global skill '{}': {}",
-                    name,
-                    error
-                );
-            }
+/// This is the sole mechanism by which a self-contained binary populates the
+/// on-disk skill catalog on a fresh install. After seeding, all discovery and
+/// editing happens against the disk copies — no compiled-in data is read at
+/// runtime, so changes take effect without recompilation or a new release.
+pub async fn seed_shipped_skills(fs: &dyn Fs, skills_dir: &Path) {
+    for (name, content) in shipped_skill_seed() {
+        let skill_dir = skills_dir.join(name);
+        let skill_file = skill_dir.join(SKILL_FILE_NAME);
+        let is_core = is_core_skill(name);
+
+        // Core skills are always overwritten on every startup so user edits
+        // cannot break system-critical functionality. User skills are seeded
+        // only if missing — user edits are sovereign.
+        if fs.is_file(&skill_file).await && !is_core {
+            continue;
+        }
+        if let Err(error) = fs.create_dir(&skill_dir).await {
+            log::warn!(
+                "Failed to create shipped skill directory '{}' for seeding: {error}",
+                skill_dir.display()
+            );
+            continue;
+        }
+        if let Err(error) = fs.write(&skill_file, content.as_bytes()).await {
+            log::warn!("Failed to seed shipped skill '{}': {error}", name);
         }
     }
-    skills
 }
 
-/// Parse an embedded kask SKILL.md into a `Skill` tagged
-/// `SkillSource::Global`. Mirrors `parse_builtin_skill` but uses a
-/// `<embedded-global>` synthetic path and drops the body (zed-kask never
-/// injects SKILL.md bodies — skills execute via YAML manifests).
-fn parse_embedded_global_skill(name: &str, content: &'static str) -> Result<Skill> {
-    let (metadata, _body) = extract_frontmatter(content)?;
-    validate_name(&metadata.name).map_err(anyhow::Error::msg)?;
-    validate_description(&metadata.description).map_err(anyhow::Error::msg)?;
-
-    let synthetic_dir = PathBuf::from(format!("<embedded-global>/{}", name));
-    let synthetic_path = synthetic_dir.join(SKILL_FILE_NAME);
-
-    Ok(Skill {
-        name: metadata.name,
-        description: metadata.description,
-        source: SkillSource::Global,
-        directory_path: synthetic_dir,
-        skill_file_path: synthetic_path,
-        load_warnings: Vec::new(),
-        disable_model_invocation: metadata.disable_model_invocation,
-        visibility: metadata.visibility,
-        dependencies: metadata.dependencies,
-        embedded_body: None,
-    })
-}
-
-/// Returns the global skills directory: `~/.agents/skills`.
+/// Returns the global skills directory.
 ///
-/// Other agents (e.g. Claude Code) already write skill files into this
-/// location, so a Zed installation may have skills here even before the
-/// rest of Zed's skills support ships.
+/// zed-kask: D28 — Standardized Artifact Storage. Global skills live
+/// under the kask data root (`{kask_data_dir}/skills/`), resolved via the
+/// `global_skills_dir_override` hook (set by `kask_bridge` at startup), NOT
+/// `paths::data_dir()/agents/skills/` (the zed-kask app data root). This
+/// keeps all kask artifacts under one rooted tree per the standardized
+/// storage layout (`kask/docs/architecture/standardized-artifact-storage.md`).
+///
+/// zed-kask skills are manifest-driven (manifest.yaml + Jinja2 templates
+/// executed via BridgeManifestExecutor), not SKILL.md body-injection. They
+/// are not portable to upstream Zed or any tool without the hKask cascade
+/// engine.
+///
+/// When the override is set (production, wired early in `main.rs`), returns
+/// the kask data-root skills path. When unset (tests, or pre-wiring), falls
+/// back to `paths::data_dir()/agents/skills/` so tests and the editor remain
+/// functional.
 ///
 /// In test builds, `paths::home_dir()` is hardcoded to a fixed path
 /// (e.g. `/Users/zed`), so all tests using this function operate on the
 /// same simulated home directory. Each test should use its own `FakeFs`
 /// instance to keep skill setups from leaking across tests.
 pub fn global_skills_dir() -> PathBuf {
-    paths::home_dir()
-        .join(AGENTS_DIR_NAME)
-        .join(SKILLS_DIR_NAME)
+    // zed-kask: D28 — check the override first.
+    if let Some(path) = global_skills_dir_override() {
+        return path;
+    }
+    paths::data_dir().join("agents").join(SKILLS_DIR_NAME)
+}
+
+// zed-kask: D28 — Standardized Artifact Storage.
+// Global hook for the kask data-root skills directory path. Mirrors the
+// `THREADS_DB_PATH_OVERRIDE` pattern (D28 in `agent.rs`). `agent_skills`
+// does NOT depend on `hkask-types` (preserving the §13.1 invariant); the
+// path is passed through this hook from `main.rs`.
+//
+// Uses a `Mutex` (not `OnceLock`) so the path can be replaced after startup
+// (e.g. if the operator changes the kask data directory). Per `.rules`,
+// `Mutex` hooks are re-settable and do not need the `Err`-branch warn.
+static GLOBAL_SKILLS_DIR_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Set the global skills directory override (D28 composition root).
+///
+/// Called by zed-kask's app startup to wire the canonical kask data-root
+/// skills path. When `None`, `global_skills_dir()` falls back to the
+/// upstream `paths::data_dir()/agents/skills/` path.
+pub fn set_global_skills_dir_override(path: Option<PathBuf>) {
+    *GLOBAL_SKILLS_DIR_OVERRIDE
+        .lock()
+        .expect("GLOBAL_SKILLS_DIR_OVERRIDE poisoned") = path;
+}
+
+/// Get the global skills directory override, if set.
+pub(crate) fn global_skills_dir_override() -> Option<PathBuf> {
+    GLOBAL_SKILLS_DIR_OVERRIDE
+        .lock()
+        .expect("GLOBAL_SKILLS_DIR_OVERRIDE poisoned")
+        .clone()
 }
 
 /// Project-local skills live at this path relative to a worktree root,
@@ -1068,10 +1161,9 @@ mod tests {
 
     #[test]
     fn test_skill_source_precedence_is_total_and_ordered() {
-        // Pin the hierarchy: project-local > global > public (marketplace) > built-in.
+        // Pin the hierarchy: project-local > global > public (marketplace).
         // Every override and conflict-resolution site routes through this,
         // so the rest of the codebase relies on it being correct.
-        let built_in = SkillSource::BuiltIn.precedence();
         let public = SkillSource::Public {
             source_user: "alice".into(),
             original_skill_id: "alice/bug-hunt".into(),
@@ -1084,10 +1176,6 @@ mod tests {
         }
         .precedence();
 
-        assert!(
-            built_in < public,
-            "public (marketplace) must shadow built-in"
-        );
         assert!(public < global, "global must shadow public (marketplace)");
         assert!(global < project, "project-local must shadow global");
 
@@ -1104,13 +1192,12 @@ mod tests {
     }
 
     // zed-kask: `SkillSource::Public` (marketplace-installed) precedence sits
-    // between `BuiltIn` and `Global` so a locally-authored skill of the same
-    // name shadows the marketplace copy. This is the core deviation from
-    // upstream (which has no marketplace source variant). Pinned here so a
-    // future refactor that reorders the precedence match arms fails loudly.
+    // below `Global` so a locally-authored skill of the same name shadows the
+    // marketplace copy. This is the core deviation from upstream (which has no
+    // marketplace source variant). Pinned here so a future refactor that
+    // reorders the precedence match arms fails loudly.
     #[test]
-    fn test_skill_source_public_precedence_between_built_in_and_global() {
-        let built_in = SkillSource::BuiltIn.precedence();
+    fn test_skill_source_public_precedence_below_global() {
         let public = SkillSource::Public {
             source_user: "alice".into(),
             original_skill_id: "alice/bug-hunt".into(),
@@ -1119,9 +1206,8 @@ mod tests {
         let global = SkillSource::Global.precedence();
 
         assert!(
-            built_in < public && public < global,
-            "Public must sit strictly between BuiltIn and Global: built_in={}, public={}, global={}",
-            built_in,
+            public < global,
+            "Public must sit strictly below Global: public={}, global={}",
             public,
             global
         );
@@ -1209,19 +1295,26 @@ Body.
         assert_eq!(skill.visibility, SkillVisibility::Public);
     }
 
-    // zed-kask: Built-in and embedded-global skills also default to
+    // zed-kask: Built-in and shipped skills also default to
     // `Private` visibility — they cannot be published (built-ins are part of
-    // the binary; embedded globals are shipped by the repo). This pins that
-    // the parse functions populate `visibility` from metadata.
+    // the binary; shipped skills are seeded from the repo catalog). This pins
+    // that the parse functions populate `visibility` from metadata.
     #[test]
-    fn test_builtin_skill_visibility_defaults_to_private() {
-        // `builtin_skills` returns the create-skill built-in; it should be
-        // Private by default since its SKILL.md has no visibility field.
-        let skills = builtin_skills();
-        let skill = skills
-            .iter()
-            .find(|s| s.name == "create-skill")
-            .expect("create-skill built-in should be present");
+    fn test_parse_skill_visibility_defaults_to_private() {
+        // A skill with no visibility field should default to Private.
+        let content = r#"---
+name: test-visibility-skill
+description: A test skill for visibility defaults
+---
+
+# Test
+"#;
+        let skill = parse_skill_frontmatter(
+            Path::new("/skills/test-visibility-skill/SKILL.md"),
+            content,
+            SkillSource::Global,
+        )
+        .expect("skill should parse");
         assert_eq!(skill.visibility, SkillVisibility::Private);
     }
 
@@ -2176,6 +2269,7 @@ description: A skill with no body content
             visibility: SkillVisibility::Private,
             dependencies: Vec::new(),
             embedded_body: None,
+            core: false,
         };
 
         let summary = SkillSummary::from(&skill);
@@ -2531,31 +2625,28 @@ description: A skill with no body content
         assert!(decode_skill_share_link("zed-kask://skill?data=!!!notbase64").is_err());
     }
 
-    // zed-kask: Embedded global skills (shipped in .agents/skills/) must
-    // parse cleanly via `parse_embedded_global_skill`, which uses the strict
-    // `validate_description` path (hard-rejects >1024-byte descriptions).
-    // This is a deliberate deviation from the disk-loaded path
-    // (`parse_skill_file_content_for_loading`), which accepts long
-    // descriptions with no warning — see `test_parse_description_too_long_loads_with_warning`.
-    // The rationale: shipped skills are authored by us and should meet the
-    // strict bar; user-installed skills at ~/.agents/skills/ get the lenient
-    // path. This test pins that contract so a shipped skill with an
-    // over-long description can't silently regress — it will fail this test
-    // AND fail the build-time check in `build.rs`. Without this test, the
-    // runtime `log::warn!` in `embedded_global_skills` would silently drop
-    // the skill from the catalog with no test signal.
+    // zed-kask: Shipped skills (authored in .agents/skills/) must parse
+    // cleanly via the strict `validate_description` path (hard-rejects
+    // >1024-byte descriptions). This is a deliberate deviation from the
+    // disk-loaded path (`parse_skill_file_content_for_loading`), which
+    // accepts long descriptions with no warning — see
+    // `test_parse_description_too_long_loads_with_warning`. The rationale:
+    // shipped skills are authored by us and should meet the strict bar;
+    // user-installed skills on disk get the lenient path. This test pins
+    // that contract so a shipped skill with an over-long description can't
+    // silently regress — it will fail this test AND fail the build-time
+    // check in `build.rs`.
     #[test]
-    fn embedded_global_skills_all_parse_without_errors() {
-        let skills = embedded_global_skills();
+    fn shipped_skill_seed_all_parse_without_errors() {
+        let seed = shipped_skill_seed();
         // Sanity: we ship more than a handful of skills.
         assert!(
-            skills.len() > 10,
-            "expected embedded global skills to include the kask catalog, got {}",
-            skills.len()
+            seed.len() > 10,
+            "expected the shipped skill seed to include the kask catalog, got {}",
+            seed.len()
         );
-        // Every shipped skill must be present and parse cleanly. If a skill
-        // is missing from this list, `embedded_global_skills` dropped it
-        // with a `log::warn!` — check the test output for the warning.
+        // Every shipped skill must parse cleanly. If a skill is missing
+        // from this list, check the test output for a parse warning.
         let known_skills = [
             "bug-hunt",
             "lora-training",
@@ -2567,24 +2658,212 @@ description: A skill with no body content
             "tdd",
         ];
         let parsed_names: std::collections::HashSet<&str> =
-            skills.iter().map(|s| s.name.as_str()).collect();
+            seed.iter().map(|(name, _)| *name).collect();
         for name in known_skills {
             assert!(
                 parsed_names.contains(name),
-                "embedded global skill '{name}' was dropped during parsing — \
-                 check the `Failed to parse embedded global skill` log warning. \
-                 Most likely cause: description exceeds {MAX_SKILL_DESCRIPTION_LEN} bytes."
+                "shipped skill '{name}' is missing from the seed payload — \
+                 most likely cause: description exceeds {MAX_SKILL_DESCRIPTION_LEN} bytes \
+                 (caught at build time) or the SKILL.md was removed from .agents/skills/."
             );
         }
-        // No embedded skill should carry load warnings — the strict path
-        // rejects rather than warns.
-        for skill in &skills {
-            assert!(
-                skill.load_warnings.is_empty(),
-                "embedded global skill '{}' has load warnings: {:?}",
-                skill.name,
-                skill.load_warnings
-            );
+        // Every shipped SKILL.md must parse cleanly (frontmatter valid,
+        // description within the strict limit).
+        for (name, content) in seed {
+            let (metadata, _body) = extract_frontmatter(content)
+                .unwrap_or_else(|e| panic!("shipped skill '{name}' failed to parse: {e}"));
+            validate_name(&metadata.name)
+                .unwrap_or_else(|e| panic!("shipped skill '{name}' has invalid name: {e}"));
+            validate_description(&metadata.description)
+                .unwrap_or_else(|e| panic!("shipped skill '{name}' has invalid description: {e}"));
         }
+    }
+
+    // Seeding materialises the shipped SKILL.md files to disk so the catalog
+    // is built from disk (editable, no compiled-in runtime source). Pins:
+    // - a missing skill is written;
+    // - an existing USER (non-core) skill is never overwritten (user edits are
+    //   sovereign). Core skills are always overwritten — that contract is
+    //   pinned by `test_seed_shipped_skills_overwrites_core_skills`.
+    #[gpui::test]
+    async fn test_seed_shipped_skills_writes_missing_and_preserves_existing(
+        cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(Path::new("/skills")).await.unwrap();
+
+        seed_shipped_skills(fs.as_ref(), Path::new("/skills")).await;
+
+        // A known shipped USER (non-core) skill must be present on disk after
+        // seeding. `lora-training` is non-core, so user edits to it are
+        // sovereign and must survive re-seeding.
+        let lora_training = Path::new("/skills/lora-training/SKILL.md");
+        assert!(
+            fs.is_file(lora_training).await,
+            "shipped skill 'lora-training' should be seeded to disk"
+        );
+
+        // Overwrite the seeded file with a user edit, then re-seed. The
+        // user edit must survive — seeding never clobbers existing files.
+        fs.write(
+            lora_training,
+            b"---\nname: lora-training\ndescription: My custom edit\n---\n",
+        )
+        .await
+        .unwrap();
+        seed_shipped_skills(fs.as_ref(), Path::new("/skills")).await;
+        let content = fs.load(lora_training).await.unwrap();
+        assert!(
+            content.contains("My custom edit"),
+            "user edit to a shipped user skill must survive re-seeding; got: {content}"
+        );
+    }
+
+    // The `CORE_SKILL_NAMES` constant is the single source of truth for which
+    // skills are core. Every shipped SKILL.md with `core: true` in its
+    // frontmatter must appear in `CORE_SKILL_NAMES`, and every name in
+    // `CORE_SKILL_NAMES` must have a shipped SKILL.md marked `core: true`.
+    // A drift in either direction is a contract violation: a frontmatter
+    // `core: true` not in the constant would be seeded-once (editable) instead
+    // of always-overwritten, and a constant entry without frontmatter would
+    // be overwritten on every startup against the user's will.
+    #[test]
+    fn test_core_skill_names_constant_matches_shipped_core_frontmatter() {
+        let seed = shipped_skill_seed();
+
+        // Skills whose shipped SKILL.md frontmatter has `core: true`.
+        let frontmatter_core: std::collections::HashSet<&str> = seed
+            .iter()
+            .filter_map(|(name, content)| {
+                let (metadata, _body) = extract_frontmatter(content)
+                    .unwrap_or_else(|e| panic!("shipped skill '{name}' failed to parse: {e}"));
+                if metadata.core { Some(*name) } else { None }
+            })
+            .collect();
+
+        let constant_core: std::collections::HashSet<&str> =
+            CORE_SKILL_NAMES.iter().copied().collect();
+
+        // Every frontmatter-core skill must be in the constant.
+        let missing_from_constant: Vec<&str> = frontmatter_core
+            .difference(&constant_core)
+            .copied()
+            .collect();
+        assert!(
+            missing_from_constant.is_empty(),
+            "skills with `core: true` frontmatter but absent from CORE_SKILL_NAMES: \
+             {missing_from_constant:?} — add them to CORE_SKILL_NAMES or remove the \
+             frontmatter flag"
+        );
+
+        // Every constant entry must have a shipped SKILL.md marked core.
+        let missing_from_frontmatter: Vec<&str> = constant_core
+            .difference(&frontmatter_core)
+            .copied()
+            .collect();
+        assert!(
+            missing_from_frontmatter.is_empty(),
+            "CORE_SKILL_NAMES entries with no shipped SKILL.md marked `core: true`: \
+             {missing_from_frontmatter:?} — add `core: true` to the SKILL.md frontmatter \
+             or remove the name from CORE_SKILL_NAMES"
+        );
+
+        // Sanity: the core set is non-empty and a strict subset of shipped.
+        assert!(
+            !constant_core.is_empty(),
+            "CORE_SKILL_NAMES must not be empty"
+        );
+        let shipped_names: std::collections::HashSet<&str> =
+            seed.iter().map(|(name, _)| *name).collect();
+        assert!(
+            constant_core.is_subset(&shipped_names),
+            "CORE_SKILL_NAMES references skills with no shipped SKILL.md"
+        );
+    }
+
+    #[test]
+    fn test_parse_skill_frontmatter_rejects_user_skill_with_reserved_name() {
+        // A non-core skill (frontmatter `core: false` or missing) whose
+        // name is a reserved (core) name must be refused at load time.
+        // This blocks a hand-edited or marketplace-installed SKILL.md from
+        // usurping a core skill's identity.
+        let content = "---\nname: create-skill\ndescription: Hostile takeover\n---\nbody\n";
+        let result = parse_skill_frontmatter(
+            Path::new("/skills/create-skill/SKILL.md"),
+            content,
+            SkillSource::Global,
+        );
+        let err = result.expect_err("user skill with reserved name must be rejected");
+        assert!(
+            err.to_string().contains("reserved"),
+            "error should mention 'reserved', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_skill_frontmatter_accepts_core_skill_with_reserved_name() {
+        // A legitimate core skill (frontmatter `core: true`) bearing a
+        // reserved name must pass — it is the only kind of skill allowed
+        // to use a reserved name.
+        let content =
+            "---\nname: create-skill\ncore: true\ndescription: Legitimate core skill\n---\nbody\n";
+        let skill = parse_skill_frontmatter(
+            Path::new("/skills/create-skill/SKILL.md"),
+            content,
+            SkillSource::Global,
+        )
+        .expect("core skill with reserved name must be accepted");
+        assert_eq!(skill.name, "create-skill");
+        assert!(skill.core);
+    }
+
+    #[test]
+    fn test_is_reserved_skill_name_matches_core_skill_names() {
+        // `is_reserved_skill_name` is an alias for `is_core_skill` — the
+        // reserved-name set is exactly the core-skill-name set.
+        assert!(is_reserved_skill_name("create-skill"));
+        assert!(is_reserved_skill_name("bug-hunt"));
+        assert!(!is_reserved_skill_name("my-user-skill"));
+        assert!(!is_reserved_skill_name(""));
+    }
+
+    // Core skills are always overwritten on every startup so user edits
+    // cannot break system-critical functionality. This pins the overwrite
+    // half of the seeder contract (the preserve-existing half is pinned by
+    // `test_seed_shipped_skills_writes_missing_and_preserves_existing`).
+    #[gpui::test]
+    async fn test_seed_shipped_skills_overwrites_core_skills(cx: &mut TestAppContext) {
+        let fs = FakeFs::new(cx.executor());
+        fs.create_dir(Path::new("/skills")).await.unwrap();
+
+        // Seed once — the core skill lands on disk.
+        seed_shipped_skills(fs.as_ref(), Path::new("/skills")).await;
+        let create_skill = Path::new("/skills/create-skill/SKILL.md");
+        assert!(
+            fs.is_file(create_skill).await,
+            "core skill 'create-skill' should be seeded to disk"
+        );
+        let original = fs.load(create_skill).await.unwrap();
+
+        // A user edit (or corruption) is written over the core skill.
+        fs.write(
+            create_skill,
+            b"---\nname: create-skill\ndescription: TAMPERED\n---\n",
+        )
+        .await
+        .unwrap();
+
+        // Re-seed — the core skill must be overwritten with the shipped copy.
+        seed_shipped_skills(fs.as_ref(), Path::new("/skills")).await;
+        let after = fs.load(create_skill).await.unwrap();
+        assert_eq!(
+            after, original,
+            "core skill must be overwritten on re-seed; user edits are not sovereign \
+             for core skills. Got tampered content."
+        );
+        assert!(
+            !after.contains("TAMPERED"),
+            "tampered content survived re-seed — core overwrite is broken: {after}"
+        );
     }
 }

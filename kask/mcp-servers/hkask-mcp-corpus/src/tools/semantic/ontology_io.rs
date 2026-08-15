@@ -5,30 +5,20 @@
 //! - `read_ontology_tags_annotated` → bracketed prefix (for embedding annotation)
 //! - `read_ontology_namespaces` → namespace set (for M4 predicate cross-check)
 
-use crate::*;
+use crate::{McpToolError, normalize_concept, read_jsonl_lenient};
 
 /// Read ontology tags from a tagged chunks JSONL file.
 ///
 /// Returns a map of `entity_ref` → formatted ontology context string
 /// (e.g. `"golem: metaphor, character development | fibo: ROIC"`).
-/// Used by `extract_triples_batch` to inject pre-classified ontology tags
+/// Used by `extract_passages_batch` to inject pre-classified ontology tags
 /// into the extraction prompt so the LLM uses the right predicates.
 pub(crate) fn read_ontology_tags(
     path: &str,
 ) -> Result<std::collections::HashMap<String, String>, McpToolError> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        McpToolError::invalid_argument(format!("Cannot read tagged_jsonl '{path}': {e}"))
-    })?;
+    let (values, _dropped) = read_jsonl_lenient::<serde_json::Value>(path, "tagged_jsonl")?;
     let mut map = std::collections::HashMap::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+    for v in values {
         let entity_ref = v.get("entity_ref").and_then(|v| v.as_str()).unwrap_or("");
         if entity_ref.is_empty() {
             continue;
@@ -74,8 +64,8 @@ pub(crate) fn read_ontology_tags_annotated(
 /// Read ontology namespace keys per chunk from a tagged chunks JSONL file.
 ///
 /// Returns a map of `entity_ref` → set of normalized namespace keys
-/// (e.g. `{"fibo", "golem"}`). Used by `extract_triples_batch` to cross-check
-/// that a triple's predicate namespace was actually tagged for the chunk
+/// (e.g. `{"fibo", "golem"}`). Used by `extract_passages_batch` to cross-check
+/// that a assertion's predicate namespace was actually tagged for the chunk
 /// before bypassing the text-containment hallucination guard (M4 fix).
 ///
 /// Namespace keys are normalized via `normalize_concept` (lowercase + trim +
@@ -84,20 +74,10 @@ pub(crate) fn read_ontology_tags_annotated(
 pub(crate) fn read_ontology_namespaces(
     path: &str,
 ) -> Result<std::collections::HashMap<String, std::collections::HashSet<String>>, McpToolError> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        McpToolError::invalid_argument(format!("Cannot read tagged_jsonl '{path}': {e}"))
-    })?;
+    let (values, _dropped) = read_jsonl_lenient::<serde_json::Value>(path, "tagged_jsonl")?;
     let mut map: std::collections::HashMap<String, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+    for v in values {
         let entity_ref = v.get("entity_ref").and_then(|v| v.as_str()).unwrap_or("");
         if entity_ref.is_empty() {
             continue;
@@ -120,11 +100,18 @@ pub(crate) fn read_ontology_namespaces(
 mod tests {
     use super::*;
 
+    // Temp dirs are created inside the cwd (not /tmp): the readers enforce
+    // path containment under the working directory, so a /tmp fixture is
+    // rejected as an escaping path.
+    fn tempdir_in_cwd() -> tempfile::TempDir {
+        tempfile::TempDir::new_in(std::env::current_dir().expect("cwd")).expect("temp dir")
+    }
+
     #[test]
     fn read_ontology_namespaces_extracts_normalized_keys() {
         // M4 fix: namespace keys must be normalized (lowercase + trim) so they
         // match the form produced by validate_ontology_tags in the tagging phase.
-        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir = tempdir_in_cwd();
         let path = dir.path().join("tagged.jsonl");
         let content = r#"{"entity_ref":"corpus:researcher:doc:1","ontology_tags":{"FIBO":["ROIC"],"golem":["metaphor"]}}
 {"entity_ref":"corpus:researcher:doc:2","ontology_tags":{"pko":["analysis"]}}
@@ -152,7 +139,7 @@ mod tests {
 
     #[test]
     fn read_ontology_namespaces_empty_file_returns_empty_map() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir = tempdir_in_cwd();
         let path = dir.path().join("empty.jsonl");
         std::fs::write(&path, "").expect("write");
         let map = read_ontology_namespaces(path.to_str().unwrap()).expect("read");
@@ -161,7 +148,7 @@ mod tests {
 
     #[test]
     fn read_ontology_namespaces_skips_malformed_lines() {
-        let dir = tempfile::TempDir::new().expect("temp dir");
+        let dir = tempdir_in_cwd();
         let path = dir.path().join("mixed.jsonl");
         let content = "not json at all\n{\"entity_ref\":\"ok\",\"ontology_tags\":{\"fibo\":[\"roic\"]}}\n{\"entity_ref\":\"\",\"ontology_tags\":{}}\n";
         std::fs::write(&path, content).expect("write");

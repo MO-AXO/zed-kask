@@ -1,19 +1,14 @@
 ---
 title: "Documentation Standards"
 audience: [all contributors authoring or editing documentation in `docs/`]
-last_updated: 2026-07-27
-version: "0.31.1"
+last_updated: 2026-08-01
+version: "0.31.2"
 status: "Active"
 domain: "Cross-cutting"
 mds_categories: [domain, composition, trust, lifecycle, curation]
 ---
 
-> **Restoration note (2026-07-27):** This file was deleted in commit
-> `a32a7847a4` (2026-07-25) and restored from git history on 2026-07-27
-> because `DIAGRAMS_INDEX.md`, `corpus.yaml`, and the `tdd`/`diagnose`
-> skills cite it as authoritative. Version bumped to 0.31.1 to mark the
-> restoration. The file was deleted a second time by another agent and
-> restored again.
+
 
 
 ## 1. Purpose
@@ -105,8 +100,8 @@ stateDiagram-v2
 
 <!-- DIAGRAM_ALIGNMENT
 id: DIAG-STD-001
-verified_date: 2026-05-24
-verified_against: docs/standards/DOCUMENTATION_STANDARDS.md; .gitignore; docs/archive/
+verified_date: 2026-07-29
+verified_against: docs/architecture/DOCUMENTATION_STANDARDS.md; .gitignore; docs/research/archive/
 status: VERIFIED
 -->
 
@@ -245,11 +240,15 @@ For the authoritative MDS category → directory mapping, see [`MDS.md`](../arch
 
 | Content | Location |
 |---------|----------|
-| Specifications, design docs | `docs/specifications/` |
-| Architecture Decision Records | `docs/architecture/` |
+| Architecture, design docs, ADRs | `docs/architecture/` |
+| Reference documentation | `docs/reference/` |
+| Explanation documentation | `docs/explanation/` |
 | Plans, roadmaps | `docs/plans/` |
-| Standards, policies | `docs/specifications/` |
+| Standards, policies | `docs/architecture/` |
 | Status reports, inventories | `docs/status/` |
+| QA strategy, contracts | `docs/qa/` |
+| Per-crate Diataxis docs | `docs/diataxis/` |
+| Research reports | `docs/research/` |
 | Crate coding context (brief) | `<workspace>/crates/<crate>/README.md` |
 
 ### 6.3 Enforcement
@@ -318,6 +317,8 @@ type.
 Writing Excellence is integrated into the MDS curation process via two
 mechanisms:
 
+> **Pragmatic-semantics note (2026-08-01 audit):** The two tools below are **planned (OUGHT)**, not implemented. `spec/curate/writing-excellence` and `spec/curate/evaluate` have zero hits in `kask/crates/` and `crates/` (verified by grep). They are retained as the design specification for the intended curation integration; readers should treat them as the *intended* surface, not a verifiable code reference. The 4-perspective rubric in Appendix A is the live standard reviewers apply manually today.
+
 1. **`spec/curate/writing-excellence`** — Standalone assessment tool that
    evaluates a specification document against the 4-perspective test and
    returns `meets_publication_standard` and `blocks_publication` flags.
@@ -354,7 +355,7 @@ All architecture documents MUST map to at least one of the 5 MDS categories defi
 
 1. **Domain** — Bounded context, ν-events, entities
 2. **Composition** — Registry, cascade rules, template types, MCP/in-process surfaces, equivalence matrix
-3. **Trust** — Threat model, OCAP boundaries, keystore, capability tokens, attenuation policy
+3. **Trust** — Threat model, capability separation boundaries, keystore
 4. **Lifecycle** — Bootstrap, evolution, deprecation, Regulation spans, variety counters, storage schema, memory pipelines, encryption
 5. **Curation** — Evaluation gradient, coherence metric, curator authority, writing quality
 
@@ -368,8 +369,8 @@ Documents spanning multiple categories list all applicable categories in the met
 ---
 title: "Documentation Standards"
 audience: [all contributors authoring or editing documentation in `docs/`]
-last_updated: 2026-07-24
-version: "0.31.0"
+last_updated: 2026-08-01
+version: "0.31.2"
 status: "Active"
 domain: "Cross-cutting"
 mds_categories: [domain, composition, trust, lifecycle, curation]
@@ -390,7 +391,7 @@ The verification checklist (§10) is extended with MDS alignment checks:
 |----------|-----------------|--------------|
 | **Domain** | Bounded context, ν-event types, entity definitions | Terms allocated |
 | **Composition** | Registry schema, cascade rules, template types, surface definitions, equivalence matrix | Template types documented; MCP ≡ in-process surfaces verified for core operations |
-| **Trust** | Threat model, mitigations, keystore config, OCAP policy, attenuation rules | STRIDE-lite analysis complete; capability grant table present |
+| **Trust** | Threat model, mitigations, keystore config, capability separation boundaries | STRIDE-lite analysis complete; each mitigation names the line that enforces it (a mitigation with no enforcement point must say "not yet enforced") |
 | **Lifecycle** | Bootstrap sequence, evolution rules, deprecation policy, Regulation span registry, storage schema, encryption config | All operations emit spans; bitemporal semantics documented |
 | **Curation** | Decision gradient, coherence metric, writing quality assessment | Curator authority bounded; ≥3/4 writing dimensions passing |
 
@@ -417,15 +418,13 @@ This documentation standard itself maps to the 5 MDS categories:
 | Directory | Owner | Review Cadence |
 |-----------|-------|---------------|
 | `docs/architecture/` | Architecture steward | Per-release |
-| `docs/specifications/` | Documentation steward | Per-release |
+| `docs/diataxis/` | Documentation steward | Per-release |
+| `docs/explanation/` | Architecture steward | Per-release |
 | `docs/plans/` | Workstream lead | Weekly |
-| `docs/handoffs/` | Agent sessions (transient) | Per-session |
+| `docs/qa/` | CI/CD steward | Per-build |
+| `docs/reference/` | Documentation steward | Per-release |
+| `docs/research/` | Research steward | Per-sweep (archive is historical) |
 | `docs/status/` | CI/CD steward | Per-build |
-| `docs/user-guides/` | User advocate | Per-release |
-| `docs/guides/` | Methodology steward | Per-release |
-| `docs/generated/` | Build system | Per-build |
-| `docs/ci/` | CI/CD steward | Per-build |
-| `docs/archive/` | Documentation steward | Per-sweep |
 
 ### 12.2 Responsibilities
 

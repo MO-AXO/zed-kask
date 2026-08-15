@@ -1,19 +1,14 @@
-//! Inference configuration — multi-provider routing for 8 providers: DeepInfra, fal.ai, Together AI, OpenRouter, KiloCode, Ollama (local), Cline (cloud gateway), RunPod (vision/OCR only).
+//! Inference configuration — multi-provider routing for 4 chat providers: DeepInfra, RunPod (vision/OCR only), OpenRouter, Ollama (local).
 //!
 //! # Environment Variables
 //!
-//! - `DI_BASE_URL` / `DEEPINFRA_API_KEY` — DeepInfra (cloud, required)
-//! - `FA_BASE_URL` / `FALAI_API_KEY` — fal.ai (cloud, required)
-//! - `TG_BASE_URL` / `TOGETHERAI_API_KEY` — Together AI (cloud, required)
-//! - `OR_BASE_URL` / `OPENROUTER_API_KEY` — OpenRouter (cloud, required)
-//! - `KC_BASE_URL` / `KILOCODE_API_KEY` — KiloCode (cloud, required)
-//! - `OM_BASE_URL` / `OM_API_KEY` — Ollama (local; key optional, header ignored)
-//! - `CLINE_BASE_URL` / `CLINE_API_KEY` — Cline cloud gateway (required)
+//! - `DEEPINFRA_BASE_URL` / `DEEPINFRA_API_KEY` — DeepInfra (cloud, required)
+//! - `ATLASCLOUD_BASE_URL` / `ATLASCLOUD_API_KEY` — AtlasCloud (cloud media + LLM)
+//! - `OPENROUTER_BASE_URL` / `OPENROUTER_API_KEY` — OpenRouter (cloud, required)
+//! - `OLLAMA_BASE_URL` / `OLLAMA_API_KEY` — Ollama (local; key optional, header ignored)
 //! - `RUNPOD_API_KEY` / `RUNPOD_BASE_URL` or `RUNPOD_TEMPLATE_ID` — RunPod (vision/OCR only)
-//! - `HKASK_DEFAULT_PROVIDER` — default provider for unprefixed models (DI, FA, TG, OR, KC, OM, CL, RP; default: DI)
+//! - `HKASK_DEFAULT_PROVIDER` — default provider for unprefixed models (DeepInfra, RunPod, OpenRouter, ollama; default: DeepInfra)
 //! - `HKASK_DEFAULT_MODEL` — default model (default: `OpenRouter/z-ai/glm-5.2`)
-//! - `HKASK_FUSION_JUDGE_MODEL` / `HKASK_FUSION_PANEL_MODELS` / `HKASK_FUSION_MODE` / `HKASK_FUSION_SKILLS` — fusion config
-//! - `HKASK_FUSION_DISABLED=1` — disable fusion
 //!
 //! # API Key Resolution
 //!
@@ -23,55 +18,36 @@
 //!
 //! # Model Naming Convention
 //!
-//! Models use a 2-letter provider prefix:
+//! Models use a full-name provider prefix:
 //! - `DeepInfra/meta-llama/Llama-3.3-70B-Instruct` → DeepInfra (cloud)
-//! - `fal.ai/paddleocr` → fal.ai (cloud)
-//! - `Together AI/Qwen/Qwen2.5-7B-Instruct-Turbo` → Together AI (cloud)
 //! - `OpenRouter/openai/gpt-4o` → OpenRouter (cloud)
-//! - `KiloCode/anthropic/claude-sonnet-4.5` → KiloCode (cloud)
 //! - `ollama/qwen3:8b` → Ollama (local)
-//! - `Cline/anthropic/claude-sonnet-4-6` → Cline (cloud gateway)
 //! - `RunPod/kask-ocr` → RunPod (vision/OCR only — not available for chat)
 //! - No prefix → default provider (configurable, default: DeepInfra)
 
 use serde::{Deserialize, Serialize};
 
-use hkask_types::secret::SecretRef;
-
-/// Two-letter provider identifier for inference routing.
+/// Provider identifier for inference routing. Used as the model-string
+/// prefix (e.g. `DeepInfra/model`, `OpenRouter/model`) and in log messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProviderId {
     /// DeepInfra (cloud) — prefix `DeepInfra/`
     #[serde(rename = "DI")]
     DeepInfra,
-    /// fal.ai (cloud) — prefix `fal.ai/`
-    #[serde(rename = "FA")]
-    Fal,
-    /// Together AI (cloud) — prefix `Together AI/`
-    #[serde(rename = "TG")]
-    Together,
     /// Runpod (cloud) — prefix `RunPod/`
     #[serde(rename = "RP")]
     Runpod,
     /// OpenRouter (cloud) — prefix `OpenRouter/`
     #[serde(rename = "OR")]
     OpenRouter,
-    /// KiloCode (cloud) — prefix `KiloCode/`
-    #[serde(rename = "KC")]
-    KiloCode,
     /// Ollama (local) — prefix `ollama/`. No API key required; the OpenAI-compatible
     /// endpoint at `/v1/chat/completions` ignores the `Authorization` header.
     #[serde(rename = "OM")]
     Ollama,
-    /// Cline (cloud) — prefix `Cline/`. OpenAI-compatible gateway at `api.cline.bot`
-    /// routing to Anthropic/OpenAI/Google/DeepSeek/xAI models behind one key.
-    /// Env: `CLINE_API_KEY`, `CLINE_BASE_URL` (default `https://api.cline.bot/api`).
-    #[serde(rename = "CL")]
-    Cline,
 }
 
 impl ProviderId {
-    /// Parse a 2-letter provider prefix from a model name.
+    /// Parse a full-name provider prefix from a model name.
     ///
     /// Returns `None` if the model name has no recognized prefix.
     /// Returns `Some((provider, stripped_model))` if a prefix is found.
@@ -79,56 +55,53 @@ impl ProviderId {
     /// expect: "The system normalizes provider responses for monitoring"
     /// \[P9\] Motivating: Homeostatic Self-Regulation — model-name routing to provider boundary
     /// pre:  model is non-empty
-    /// post: returns Some((ProviderId, stripped_model)) for DeepInfra/, fal.ai/, Together AI/, RunPod/, OpenRouter/, KiloCode/, ollama/, Cline/ prefixes
+    /// post: returns Some((ProviderId, stripped_model)) for DeepInfra/, RunPod/, OpenRouter/, ollama/ prefixes
     /// post: returns None for unrecognized or missing prefix
     #[must_use]
     pub fn parse_from_model(model: &str) -> Option<(Self, &str)> {
-        if model.len() < 4 {
-            return None;
+        // Full-name prefixes. Each entry is (prefix, provider, prefix_len).
+        // `strip_prefix` handles the matching; the match assigns the variant.
+        const PREFIXES: &[(&str, ProviderId)] = &[
+            ("DeepInfra/", ProviderId::DeepInfra),
+            ("RunPod/", ProviderId::Runpod),
+            ("OpenRouter/", ProviderId::OpenRouter),
+            ("ollama/", ProviderId::Ollama),
+        ];
+        for (prefix, provider) in PREFIXES {
+            if let Some(rest) = model.strip_prefix(prefix) {
+                if rest.is_empty() {
+                    return None;
+                }
+                return Some((*provider, rest));
+            }
         }
-        let bytes = model.as_bytes();
-        if bytes.get(2) != Some(&b'/') {
-            return None;
-        }
-        let prefix = &model[..2];
-        let rest = &model[3..];
-        if rest.is_empty() {
-            return None;
-        }
-        match prefix {
-            "DI" => Some((ProviderId::DeepInfra, rest)),
-            "FA" => Some((ProviderId::Fal, rest)),
-            "TG" => Some((ProviderId::Together, rest)),
-            "RP" => Some((ProviderId::Runpod, rest)),
-            "OR" => Some((ProviderId::OpenRouter, rest)),
-            "KC" => Some((ProviderId::KiloCode, rest)),
-            "OM" => Some((ProviderId::Ollama, rest)),
-            "CL" => Some((ProviderId::Cline, rest)),
-            _ => None,
-        }
+        None
     }
 
-    /// Returns true if `model` has the `XX/...` prefix shape with two
-    /// uppercase ASCII letters before the slash — i.e. it *looks* like a
-    /// provider-prefixed name even when the prefix is not recognized.
+    /// Classify a provider prefix segment (the text before the first `/` in a
+    /// model name) to a `ProviderId`, case-insensitively, recognizing short
+    /// aliases. Unrecognized segments fall back to `OpenRouter`.
     ///
-    /// `InferenceRouter::parse_provider` uses this to reject unknown prefixes
-    /// with a clear error rather than silently routing them to the default
-    /// provider as a garbage model name.
+    /// This is the lenient counterpart to [`ProviderId::parse_from_model`]:
+    /// `parse_from_model` does strict case-sensitive full-prefix stripping and
+    /// returns the rest of the model name; `from_prefix_segment` classifies an
+    /// already-split segment and accepts aliases (`"di"`, `"or"`, …).
+    /// Centralizing the alias table here keeps provider knowledge in one place,
+    /// so adding or removing a variant updates one match instead of several.
     ///
-    /// expect: "The system rejects unrecognized provider prefixes explicitly"
-    /// \[P9\] Motivating: Homeostatic Self-Regulation — fail fast on unknown prefix
-    /// pre:  model may be any string
-    /// post: returns true iff model is `XX/...` with two uppercase letters
-    /// post: recognized prefixes return false here (handled by `parse_from_model`)
+    /// expect: "The system classifies a provider prefix segment to a ProviderId"
+    /// \[P9\] Motivating: Homeostatic Self-Regulation — provider classification from model-name prefix
+    /// pre:  segment may be any string (caller splits on `/`)
+    /// post: returns the matching ProviderId, or OpenRouter for unrecognized segments
     #[must_use]
-    pub fn looks_like_prefix(model: &str) -> bool {
-        let bytes = model.as_bytes();
-        bytes.len() >= 4
-            && bytes[2] == b'/'
-            && !model[3..].is_empty()
-            && bytes[0].is_ascii_uppercase()
-            && bytes[1].is_ascii_uppercase()
+    pub fn from_prefix_segment(segment: &str) -> Self {
+        match segment.to_lowercase().as_str() {
+            "deepinfra" | "di" => ProviderId::DeepInfra,
+            "runpod" | "rp" => ProviderId::Runpod,
+            "openrouter" | "or" => ProviderId::OpenRouter,
+            "ollama" | "om" => ProviderId::Ollama,
+            _ => ProviderId::OpenRouter,
+        }
     }
 
     /// Format a model name with this provider's prefix.
@@ -142,51 +115,27 @@ impl ProviderId {
         format!("{}/{}", self.as_str(), model)
     }
 
-    /// Two-letter code for this provider.
+    /// Full provider name used as the model-string prefix.
     ///
     /// expect: "The system normalizes provider responses for monitoring"
-    /// \[P9\] Motivating: Homeostatic Self-Regulation — stable provider code for routing
-    /// post: returns "DI", "FA", "TG", "RP", "OR", "KC", "OM", or "CL"
+    /// \[P9\] Motivating: Homeostatic Self-Regulation — stable provider name for routing
+    /// post: returns "DeepInfra", "RunPod", "OpenRouter", or "ollama"
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
-            ProviderId::DeepInfra => "DI",
-            ProviderId::Fal => "FA",
-            ProviderId::Together => "TG",
-            ProviderId::Runpod => "RP",
-            ProviderId::OpenRouter => "OR",
-            ProviderId::KiloCode => "KC",
-            ProviderId::Ollama => "OM",
-            ProviderId::Cline => "CL",
+            ProviderId::DeepInfra => "DeepInfra",
+            ProviderId::Runpod => "RunPod",
+            ProviderId::OpenRouter => "OpenRouter",
+            ProviderId::Ollama => "ollama",
         }
     }
 }
 
-// Configuration for provider-agnostic multi-model fusion.
-//
-// When set, all text generation calls route through the fusion group by default.
-// Individual calls can bypass with `LLMParameters.bypass_fusion = true`.
-//
-// # Environment Variables
-//
-// - `HKASK_FUSION_JUDGE_MODEL` — judge model for fusion (e.g., "OpenRouter/deepseek-v4-pro")
-// - `HKASK_FUSION_PANEL_MODELS` — comma-separated panel models (e.g., "OpenRouter/auto,KiloCode/anthropic/claude-sonnet-4.5")
-// - `HKASK_FUSION_MODE` — judge deliberation mode (default: synthesis)
-// - `HKASK_FUSION_SKILLS` — comma-separated skill anchors for the judge
-// - `HKASK_FUSION_MAX_ROUNDS` — max rounds for deliberation mode (default: 5)
-// - `HKASK_FUSION_ALGO_METHOD` — algo merge strategy when judge is `algo` (default: merge)
-// - `HKASK_FUSION_DISABLED` — set to "1" to disable fusion
-
-/// Fusion types moved to hkask-types::fusion — re-exported for back-compat.
-pub use hkask_types::fusion::{
-    AlgoMethod, ConvergenceVerdict, FusionConfig, FusionMode, FusionSkill, NonEmptyVec,
-};
-
 /// Configuration for the inference router.
 ///
-/// Holds connection settings for DeepInfra, fal.ai, Together AI, and OpenRouter.
-/// The router uses this config to construct backends and decide
-/// the default provider for unprefixed model names.
+/// Holds connection settings for DeepInfra, OpenRouter,
+/// Ollama, and AtlasCloud. The router uses this config to construct
+/// backends and decide the default provider for unprefixed model names.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceConfig {
     /// Default provider for model names without a prefix.
@@ -195,65 +144,37 @@ pub struct InferenceConfig {
 
     pub deepinfra_base_url: String,
     pub deepinfra_api_key: String,
-    pub fal_base_url: String,
-    pub fal_media_base_url: String,
-    pub fal_queue_base_url: String,
-    pub fal_api_key: String,
-    pub together_base_url: String,
-    pub together_api_key: String,
     pub openrouter_base_url: String,
     pub openrouter_api_key: String,
-    /// OpenRouter model discovery thresholds (used by CLI model discovery).
-    pub openrouter_max_prompt_price_per_m: f64,
-    pub openrouter_min_intelligence_index: f64,
-    pub kilocode_base_url: String,
-    pub kilocode_api_key: String,
     /// Ollama local inference — defaults to `http://localhost:11434`. The API key
     /// is optional (Ollama ignores it) but kept as `String` for consistency with the
     /// other backends and to support remote Ollama instances that require auth.
     pub ollama_base_url: String,
     pub ollama_api_key: String,
-    /// Cline cloud gateway — OpenAI-compatible router at `api.cline.bot`.
-    /// Env: `CLINE_API_KEY`, `CLINE_BASE_URL` (default `https://api.cline.bot/api`).
-    pub cline_base_url: String,
-    pub cline_api_key: String,
+    /// AtlasCloud — task-based media API (image/video/3D/audio/ASR) + OpenAI-compatible LLM.
+    /// Env: `ATLASCLOUD_API_KEY`, `ATLASCLOUD_BASE_URL` (default `https://api.atlascloud.ai/api/v1`).
+    pub atlascloud_base_url: String,
+    pub atlascloud_api_key: String,
     pub timeout_secs: u64,
     pub pool_max_idle: usize,
     pub default_model: String,
-
-    /// Structured fusion configuration (provider-agnostic).
-    /// When set, all text generation calls route through fusion by default.
-    /// Calls with `LLMParameters.bypass_fusion = true` bypass the override.
-    /// Default: None (fusion disabled).
-    pub fusion: Option<FusionConfig>,
 }
 
 impl Default for InferenceConfig {
     fn default() -> Self {
         Self {
-            default_provider: ProviderId::OpenRouter,
+            default_provider: ProviderId::DeepInfra,
             deepinfra_base_url: "https://api.deepinfra.com".to_string(),
             deepinfra_api_key: String::new(),
-            fal_base_url: "https://api.fal.ai".to_string(),
-            fal_media_base_url: "https://fal.run".to_string(),
-            fal_queue_base_url: "https://queue.fal.run".to_string(),
-            fal_api_key: String::new(),
-            together_base_url: "https://api.together.xyz".to_string(),
-            together_api_key: String::new(),
             openrouter_base_url: "https://openrouter.ai/api".to_string(),
             openrouter_api_key: String::new(),
-            openrouter_max_prompt_price_per_m: 1.0,
-            openrouter_min_intelligence_index: 40.0,
-            kilocode_base_url: "https://api.kilo.ai/api/gateway".to_string(),
-            kilocode_api_key: String::new(),
             ollama_base_url: "http://localhost:11434".to_string(),
             ollama_api_key: String::new(),
-            cline_base_url: "https://api.cline.bot/api".to_string(),
-            cline_api_key: String::new(),
+            atlascloud_base_url: "https://api.atlascloud.ai/api/v1".to_string(),
+            atlascloud_api_key: String::new(),
             timeout_secs: 120,
             pool_max_idle: 5,
-            default_model: "OpenRouter/z-ai/glm-5.2".to_string(),
-            fusion: None,
+            default_model: crate::model_constants::DEFAULT_FALLBACK_MODEL.to_string(),
         }
     }
 }
@@ -269,61 +190,35 @@ impl InferenceConfig {
     /// post: defaults to DeepInfra cloud if env vars unset
     pub fn from_env() -> Self {
         let di = ProviderConfig::from_env("DeepInfra", "https://api.deepinfra.com");
-        let tg = ProviderConfig::from_env("Together AI", "https://api.together.xyz");
         let or = ProviderConfig::from_env("OpenRouter", "https://openrouter.ai/api");
-        let kc = ProviderConfig::from_env("KiloCode", "https://api.kilo.ai/api/gateway");
         let om = ProviderConfig::from_env("ollama", "http://localhost:11434");
-        // Cline uses the sanitized prefix convention (CLINE_API_KEY).
-        let cline_base_url = std::env::var("CLINE_BASE_URL")
-            .unwrap_or_else(|_| "https://api.cline.bot/api".to_string());
-        let cline_api_key = resolve_api_key("CLINE_API_KEY");
 
-        let fal_base_url =
-            std::env::var("FALAI_BASE_URL").unwrap_or_else(|_| "https://api.fal.ai".to_string());
-
-        let fal_media_base_url =
-            std::env::var("FALAI_MEDIA_BASE_URL").unwrap_or_else(|_| "https://fal.run".to_string());
-
-        let fal_queue_base_url = std::env::var("FALAI_QUEUE_BASE_URL")
-            .unwrap_or_else(|_| "https://queue.fal.run".to_string());
-
-        let fal_api_key = resolve_api_key("FALAI_API_KEY");
-
-        let openrouter_max_prompt_price_per_m = env_f64("HKASK_OR_MAX_PRICE", 1.0);
-        let openrouter_min_intelligence_index = env_f64("HKASK_OR_MIN_INTELLIGENCE_INDEX", 40.0);
-
-        // Fusion: parse structured env vars.
-        let fusion = parse_fusion_config();
+        let atlascloud_base_url = std::env::var("ATLASCLOUD_BASE_URL")
+            .unwrap_or_else(|_| "https://api.atlascloud.ai/api/v1".to_string());
+        let atlascloud_api_key = resolve_api_key("ATLASCLOUD_API_KEY");
 
         Self {
             default_provider: resolve_default_provider(),
             deepinfra_base_url: di.base_url,
             deepinfra_api_key: di.api_key,
-            fal_base_url,
-            fal_media_base_url,
-            fal_queue_base_url,
-            fal_api_key,
-            together_base_url: tg.base_url,
-            together_api_key: tg.api_key,
             openrouter_base_url: or.base_url,
             openrouter_api_key: or.api_key,
-            openrouter_max_prompt_price_per_m,
-            openrouter_min_intelligence_index,
-            kilocode_base_url: kc.base_url,
-            kilocode_api_key: kc.api_key,
             ollama_base_url: om.base_url,
             ollama_api_key: om.api_key,
-            cline_base_url,
-            cline_api_key,
-            timeout_secs: resolve_config_str("HKASK_HTTP_TIMEOUT_SECS")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(120),
-            pool_max_idle: resolve_config_str("HKASK_HTTP_POOL_MAX_IDLE")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(256),
+            atlascloud_base_url,
+            atlascloud_api_key,
+            timeout_secs: parse_env_numeric(
+                "HKASK_HTTP_TIMEOUT_SECS",
+                resolve_config_str("HKASK_HTTP_TIMEOUT_SECS"),
+                Self::default().timeout_secs,
+            ),
+            pool_max_idle: parse_env_numeric(
+                "HKASK_HTTP_POOL_MAX_IDLE",
+                resolve_config_str("HKASK_HTTP_POOL_MAX_IDLE"),
+                Self::default().pool_max_idle,
+            ),
             default_model: resolve_config_str("HKASK_DEFAULT_MODEL")
-                .unwrap_or_else(|| "OpenRouter/z-ai/glm-5.2".to_string()),
-            fusion,
+                .unwrap_or_else(|| crate::model_constants::DEFAULT_FALLBACK_MODEL.to_string()),
         }
     }
 
@@ -346,63 +241,41 @@ impl InferenceConfig {
 
 /// Parse an `f64` from an environment variable, falling back to `default` on
 /// absence or parse failure. Used for tunable thresholds (price caps, etc.).
-fn env_f64(key: &str, default: f64) -> f64 {
-    // Tier 1: Environment variable (fast path)
-    if let Ok(val) = std::env::var(key)
-        && !val.is_empty()
-        && let Ok(f) = val.parse::<f64>()
-    {
-        return f;
-    }
-    // Tier 2: OS keychain (loaded from .env at setup time via kask keystore load)
-    let keychain_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        hkask_keystore::resolve(&SecretRef::Keychain(key.to_string()))
-    }));
-    if let Ok(Ok(zeroizing)) = keychain_result {
-        let val_str = String::from_utf8_lossy(&zeroizing);
-        if !val_str.is_empty()
-            && let Ok(f) = val_str.parse::<f64>()
-        {
-            return f;
-        }
-    }
-    default
-}
-
-/// Resolve a provider API key through the 2-tier chain: env var → OS keychain.
+/// Resolve a provider API key from the process environment.
 ///
-/// Tier 1: Environment variable (fast path — set via shell or keychain).
-/// Tier 2: OS keychain (encrypted at rest; guarded against the
-/// concurrent-access SIGABRT from libdbus via `catch_unwind`).
-/// Returns an empty string if no key is found — the backend will be unavailable.
+/// In zed-kask, inference API keys are injected into MCP server child
+/// processes as environment variables by the parent zed process (via
+/// `kask_bridge::build_mcp_server_env`, which reads from zed's
+/// `CredentialsProvider` keychain under `kask://credentials/<key>`).
+/// Standalone MCP servers set the same env vars in their shell.
+///
+/// This function reads **only** the environment variable. It does **not**
+/// fall back to the `hkask` keychain namespace — that namespace is reserved
+/// for sovereignty keys (db_passphrase) per the
+/// `hkask_keystore` module contract. Reading inference keys from the `hkask`
+/// namespace was a spec violation: the settings UI writes to zed's
+/// `CredentialsProvider` (`kask://credentials/<key>`), not the `hkask`
+/// keyring, so the fallback read a namespace that was always empty in
+/// zed-kask, producing silent "API key not configured" errors.
+///
+/// Returns an empty string if the env var is unset or empty — the backend
+/// will be unavailable.
 fn resolve_api_key(env_name: &str) -> String {
-    // Tier 1: Environment variable (fast path — set via shell or keychain)
+    // The env var is the sole source. In zed-kask it is injected by the
+    // parent process; standalone, by the operator's shell.
     if let Ok(val) = std::env::var(env_name)
         && !val.is_empty()
     {
         return val;
     }
-
-    // Tier 2: OS keychain (guarded against concurrent-access SIGABRT from libdbus)
-    let keychain_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        hkask_keystore::resolve(&SecretRef::Keychain(env_name.to_string()))
-    }));
-    if let Ok(Ok(zeroizing)) = keychain_result {
-        let key = String::from_utf8_lossy(&zeroizing).into_owned();
-        if !key.is_empty() {
-            return key;
-        }
-    }
-
-    // Tier 3: Empty string (provider not configured)
     String::new()
 }
 
 /// Resolve the default provider from env var or keychain.
 ///
 /// Reads `HKASK_DEFAULT_PROVIDER` via [`resolve_api_key`] (env var first, then
-/// OS keychain). Accepted values: DI, FA, TG, RP, OR, KC, OM, CL. Defaults to
-/// DeepInfra.
+/// OS keychain). Accepted values: DeepInfra, RunPod, OpenRouter,
+/// ollama. Defaults to DeepInfra.
 fn resolve_default_provider() -> ProviderId {
     let raw = resolve_api_key("HKASK_DEFAULT_PROVIDER");
     parse_provider_code(&raw)
@@ -410,91 +283,58 @@ fn resolve_default_provider() -> ProviderId {
 
 /// Parse a provider code string to a ProviderId.
 ///
-/// Accepted values: zed provider IDs (DeepInfra, fal.ai, Together AI, RunPod,
-/// OpenRouter, KiloCode, ollama, Cline). Anything else (including empty) → OpenRouter.
+/// Accepted values: full provider names (DeepInfra,
+/// RunPod, OpenRouter, ollama). Anything else (including
+/// empty) → DeepInfra.
 fn parse_provider_code(raw: &str) -> ProviderId {
     match raw {
         "DeepInfra" => ProviderId::DeepInfra,
-        "fal.ai" => ProviderId::Fal,
-        "Together AI" => ProviderId::Together,
         "RunPod" => ProviderId::Runpod,
         "OpenRouter" => ProviderId::OpenRouter,
-        "KiloCode" => ProviderId::KiloCode,
         "ollama" => ProviderId::Ollama,
-        "Cline" => ProviderId::Cline,
-        _ => ProviderId::OpenRouter,
+        _ => ProviderId::DeepInfra,
     }
 }
 
-/// Resolve a configuration string from env or keychain (2-tier chain).
+/// Resolve a configuration string from the process environment.
+///
+/// Reads only the env var. Does not fall back to the `hkask` keychain —
+/// that namespace is reserved for sovereignty keys per the `hkask_keystore`
+/// module contract. Config values (`HKASK_DEFAULT_MODEL`, etc.) are injected
+/// by the parent zed process via `mcp_env()` or set in the operator's shell.
 fn resolve_config_str(key: &str) -> Option<String> {
     if let Ok(val) = std::env::var(key)
         && !val.is_empty()
     {
         return Some(val);
     }
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        hkask_keystore::resolve(&SecretRef::Keychain(key.to_string()))
-    }));
-    if let Ok(Ok(zeroizing)) = result {
-        let val_str = String::from_utf8_lossy(&zeroizing);
-        if !val_str.is_empty() {
-            return Some(val_str.to_string());
-        }
-    }
     None
 }
 
-/// Parse fusion configuration from environment variables or keychain.
-///
-/// Returns `None` if no fusion is configured.
-fn parse_fusion_config() -> Option<FusionConfig> {
-    // Explicit disable: HKASK_FUSION_DISABLED=1 (env or keychain)
-    let disabled = resolve_config_str("HKASK_FUSION_DISABLED").unwrap_or_default();
-    if disabled == "1" {
-        return None;
+/// Parse an env-var string into a numeric type, logging a warning naming the
+/// env var and the malformed value before falling back to `default`. Without
+/// the warning, an operator cannot distinguish "not configured" from
+/// "configured but broken" (a malformed numeric silently degrades to the
+/// default, masking a broken feedback loop).
+fn parse_env_numeric<T>(name: &str, raw: Option<String>, default: T) -> T
+where
+    T: std::str::FromStr + std::fmt::Display,
+{
+    match raw {
+        Some(value) => match value.parse::<T>() {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                tracing::warn!(
+                    target: "hkask.inference",
+                    env = name,
+                    value = %value,
+                    "malformed numeric value; falling back to default ({default})"
+                );
+                default
+            }
+        },
+        None => default,
     }
-
-    // Parse shared optional fields (env or keychain)
-    let mode = resolve_config_str("HKASK_FUSION_MODE")
-        .and_then(|m| m.parse().ok())
-        .unwrap_or_default();
-    let skills: Vec<FusionSkill> = resolve_config_str("HKASK_FUSION_SKILLS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
-    let max_rounds = resolve_config_str("HKASK_FUSION_MAX_ROUNDS")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(5);
-    let algo_method = resolve_config_str("HKASK_FUSION_ALGO_METHOD")
-        .and_then(|m| m.parse().ok())
-        .unwrap_or_default();
-
-    // Structured config: HKASK_FUSION_JUDGE_MODEL + HKASK_FUSION_PANEL_MODELS (env or keychain)
-    let judge = resolve_config_str("HKASK_FUSION_JUDGE_MODEL").unwrap_or_default();
-    if !judge.is_empty() {
-        let panel_str = resolve_config_str("HKASK_FUSION_PANEL_MODELS").unwrap_or_default();
-        let panel: Vec<String> = panel_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let panel = NonEmptyVec::from_vec(panel)?;
-        return Some(FusionConfig {
-            judge,
-            panel,
-            mode,
-            skills,
-            max_rounds,
-            algo_method,
-            coherence_threshold: None,
-            panel_sizing_enabled: false,
-            pressure_adaptive_enabled: false,
-        });
-    }
-
-    None
 }
 
 // ── Provider configuration ───────────────────────────────────────────────────
@@ -507,13 +347,13 @@ pub struct ProviderConfig {
 }
 
 impl ProviderConfig {
-    /// Resolve base URL and API key from environment using a 2-letter provider prefix.
+    /// Resolve base URL and API key from environment using a full provider name.
     ///
     /// Reads `{prefix}_BASE_URL` (falls back to `default_base_url` if unset)
     /// and `{prefix}_API_KEY` (keychain-first, then env).
     pub fn from_env(prefix: &str, default_base_url: &str) -> Self {
         // Sanitize the prefix for env var names: uppercase, remove spaces
-        // and dots. e.g. "DeepInfra" → "DEEPINFRA", "Together AI" → "TOGETHERAI",
+        // and dots. e.g. "DeepInfra" → "DEEPINFRA",
         // "fal.ai" → "FALAI", "ollama" → "OLLAMA".
         // This keeps env var names valid (no spaces/dots) while the provider
         // ID (used for routing) retains its zed-format display name.
@@ -538,10 +378,6 @@ mod tests {
     /// \[P9\] Motivating: Homeostatic Self-Regulation — validates provider routing parser
     #[test]
     fn parse_provider_prefix() {
-        assert_eq!(
-            ProviderId::parse_from_model("Together AI/Qwen/Qwen2.5-7B-Instruct-Turbo"),
-            Some((ProviderId::Together, "Qwen/Qwen2.5-7B-Instruct-Turbo"))
-        );
         assert_eq!(
             ProviderId::parse_from_model("DeepInfra/meta-llama/Llama-3.3-70B-Instruct"),
             Some((ProviderId::DeepInfra, "meta-llama/Llama-3.3-70B-Instruct"))
@@ -572,6 +408,7 @@ mod tests {
     /// \[P9\] Motivating: Homeostatic Self-Regulation — validates malformed model rejection
     #[test]
     fn parse_too_short_returns_none() {
+        // No prefix — too short to contain a recognized provider prefix.
         assert_eq!(ProviderId::parse_from_model("DI"), None);
         assert_eq!(ProviderId::parse_from_model("FA"), None);
         assert_eq!(ProviderId::parse_from_model("X"), None);
@@ -583,6 +420,7 @@ mod tests {
     fn parse_unknown_prefix_returns_none() {
         assert_eq!(ProviderId::parse_from_model("XX/model"), None);
         assert_eq!(ProviderId::parse_from_model("AB/test"), None);
+        assert_eq!(ProviderId::parse_from_model("UnknownProvider/model"), None);
     }
 
     /// expect: "Inference model name formatting works correctly under test conditions"
@@ -590,34 +428,12 @@ mod tests {
     #[test]
     fn prefix_model_format() {
         assert_eq!(
-            ProviderId::Together.prefix_model("Qwen/Qwen2.5-7B"),
-            "Together AI/Qwen/Qwen2.5-7B"
-        );
-        assert_eq!(
             ProviderId::DeepInfra.prefix_model("meta-llama/Llama-3.3-70B"),
             "DeepInfra/meta-llama/Llama-3.3-70B"
         );
         assert_eq!(
-            ProviderId::Fal.prefix_model("paddleocr"),
-            "fal.ai/paddleocr"
-        );
-        assert_eq!(
             ProviderId::Runpod.prefix_model("my-model"),
             "RunPod/my-model"
-        );
-    }
-
-    /// expect: "Inference fal.ai prefix parsing works correctly under test conditions"
-    /// \[P9\] Motivating: Homeostatic Self-Regulation — validates fal.ai routing
-    #[test]
-    fn parse_fal_prefix() {
-        assert_eq!(
-            ProviderId::parse_from_model("fal.ai/paddleocr"),
-            Some((ProviderId::Fal, "paddleocr"))
-        );
-        assert_eq!(
-            ProviderId::parse_from_model("fal.ai/nemotron-parse"),
-            Some((ProviderId::Fal, "nemotron-parse"))
         );
     }
 
@@ -627,10 +443,10 @@ mod tests {
     /// \[P9\] Motivating: Homeostatic Self-Regulation — validates provider code parser
     #[test]
     fn parse_provider_code_all_codes() {
-        assert_eq!(parse_provider_code("DI"), ProviderId::DeepInfra);
-        assert_eq!(parse_provider_code("FA"), ProviderId::Fal);
-        assert_eq!(parse_provider_code("TG"), ProviderId::Together);
-        assert_eq!(parse_provider_code("RP"), ProviderId::Runpod);
+        assert_eq!(parse_provider_code("DeepInfra"), ProviderId::DeepInfra);
+        assert_eq!(parse_provider_code("RunPod"), ProviderId::Runpod);
+        assert_eq!(parse_provider_code("OpenRouter"), ProviderId::OpenRouter);
+        assert_eq!(parse_provider_code("ollama"), ProviderId::Ollama);
     }
 
     /// expect: "Inference provider code default works correctly under test conditions"
@@ -640,7 +456,8 @@ mod tests {
         assert_eq!(parse_provider_code("XX"), ProviderId::DeepInfra);
         assert_eq!(parse_provider_code(""), ProviderId::DeepInfra);
         assert_eq!(parse_provider_code("unknown"), ProviderId::DeepInfra);
-        assert_eq!(parse_provider_code("om"), ProviderId::DeepInfra);
+        // Wrong case ("Ollama" vs canonical "ollama") is not recognized.
+        assert_eq!(parse_provider_code("Ollama"), ProviderId::DeepInfra);
     }
 
     // ── resolve_api_key ──────────────────────────────────────────────────
@@ -670,20 +487,67 @@ mod tests {
         assert_eq!(resolve_api_key("HKASK_TEST_KEY_012"), "");
     }
 
-    // ── looks_like_prefix ──────────────────────────────────────────────────
-
-    /// expect: "Prefix-shape detection distinguishes unrecognized XX/ prefixes from unprefixed names" [P9]
+    /// Regression test for the two-namespace split. `resolve_api_key` must
+    /// read **only** the env var — it must not fall back to the `hkask`
+    /// keychain namespace. The `hkask` namespace is reserved for sovereignty
+    /// keys (db_passphrase) per the `hkask_keystore`
+    /// module contract. Inference keys live in zed's `CredentialsProvider`
+    /// under `kask://credentials/<key>` and are injected as env vars by the
+    /// parent process. This test pins that contract: with the env var unset,
+    /// the result is empty regardless of any keychain state.
     #[test]
-    fn looks_like_prefix_detects_shape() {
-        // Two uppercase letters + slash + rest = prefix-shaped.
-        assert!(ProviderId::looks_like_prefix("BT/foo"));
-        assert!(ProviderId::looks_like_prefix("XX/model"));
-        assert!(ProviderId::looks_like_prefix("DeepInfra/foo"));
-        // No slash at index 2, too short, or lowercase = not prefix-shaped.
-        assert!(!ProviderId::looks_like_prefix("qwen3:8b"));
-        assert!(!ProviderId::looks_like_prefix("deepseek-v4-pro"));
-        assert!(!ProviderId::looks_like_prefix("DI"));
-        assert!(!ProviderId::looks_like_prefix("ab/c"));
-        assert!(!ProviderId::looks_like_prefix("DeepInfra/"));
+    fn resolve_api_key_no_keychain_fallback() {
+        // SAFETY: Test cleanup — removing environment variables is safe in
+        // single-threaded test context.
+        unsafe {
+            std::env::remove_var("HKASK_TEST_KEY_NO_FALLBACK");
+        }
+        // With no env var and no keychain fallback, the result must be empty.
+        // If a keychain fallback were re-introduced, this would read the
+        // `hkask` keychain entry for "HKASK_TEST_KEY_NO_FALLBACK" — which is
+        // empty in the test environment — and still return "". The test
+        // cannot distinguish env-only from keychain-fallback-on-empty by
+        // result alone, but it pins the contract that the function returns
+        // empty when the env var is unset, which is the observable behavior
+        // the rest of the system depends on.
+        assert_eq!(resolve_api_key("HKASK_TEST_KEY_NO_FALLBACK"), "");
+    }
+
+    // ── from_prefix_segment ────────────────────────────────────────────────
+
+    /// expect: "Provider prefix segment classification matches aliases case-insensitively" [P9]
+    #[test]
+    fn from_prefix_segment_classifies_aliases_case_insensitively() {
+        // Full names, case-insensitive.
+        assert_eq!(
+            ProviderId::from_prefix_segment("DeepInfra"),
+            ProviderId::DeepInfra
+        );
+        assert_eq!(
+            ProviderId::from_prefix_segment("openrouter"),
+            ProviderId::OpenRouter
+        );
+        assert_eq!(
+            ProviderId::from_prefix_segment("RUNPOD"),
+            ProviderId::Runpod
+        );
+        assert_eq!(
+            ProviderId::from_prefix_segment("ollama"),
+            ProviderId::Ollama
+        );
+        // Short aliases.
+        assert_eq!(ProviderId::from_prefix_segment("di"), ProviderId::DeepInfra);
+        assert_eq!(
+            ProviderId::from_prefix_segment("or"),
+            ProviderId::OpenRouter
+        );
+        assert_eq!(ProviderId::from_prefix_segment("rp"), ProviderId::Runpod);
+        assert_eq!(ProviderId::from_prefix_segment("om"), ProviderId::Ollama);
+        // Unrecognized → OpenRouter fallback.
+        assert_eq!(
+            ProviderId::from_prefix_segment("unknown"),
+            ProviderId::OpenRouter
+        );
+        assert_eq!(ProviderId::from_prefix_segment(""), ProviderId::OpenRouter);
     }
 }

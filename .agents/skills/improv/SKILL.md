@@ -6,7 +6,7 @@ description: "Composable interaction grammar for hKask agents. Five improv modes
 
 # Improv
 
-Composable interaction grammar for hKask agents. Five improv modes — Plussing, Yes And, Yes But, Freestyling, and Riffing — provide constructive-by-default communication protocols for dual-presence chat, ensemble sessions, and kata coaching loops. A selector KnowAct evaluates conversation context and routes to the appropriate WordAct; a convergence checker closes the PDCA cycle.
+Composable interaction grammar for hKask agents. Five improv modes — Plussing, Yes And, Yes But, Freestyling, and Riffing — provide constructive-by-default communication protocols for dual-presence chat, ensemble sessions, and kata coaching loops. A selector KnowAct evaluates conversation context and routes to the appropriate WordAct; convergence is detected deterministically via the Cauchy criterion.
 
 ## When to Use
 
@@ -18,7 +18,7 @@ Composable interaction grammar for hKask agents. Five improv modes — Plussing,
 - Dual-presence chat, ensemble sessions, and kata coaching loops where constructive-by-default posture is required
 - When an agent is in a low-confidence regime (confidence < 0.5) and needs non-obvious paths to higher certainty — **Riffing** for divergent exploration of tangents that may surface higher-confidence findings, **Plussing** for constructive extraction of agreeable components from uncertain output
 - When standard evidence-gathering has plateaued and a perspective-shift (not more data) is the path forward — improv modes reframe rather than accumulate
-- After mode selection and application, run convergence-check to verify alignment and constructiveness
+- After mode selection and application, convergence is detected deterministically via the Cauchy criterion
 
 ## Instructions
 
@@ -67,15 +67,6 @@ Composable interaction grammar for hKask agents. Five improv modes — Plussing,
 4. The riff must resolve — it cannot hang indefinitely.
 5. Return `{tangent, outcome, synthesis, thread_id, steps_remaining, reg_span}`.
 
-### Convergence Check (`improv-convergence-check`)
-1. Start the metric at 1.0.
-2. Subtract 0.3 if mode is present and in {plussing, yes-and, yes-but, freestyling, riffing}.
-3. Subtract 0.4 if response content is present and mode-appropriate.
-4. Subtract 0.2 if application output includes coherent Regulation signaling (e.g., `reg_spans` or `reg_span`).
-5. If evidence indicates explicit contradiction/negation instead of constructive extension, keep metric ≥ 0.7.
-6. Clamp to [0,1].
-7. Return `{convergence_metric, convergence_method, rationale, blockers, unresolved_signals}`.
-
 ## Registry Templates
 
 | Template | Type | Purpose |
@@ -86,16 +77,15 @@ Composable interaction grammar for hKask agents. Five improv modes — Plussing,
 | `improv-yes-but.j2` | `WordAct` | Yes But — Accept the whole contribution and append a constraint or redirect that narrows scope without contradicting. |
 | `improv-freestyling.j2` | `WordAct` | Freestyling — Rapid collaborative short-response cycling among participants. Time-bounded, no single owner, round-robin turns. |
 | `improv-riffing.j2` | `WordAct` | Riffing — Solo divergent exploration from a seed contribution. May return to group with synthesis or spawn a new thread. |
-| `improv-convergence-check.j2` | `KnowAct` | Compute normalized convergence for improv mode-selection/application PDCA cycles and report unresolved constructiveness signals. |
 
 ## Constraints
 
 - **Visibility:** All templates are `Public`.
-- **Energy caps:** `improv-select` 4096; `improv-plussing` 4096; `improv-yes-and` 4096; `improv-yes-but` 4096; `improv-freestyling` 4096; `improv-riffing` 4096; `improv-convergence-check` 2048.
+- **Energy caps:** `improv-select` 4096; `improv-plussing` 4096; `improv-yes-and` 4096; `improv-yes-but` 4096; `improv-freestyling` 4096; `improv-riffing` 4096.
 - **Never explicitly negate** (Plussing, and governing principle in selector). Criticism is deletion-by-omission.
 - **Yes And extension must be additive, not substitutive** — the accepted base remains intact and visible.
 - **Yes But constraint narrows, does not contradict** — do not use "no," "wrong," "can't," or "impossible."
 - **Freestyling is time-bounded** with round-robin turns and no single owner.
 - **Riffing must resolve** — return to group, spawn a thread, or complete within a declared step limit.
-- **Convergence threshold** defaults to 0.15; max iterations default to 3; improvement target default 0.10.
+- **Convergence** is detected deterministically via the Cauchy criterion. `max_iterations: 10`, `min_iterations: 2`.
 - **Registry is authoritative** — when this SKILL.md disagrees with registry templates, the registry wins (P5.1).

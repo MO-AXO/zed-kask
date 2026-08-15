@@ -1,0 +1,223 @@
+[inference]
+template_type: KnowAct
+contract:
+  input:
+    pre_act_state: object
+    act_result: object
+    swarm_id: string
+    mode: string
+    target_condition: object|null
+    task_success: object|null
+  output:
+    post_act_state: object
+    variety_coverage: number
+    diversity: number
+    loop_closure: number
+    convergence_metric: number
+    next_focus: string
+    algedonic_signal: object|null
+    lessons_learned: array
+    delegate_notes: string
+    task_success: object|null
+visibility: Public
+---
+{# Template: swarm-intelligence/swarm-check.j2 #}
+{# Functional Role: KnowAct — Re-measure, compute d, emit next_focus + algedonic #}
+{# Produces: check_result #}
+{# Phase 5 — CHECK (CHECK: re-measure + convergence metric + algedonic) #}
+{# hKask v0.31.0 — Swarm Intelligence (mode-aware v2 §15) #}
+{#
+  Re-measure the swarm state post-Act and compute the convergence metric.
+  The metric is a composite swarm-state distance d. The algedonic override
+  is mandatory: a 402 or un-acknowledged curator dispatch escalates
+  regardless of d (.rules "unwrap_or(0) on regulation-loop sense inputs"
+  trap enforced as a convergence invariant).
+#}
+
+[inference]
+temperature = 0.2
+work_effort = "high"
+verbosity = "standard"
+max_tokens = 6144
+thinking_budget = "full"
+
+You are a swarm-convergence analyst. Re-measure the swarm state post-Act and compute the convergence metric.
+
+## Mode
+{{ mode }}
+
+## Pre-Act State (from SENSE)
+```json
+{{ pre_act_state | tojson }}
+```
+
+## Act Result (from ACT)
+```json
+{{ act_result | tojson }}
+```
+
+## Swarm ID
+{{ swarm_id }}
+
+{% if target_condition and target_condition | length > 0 %}
+## Target Condition
+```json
+{{ target_condition | tojson }}
+```
+{% else %}
+## Target Condition (defaults)
+- variety_coverage >= 0.9
+- diversity >= 0.25
+- loop_closure = 1.0
+{% endif %}
+
+## Step 1 — Re-measure the swarm state post-Act
+
+{% if mode == "local" %}
+Re-fetch the local agent registry via `swarm_list_local_agents`, the local
+ledger balance via `swarm_balance_local`, and the local ledger history via
+`swarm_local_history` (funds/debits — the reconciliation record for this
+session's dispatches). Recompute variety_coverage, diversity, alignment,
+cohesion, separation exactly as in SENSE, against the post-Act roster.
+{% else %}
+Re-fetch the workspace roster and wallet via hkask-mcp-swarm (the agent
+orchestrates these calls), plus `swarm_run_status` for the workspace's
+recent messages (dispatch/reconciliation evidence). Recompute
+variety_coverage, diversity, alignment, cohesion, separation exactly as in
+SENSE, against the post-Act roster.
+{% endif %}
+
+## Step 2 — Compute loop_closure
+
+{% if mode == "local" %}
+```
+loop_closure = (successful_delegations / total_delegations)
+```
+
+where:
+- `total_delegations` = count of emitted_calls from ACT.
+- `successful_delegations` = count of emitted_calls whose `swarm_delegate_local`
+  response returned a result rather than an error. Do NOT anchor this on
+  `PaymentRequired`-for-funds: local delegation has no funding gate, so that
+  error cannot occur for an unfunded ledger.
+
+There is no curator dispatch in local mode (no `curator_involved` field).
+The ledger balance is **not** an algedonic signal in local mode: it records
+accumulated spend (and may be negative), so it never predicts a failure. Zero is
+not a floor and does not mean the next delegation will fail.
+
+Vacuous-truth default: if `total_delegations = 0`, `loop_closure = 1.0`
+(vacuously satisfied).
+{% else %}
+```
+loop_closure = (reconciled_dispatches / total_dispatches)
+             AND (acknowledged_curator_dispatches / curator_dispatches)
+```
+
+where:
+- `total_dispatches` = count of emitted_calls from ACT.
+- `reconciled_dispatches` = count of emitted_calls whose estimated_credits
+  matches an entry in /api/wallet/transactions (within tolerance).
+- `curator_dispatches` = count of emitted_calls with curator_involved = true.
+- `acknowledged_curator_dispatches` = count of those with a consent record.
+
+Vacuous-truth default: if `total_dispatches = 0`, `loop_closure = 1.0`
+(vacuously satisfied — no dispatch is un-reconciled). This prevents a
+freshly composed swarm that has not yet dispatched from being falsely flagged
+as a loop-break.
+{% endif %}
+
+## Step 3 — Compute the convergence metric (swarm-state distance)
+
+{% if task_success and task_success | length > 0 %}
+The caller supplied a deterministic task-success signal `task_success`:
+```json
+{{ task_success | tojson }}
+```
+Let `s = task_success.score` if present, else `1.0` if `task_success.pass` is
+true else `0.0`. `s` is a deterministic evaluator's verdict (test pass/fail,
+schema validation, exit code, regex/reference match) — NOT an LLM judgement
+(the determinism constraint). When `s` is present, `d` includes the
+task-success axis: the Go See gap from the cybernetic plan §5 — a healthy
+swarm that fails the task must NOT converge.
+
+```
+d = sqrt( (1 - variety_coverage)^2
+        + max(0, diversity_floor - diversity)^2
+        + (1 - loop_closure)^2
+        + (1 - s)^2 )
+```
+{% else %}
+No deterministic task-success signal was supplied (`task_success` is null).
+This is an open task with no oracle — `d` uses the three swarm-health axes
+only; the irreducible task-success check is the human Go See loop
+(cybernetic plan §5, component C2), NOT an LLM judge. Do NOT fabricate `s`.
+
+```
+d = sqrt( (1 - variety_coverage)^2
+        + max(0, diversity_floor - diversity)^2
+        + (1 - loop_closure)^2 )
+```
+{% endif %}
+
+with `diversity_floor = 0.25` (or the operator-specified override).
+
+`d = 0` means the target condition is met on all (three or four) axes. Record
+convergence_metric = d.
+
+## Step 4 — Algedonic override
+
+{% if mode == "local" %}
+Check for algedonic signals that override convergence:
+- Any `PaymentRequired` from `swarm_delegate_local` during the Act. In local
+  mode this means only that `credits_authorized` exceeded the per-dispatch
+  ceiling — a misconfigured request, NOT an exhausted ledger. The remedy is to
+  lower `credits_authorized` or raise `HKASK_ABW_MAX_CREDITS`; do **not**
+  propose `swarm_fund_local`, which gates nothing.
+- A delegation error that is not a ceiling refusal (inference unreachable,
+  agent missing) — the substrate, not the budget.
+
+If present, set algedonic_signal = { type, detail } and the loop
+MUST NOT claim convergence regardless of d.
+
+If absent, algedonic_signal = null.
+{% else %}
+Check for algedonic signals that override convergence:
+- Any 402 (PaymentRequired) from the ABW API during the Act or re-fetch.
+- Any un-acknowledged curator dispatch (curator_involved = true with no
+  consent record).
+
+If either is present, set algedonic_signal = { type, detail } and the loop
+MUST NOT claim convergence regardless of d. This is the .rules
+"unwrap_or(0) on regulation-loop sense inputs" trap enforced as a
+convergence invariant: a broken algedonic channel is never read as "no
+deviation."
+
+If neither is present, algedonic_signal = null.
+{% endif %}
+
+## Step 5 — Emit next_focus
+
+Determine which axis contributes the largest term to d:
+- `(1 - variety_coverage)` largest → next_focus = "hiring" (cover transforms)
+- `max(0, diversity_floor - diversity)` largest → next_focus = "diversification"
+- `(1 - loop_closure)` largest → next_focus = "reconciliation"
+- `(1 - s)` largest (only when `task_success` is present) → next_focus =
+  "task_success" — the swarm is not solving the task; the curator should
+  `reconfigure_agent` (component C6) the blamed agent or escalate Go See (C2).
+
+If algedonic_signal is non-null, next_focus = "algedonic_repair" regardless
+of d's decomposition.
+
+## Step 6 — Lessons learned
+
+Distill 1-3 concrete lessons for the next iteration's SENSE pass. These close
+the autopoietic loop (the next iteration's composition recommendation is a
+function of these findings).
+
+## Output
+
+Produce a JSON object with: post_act_state, variety_coverage, diversity,
+loop_closure, convergence_metric, next_focus, algedonic_signal (object or
+null), lessons_learned (array), delegate_notes, task_success (echo the input
+verdict, or null).

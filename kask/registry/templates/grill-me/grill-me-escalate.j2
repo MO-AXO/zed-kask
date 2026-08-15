@@ -1,10 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- detect
-- evaluate
-- regulate
-- orient
 contract:
   input:
     topic: string
@@ -15,7 +10,6 @@ contract:
     new_level: integer
     action: string
     reason: string
-energy_cap: 2048
 visibility: Public
 ---
 {# Template: grill-me/grill-me-escalate.j2 #}
@@ -27,7 +21,7 @@ visibility: Public
 temperature = 0.1
 work_effort = "high"
 verbosity = "terse"
-max_tokens = 1024
+max_tokens = 2048
 thinking_budget = "minimal"
 
 Determine the next difficulty action for grilling on **{{ topic }}**.

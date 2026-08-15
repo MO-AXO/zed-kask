@@ -248,7 +248,7 @@ pub fn domain_saliency(line: &str, anchor: Option<&OntologyAnchor>) -> f64 {
             }
         }
         Some(OntologyAnchor::DomainSupplement {
-            namespace: OntologyNamespace::Cogat,
+            namespace: OntologyNamespace::Sumo,
             ..
         }) => {
             if line.contains("memory")
@@ -321,109 +321,6 @@ pub fn domain_saliency(line: &str, anchor: Option<&OntologyAnchor>) -> f64 {
     };
 
     direct + graph_bonus
-}
-
-/// Derive an ontology anchor from persona description text.
-///
-/// Uses the same domain-signaling pattern as `derive_ontology_anchor` but
-/// applied to natural-language persona text (description + capabilities).
-/// Returns `None` if no domain signals are detected (caller treats as Core).
-pub fn persona_to_anchor(description: &str, capabilities: &[String]) -> Option<OntologyAnchor> {
-    let lower = description.to_lowercase();
-    let cap_lower: Vec<String> = capabilities.iter().map(|c| c.to_lowercase()).collect();
-    let combined: Vec<&str> = lower
-        .split_whitespace()
-        .chain(cap_lower.iter().flat_map(|c| c.split('_')))
-        .collect();
-
-    // CogAT: cognitive / memory domain
-    if combined.iter().any(|w| {
-        *w == "memory"
-            || *w == "cognition"
-            || *w == "recall"
-            || *w == "consolidation"
-            || *w == "encoding"
-            || *w == "episodic"
-    }) {
-        return Some(OntologyAnchor::DomainSupplement {
-            namespace: OntologyNamespace::Cogat,
-            concept: hkask_bridge_dublincore::DATASET.to_string(),
-        });
-    }
-    // FIBO: financial domain
-    if combined.iter().any(|w| {
-        *w == "financial"
-            || *w == "finance"
-            || *w == "portfolio"
-            || *w == "stock"
-            || *w == "trading"
-            || *w == "dcf"
-            || *w == "screener"
-    }) {
-        return Some(OntologyAnchor::DomainSupplement {
-            namespace: OntologyNamespace::Fibo,
-            concept: hkask_bridge_dublincore::DATASET.to_string(),
-        });
-    }
-    // GOLEM: narrative domain
-    if combined.iter().any(|w| {
-        *w == "narrative" || *w == "character" || *w == "story" || *w == "replica" || *w == "author"
-    }) {
-        return Some(OntologyAnchor::DomainSupplement {
-            namespace: OntologyNamespace::Golem,
-            concept: hkask_bridge_dublincore::TEXT.to_string(),
-        });
-    }
-    // ML-Schema: training / ML domain
-    if combined.iter().any(|w| {
-        *w == "training"
-            || *w == "model"
-            || *w == "adapter"
-            || *w == "sweep"
-            || *w == "learning"
-            || *w == "ml"
-    }) {
-        return Some(OntologyAnchor::DomainSupplement {
-            namespace: OntologyNamespace::MlSchema,
-            concept: hkask_bridge_dublincore::DATASET.to_string(),
-        });
-    }
-    // OMC: media domain
-    if combined.iter().any(|w| {
-        *w == "media" || *w == "video" || *w == "image" || *w == "gallery" || *w == "generate"
-    }) {
-        return Some(OntologyAnchor::DomainSupplement {
-            namespace: OntologyNamespace::Omc,
-            concept: hkask_bridge_dublincore::COLLECTION.to_string(),
-        });
-    }
-    // PKO: process / workflow domain (broadest — catches curator, task, spec, etc.)
-    if combined.iter().any(|w| {
-        *w == "curator"
-            || *w == "process"
-            || *w == "workflow"
-            || *w == "task"
-            || *w == "kanban"
-            || *w == "spec"
-            || *w == "skill"
-            || *w == "pipeline"
-            || *w == "regulation" /* regulation stopword */
-    }) {
-        return Some(OntologyAnchor::DualAxis {
-            axis: OntologyAxis::Pko,
-            concept: hkask_bridge_dublincore::PROCEDURE.to_string(),
-        });
-    }
-    // DC+BIBO: document / metadata domain
-    if combined.iter().any(|w| {
-        *w == "document" || *w == "file" || *w == "registry" || *w == "metadata" || *w == "archive"
-    }) {
-        return Some(OntologyAnchor::DualAxis {
-            axis: OntologyAxis::DcBibo,
-            concept: hkask_bridge_dublincore::TEXT.to_string(),
-        });
-    }
-    None
 }
 
 pub struct FlashrankAlgorithm;
@@ -604,29 +501,6 @@ impl AlgorithmRegistry {
             .expect("at least one algorithm")
             .as_ref()
     }
-
-    /// Select an algorithm by name. Used by the learning mechanism in
-    /// `CondenserEngine::compress()` when `recommend_algorithm()` returns
-    /// a historically better-performing algorithm than the static mapping.
-    pub fn select_by_name(&self, name: &str) -> Option<&dyn CondenserAlgorithm> {
-        self.algorithms
-            .iter()
-            .find(|a| a.name() == name)
-            .map(|a| a.as_ref())
-    }
-
-    pub fn list_algorithms(&self) -> Vec<serde_json::Value> {
-        self.algorithms
-            .iter()
-            .map(|a| {
-                serde_json::json!({
-                    "name": a.name(),
-                    "description": a.description(),
-                    "default_for": a.default_for().iter().map(|c| c.label()).collect::<Vec<_>>(),
-                })
-            })
-            .collect()
-    }
 }
 
 /// Keyword→category mapping — single source of truth for both exact-token (Phase 1)
@@ -634,7 +508,7 @@ impl AlgorithmRegistry {
 const KEYWORD_CATEGORIES: &[(&[&str], ContextCategory)] = &[
     (
         &[
-            "git", "docker", "cargo", "npm", "shell", "bash", "exec", "run",
+            "git", "docker", "cargo", "npm", "shell", "bash", "exec", "run", "terminal",
         ],
         ContextCategory::ShellCommand,
     ),
@@ -676,96 +550,14 @@ pub fn classify_tool(tool_name: &str) -> ContextCategory {
 }
 
 /// Derive the ontology anchor from the tool name alone.
-/// Every MCP server links against the same bridge crates — no wire-protocol fields needed.
+///
+/// The condenser compresses tool outputs and has only the tool name to go
+/// on. The tool name carries the calling server's functional area, which
+/// is the domain hint: `select_ontology_anchor` maps it to the axis
+/// anchoring. The domain-selection logic lives in the shared
+/// `hkask-bridge-ontology` crate; this is a thin pass-through.
 pub fn derive_ontology_anchor(tool_name: &str) -> OntologyAnchor {
-    let lower = tool_name.to_lowercase();
-    // FIBO: financial data
-    if lower.starts_with("company")
-        || lower.starts_with("stock")
-        || lower.starts_with("portfolio")
-        || lower.starts_with("dcf")
-        || lower.starts_with("screener")
-        || lower.starts_with("forecast")
-        || lower.starts_with("scenario")
-    {
-        return OntologyAnchor::DomainSupplement {
-            namespace: OntologyNamespace::Fibo,
-            concept: hkask_bridge_dublincore::DATASET.to_string(),
-        };
-    }
-    // CogAT: cognitive/memory
-    if lower.starts_with("memory") || lower.starts_with("episodic") || lower.starts_with("semantic")
-    {
-        return OntologyAnchor::DomainSupplement {
-            namespace: OntologyNamespace::Cogat,
-            concept: hkask_bridge_dublincore::DATASET.to_string(),
-        };
-    }
-    // GOLEM: narrative / persona
-    if lower.starts_with("corpus_build_persona")
-        || lower.starts_with("corpus_compose")
-        || lower.starts_with("corpus_rewrite")
-        || lower.starts_with("corpus_mashup")
-        || lower.starts_with("corpus_compare")
-        || lower.starts_with("corpus_discover")
-        || lower.starts_with("corpus_registry")
-        || lower.starts_with("corpus_explain")
-        || lower.starts_with("corpus_cache_work")
-        || lower.starts_with("replica")
-        || lower.starts_with("author")
-    {
-        return OntologyAnchor::DomainSupplement {
-            namespace: OntologyNamespace::Golem,
-            concept: hkask_bridge_dublincore::TEXT.to_string(),
-        };
-    }
-    // ML-Schema: training
-    if lower.starts_with("training") || lower.starts_with("adapter") || lower.starts_with("sweep") {
-        return OntologyAnchor::DomainSupplement {
-            namespace: OntologyNamespace::MlSchema,
-            concept: hkask_bridge_dublincore::DATASET.to_string(),
-        };
-    }
-    // OMC: media
-    if lower.starts_with("generate")
-        || lower.starts_with("video")
-        || lower.starts_with("image")
-        || lower.starts_with("gallery")
-        || lower.starts_with("face")
-    {
-        return OntologyAnchor::DomainSupplement {
-            namespace: OntologyNamespace::Omc,
-            concept: hkask_bridge_dublincore::COLLECTION.to_string(),
-        };
-    }
-    // PKO dual-axis: process workflows
-    if lower.starts_with("kanban")
-        || lower.starts_with("board")
-        || lower.starts_with("task")
-        || lower.starts_with("research")
-        || lower.starts_with("spec")
-        || lower.starts_with("skill")
-        || lower.starts_with("docproc")
-        || lower.starts_with("curator")
-        || lower.starts_with("condenser")
-    {
-        return OntologyAnchor::DualAxis {
-            axis: OntologyAxis::Pko,
-            concept: hkask_bridge_dublincore::PROCEDURE.to_string(),
-        };
-    }
-    // DC+BIBO dual-axis: entity metadata
-    if lower.starts_with("file")
-        || lower.starts_with("web")
-        || lower.starts_with("registry")
-        || lower.starts_with("wallet")
-    {
-        return OntologyAnchor::DualAxis {
-            axis: OntologyAxis::DcBibo,
-            concept: hkask_bridge_dublincore::TEXT.to_string(),
-        };
-    }
-    OntologyAnchor::Core
+    select_ontology_anchor(tool_name)
 }
 
 #[cfg(test)]
@@ -855,39 +647,42 @@ mod tests {
             derive_ontology_anchor("company_profile"),
             OntologyAnchor::DomainSupplement {
                 namespace: OntologyNamespace::Fibo,
-                concept: hkask_bridge_dublincore::DATASET.to_string()
+                concept: dc_bibo::DATASET.to_string()
             }
         );
         assert_eq!(
             derive_ontology_anchor("stock_screener"),
             OntologyAnchor::DomainSupplement {
                 namespace: OntologyNamespace::Fibo,
-                concept: hkask_bridge_dublincore::DATASET.to_string()
+                concept: dc_bibo::DATASET.to_string()
             }
         );
         assert_eq!(
             derive_ontology_anchor("dcf_valuation"),
             OntologyAnchor::DomainSupplement {
                 namespace: OntologyNamespace::Fibo,
-                concept: hkask_bridge_dublincore::DATASET.to_string()
+                concept: dc_bibo::DATASET.to_string()
             }
         );
     }
 
     #[test]
-    fn derive_ontology_cogat_for_memory_tools() {
+    fn derive_ontology_sumo_for_memory_tools() {
+        // Memory/cognitive domains no longer have a CogAT supplement; they route
+        // to SUMO (the universal fallback) which provides the upper-ontology
+        // categories (Process, Proposition) for cognitive concepts.
         assert_eq!(
             derive_ontology_anchor("memory_recall"),
             OntologyAnchor::DomainSupplement {
-                namespace: OntologyNamespace::Cogat,
-                concept: hkask_bridge_dublincore::DATASET.to_string()
+                namespace: OntologyNamespace::Sumo,
+                concept: sumo::ENTITY.to_string()
             }
         );
         assert_eq!(
             derive_ontology_anchor("episodic_store"),
             OntologyAnchor::DomainSupplement {
-                namespace: OntologyNamespace::Cogat,
-                concept: hkask_bridge_dublincore::DATASET.to_string()
+                namespace: OntologyNamespace::Sumo,
+                concept: sumo::ENTITY.to_string()
             }
         );
     }
@@ -898,14 +693,14 @@ mod tests {
             derive_ontology_anchor("kanban_task_create"),
             OntologyAnchor::DualAxis {
                 axis: OntologyAxis::Pko,
-                concept: hkask_bridge_dublincore::PROCEDURE.to_string()
+                concept: pko::PROCEDURE.to_string()
             }
         );
         assert_eq!(
-            derive_ontology_anchor("condenser_compress"),
+            derive_ontology_anchor("condenser_persist"),
             OntologyAnchor::DualAxis {
                 axis: OntologyAxis::Pko,
-                concept: hkask_bridge_dublincore::PROCEDURE.to_string()
+                concept: pko::PROCEDURE.to_string()
             }
         );
     }
@@ -916,7 +711,7 @@ mod tests {
             derive_ontology_anchor("corpus_build_persona"),
             OntologyAnchor::DomainSupplement {
                 namespace: OntologyNamespace::Golem,
-                concept: hkask_bridge_dublincore::TEXT.to_string()
+                concept: dc_bibo::TEXT.to_string()
             }
         );
     }
@@ -927,7 +722,7 @@ mod tests {
             derive_ontology_anchor("training_submit"),
             OntologyAnchor::DomainSupplement {
                 namespace: OntologyNamespace::MlSchema,
-                concept: hkask_bridge_dublincore::DATASET.to_string()
+                concept: dc_bibo::DATASET.to_string()
             }
         );
     }
@@ -938,14 +733,26 @@ mod tests {
             derive_ontology_anchor("generate_image"),
             OntologyAnchor::DomainSupplement {
                 namespace: OntologyNamespace::Omc,
-                concept: hkask_bridge_dublincore::COLLECTION.to_string()
+                concept: dc_bibo::COLLECTION.to_string()
             }
         );
     }
 
     #[test]
-    fn derive_ontology_core_for_unknown_tools() {
-        assert_eq!(derive_ontology_anchor("unknown_tool"), OntologyAnchor::Core);
+    fn derive_ontology_sumo_for_unknown_tools() {
+        // Unknown tools route to SUMO (the universal fallback), not Core.
+        assert_eq!(
+            derive_ontology_anchor("unknown_tool"),
+            OntologyAnchor::DomainSupplement {
+                namespace: OntologyNamespace::Sumo,
+                concept: sumo::ENTITY.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn derive_ontology_core_for_empty_tool_name() {
+        // An empty tool name has no signal — the 5W1H core is the right anchor.
         assert_eq!(derive_ontology_anchor(""), OntologyAnchor::Core);
     }
 
@@ -955,7 +762,7 @@ mod tests {
             derive_ontology_anchor("file_read"),
             OntologyAnchor::DualAxis {
                 axis: OntologyAxis::DcBibo,
-                concept: hkask_bridge_dublincore::TEXT.to_string()
+                concept: dc_bibo::TEXT.to_string()
             }
         );
     }
@@ -1141,9 +948,9 @@ mod tests {
         assert!(result_lines.len() <= 30, "result exceeds budget");
     }
 
-    /// CogAT-anchored text preserves memory/cognitive keywords.
+    /// SUMO-anchored text preserves memory/cognitive keywords.
     #[test]
-    fn cogat_anchor_preserves_memory_keywords() {
+    fn sumo_anchor_preserves_memory_keywords() {
         let input = concat!(
             "Memory Operation Report\n",
             "The episodic memory store received 15 new events.\n",
@@ -1159,8 +966,8 @@ mod tests {
         );
         let algo = WordRankAlgorithm;
         let anchor = Some(OntologyAnchor::DomainSupplement {
-            namespace: OntologyNamespace::Cogat,
-            concept: "cogat:episodic_memory".into(),
+            namespace: OntologyNamespace::Sumo,
+            concept: "sumo:Process".into(),
         });
         let (result, _) = algo.compress(
             input,
@@ -1168,7 +975,7 @@ mod tests {
             ContextCategory::LogOutput,
             anchor.as_ref(),
         );
-        // CogAT anchor should prioritize lines with cognitive/memory keywords
+        // SUMO anchor should prioritize lines with cognitive/memory keywords
         // Soft profile (60% retention): enough budget for multiple lines
         let preserved_keywords = result.contains("episodic")
             || result.contains("Encoding")
@@ -1232,7 +1039,7 @@ mod tests {
             anchor,
             OntologyAnchor::DomainSupplement {
                 namespace: OntologyNamespace::Fibo,
-                concept: hkask_bridge_dublincore::DATASET.to_string()
+                concept: dc_bibo::DATASET.to_string()
             }
         );
 
@@ -1252,6 +1059,35 @@ mod tests {
         let has_financial =
             result.contains("revenue") || result.contains("P/E") || result.contains("market cap");
         assert!(has_financial, "financial content not preserved: {result}");
+    }
+
+    /// Verify the condenser classifies media-tool names as OMC (MovieLabs
+    /// Ontology for Media Creation). The media MCP server now emits OMC concept
+    /// tags in its `display_hint` blocks (see `hkask-mcp-media/src/omc.rs`),
+    /// and the condenser's `derive_ontology_anchor` must classify the same
+    /// media-tool name prefixes into `OntologyNamespace::Omc` so the condenser
+    /// and the widget agree on the ontology namespace.
+    #[test]
+    fn derive_ontology_anchor_classifies_media_tools_as_omc() {
+        for tool in [
+            "generate_image",
+            "generate_video",
+            "video_clip",
+            "image_to_video",
+            "gallery_search",
+            "gallery_find_similar",
+            "face_register",
+        ] {
+            let anchor = derive_ontology_anchor(tool);
+            assert_eq!(
+                anchor,
+                OntologyAnchor::DomainSupplement {
+                    namespace: OntologyNamespace::Omc,
+                    concept: dc_bibo::COLLECTION.to_string()
+                },
+                "media tool '{tool}' must classify as OMC"
+            );
+        }
     }
 
     // ── Property-based tests (Wave 2) ─────────────────────────────────────
@@ -1331,6 +1167,30 @@ mod tests {
                 algo.compress(&input, profile, ContextCategory::Unknown, None);
             prop_assert!(compressed.len() <= input.len(),
                 "flashrank fallback expanded: compressed {} > original {}", compressed.len(), input.len());
+        }
+    }
+
+    // compute_budget: budget never exceeds input, respects max_lines cap,
+    // and passthrough flag is consistent. Subsumes the 5 hardcoded compute_budget_* tests.
+    proptest! {
+        #[test]
+        fn compute_budget_invariants(
+            lines in 0usize..10_000usize,
+            profile in select(&[Profile::Heavy, Profile::Normal, Profile::Soft, Profile::Light]),
+        ) {
+            let (budget, passthrough) = compute_budget(lines, profile);
+
+            prop_assert!(budget <= lines,
+                "budget exceeds input: budget={}, lines={}", budget, lines);
+
+            if let Some(max) = profile.max_lines() {
+                prop_assert!(budget <= max,
+                    "budget exceeds max_lines: budget={}, max={}, profile={:?}", budget, max, profile);
+            }
+
+            prop_assert_eq!(passthrough, budget >= lines,
+                "passthrough flag inconsistent: budget={}, lines={}, passthrough={}",
+                budget, lines, passthrough);
         }
     }
 }

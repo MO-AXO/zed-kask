@@ -1,3 +1,16 @@
+[inference]
+max_tokens = 2048
+template_type: KnowAct
+contract:
+  input:
+    surface_parameter: string
+    authenticated_host: string
+  output:
+    manifest_paths: array
+    dependency_graph: object
+    regressions_checked: array
+visibility: Public
+---
 {# goal: Discover dependency manifest surfaces (Cargo.toml, deny.toml, lockfiles, package-lock.json, go.sum) within workspace (P4). Read security/regressions/ for existing supply-chain checks. Return concrete manifest_paths (verifiable file paths only — no synthetic files). Emit reg.supply_chain.select span (P9). Authenticated host mandatory (P12). Surface parameter: cargo|npm|python|deny|all. #}
 {% set surfaces = [
   {id: 'cargo', files: ['Cargo.toml', '*.lock'], registry: 'crates.io'},
@@ -18,7 +31,6 @@ Select surface: {{ target_surface | default('all') }}
 Discovered manifests: {{ discovered_manifests | default([]) }}
 Existing supply-chain regressions: {{ existing_regressions | default([]) }}
 Defense layers to verify: dependency_pinning, registry_trust, sbom_presence, license_compatibility
-Convergence baseline: {{ convergence_metric | default(1.0) }}
 
 {# Evidence: concrete file paths only — no fabricated manifest findings #}
 {# Source citations: crates.io advisory database, cargo-deny docs, deny.toml spec #}

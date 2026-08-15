@@ -1,15 +1,6 @@
 {# goal: Derive per-scenario implications and identify early-warning indicators. Produces robust strategies (for all scenarios) and contingent strategies (for specific unfoldings). #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- implication
-- indicator
-- robust
-- contingent
-- strategy
-- tripwire
-- monitor
-- hedge
 contract:
   input:
     refined_question: string
@@ -20,7 +11,6 @@ contract:
     contingent_strategies: array
     early_indicators: array
     monitoring_plan: string
-energy_cap: 4096
 visibility: Public
 ---
 {# Template: scenario-builder/implications-indicators.j2 #}

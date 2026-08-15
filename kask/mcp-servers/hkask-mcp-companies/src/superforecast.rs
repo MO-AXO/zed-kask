@@ -186,6 +186,98 @@ pub fn expected_intrinsic(weighted: &[WeightedScenario]) -> f64 {
         .sum()
 }
 
+// ── Tree-weighted scenarios (T7, detailed mode) ─────────────────────────────
+
+/// Weighting mode of a scenario analysis — the maturity label downstream
+/// consumers use to tell how the quadrant probabilities were derived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum WeightingMode {
+    /// Simple mode: 2×2 range without probabilities (the default on-ramp).
+    #[serde(rename = "schwartz_2x2")]
+    Schwartz2x2,
+    /// Detailed mode: quadrant probabilities derived from a validated event
+    /// tree's root marginals (the earned upgrade).
+    #[serde(rename = "event_tree")]
+    EventTree,
+}
+
+/// Minimal, self-describing projection of a scenarios-server `EventTree` for
+/// the tree-weighted path. Companies does not depend on the scenarios crate
+/// (the integration seam is caller-mediated paste bridging, per the gap
+/// report); this struct is the documented contract of what the bridge
+/// consumes — the `tree` object from `scenario_from_markets_set` or
+/// `scenario_propagate` output.
+///
+/// R3: when the tree comes from `compose_cmp_tree` (CMP-driven composition),
+/// the `cmp_provenance` field records the CMP index identities so the
+/// tree-weighted output can cite them. When absent, the tree is from raw
+/// contracts (pre-R3 behavior).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct EventTreeProjection {
+    pub root_ids: Vec<String>,
+    pub nodes: Vec<EventTreeNodeProjection>,
+    /// R3: CMP provenance — present when the tree was built from CMP indices
+    /// (via `compose_cmp_tree`). Each entry is a CMP index identity
+    /// (`cmp:{family}:{tenor}:{orientation}`). Absent for raw-contract trees.
+    #[serde(default)]
+    pub cmp_provenance: Vec<CmpIndexProvenance>,
+}
+
+/// R3: CMP index provenance entry — one per CMP index in the tree.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct CmpIndexProvenance {
+    /// The CMP index identity: `cmp:{family}:{tenor}:{orientation}`.
+    pub id: String,
+    /// The base-event family label (e.g. "policy_interest_rate").
+    pub family: String,
+    /// The CMP tenor label ("1m", "3m", "6m").
+    pub tenor: String,
+    /// The orientation ("increase", "decline", "stable").
+    pub orientation: String,
+    /// The venue ("kalshi", "polymarket").
+    pub venue: String,
+    /// The construction method ("interpolated" or "bucketed_sparse").
+    pub method: String,
+    /// The maturity-matching error in days.
+    pub maturity_error_days: f64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct EventTreeNodeProjection {
+    pub id: String,
+    pub marginal_probability: f64,
+}
+
+/// Derive 2×2 quadrant probabilities from an event tree's root marginals.
+///
+/// Mapping (documented, deterministic): with exactly two root events, the
+/// first root's marginal plays P(high growth) and the second P(high margin),
+/// and quadrant probabilities follow the same product form as
+/// `distribute_scenario_probabilities` — but with tree-resolved marginals
+/// (which already encode the tree's conditioning) instead of independently
+/// elicited probabilities. With any other root count the mapping is
+/// ambiguous and None is returned — the caller falls back to simple mode
+/// with a warning rather than fabricating a mapping.
+///
+/// Returns (growth_probability, margin_probability) on success.
+pub fn tree_root_probabilities(tree: &EventTreeProjection) -> Option<(f64, f64)> {
+    if tree.root_ids.len() != 2 {
+        return None;
+    }
+    let marginal_of = |id: &str| {
+        tree.nodes
+            .iter()
+            .find(|n| n.id == id)
+            .map(|n| n.marginal_probability)
+    };
+    let growth = marginal_of(&tree.root_ids[0])?;
+    let margin = marginal_of(&tree.root_ids[1])?;
+    if !(0.0..=1.0).contains(&growth) || !(0.0..=1.0).contains(&margin) {
+        return None;
+    }
+    Some((growth, margin))
+}
+
 /// Check if an actual value falls within a tolerance band of the forecast.
 pub fn within_tolerance(forecast: f64, actual: f64, tolerance: f64) -> bool {
     if forecast == 0.0 {
@@ -197,6 +289,155 @@ pub fn within_tolerance(forecast: f64, actual: f64, tolerance: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── T7 tree-weighted path ────────────────────────────────────────────
+
+    fn two_root_tree(g: f64, m: f64) -> EventTreeProjection {
+        EventTreeProjection {
+            root_ids: vec!["mkt-G".into(), "mkt-M".into()],
+            nodes: vec![
+                EventTreeNodeProjection {
+                    id: "mkt-G".into(),
+                    marginal_probability: g,
+                },
+                EventTreeNodeProjection {
+                    id: "mkt-M".into(),
+                    marginal_probability: m,
+                },
+                EventTreeNodeProjection {
+                    id: "mkt-child".into(),
+                    marginal_probability: 0.99,
+                },
+            ],
+            cmp_provenance: vec![],
+        }
+    }
+
+    #[test]
+    fn tree_root_probabilities_two_roots() {
+        let tree = two_root_tree(0.6, 0.4);
+        let (g, m) = tree_root_probabilities(&tree).expect("two valid roots");
+        assert!((g - 0.6).abs() < 1e-12);
+        assert!((m - 0.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn tree_root_probabilities_rejects_non_two_root_trees() {
+        let mut tree = two_root_tree(0.6, 0.4);
+        tree.root_ids = vec!["mkt-G".into()];
+        assert!(tree_root_probabilities(&tree).is_none());
+        tree.root_ids = vec!["a".into(), "b".into(), "c".into()];
+        assert!(tree_root_probabilities(&tree).is_none());
+    }
+
+    #[test]
+    fn tree_root_probabilities_rejects_out_of_range_marginal() {
+        let tree = two_root_tree(1.5, 0.4);
+        assert!(tree_root_probabilities(&tree).is_none());
+    }
+
+    // ── R3: CMP provenance ───────────────────────────────────────────────
+
+    #[test]
+    fn cmp_provenance_deserializes_from_json() {
+        // A CMP-driven tree JSON with cmp_provenance field.
+        let json = r#"{
+            "root_ids": ["cmp:policy_interest_rate:3m:increase", "cmp:crude_oil_price:1m:increase"],
+            "nodes": [
+                {"id": "cmp:policy_interest_rate:3m:increase", "marginal_probability": 0.65},
+                {"id": "cmp:crude_oil_price:1m:increase", "marginal_probability": 0.40}
+            ],
+            "cmp_provenance": [
+                {
+                    "id": "cmp:policy_interest_rate:3m:increase",
+                    "family": "policy_interest_rate",
+                    "tenor": "3m",
+                    "orientation": "increase",
+                    "venue": "kalshi",
+                    "method": "interpolated",
+                    "maturity_error_days": 0.0
+                },
+                {
+                    "id": "cmp:crude_oil_price:1m:increase",
+                    "family": "crude_oil_price",
+                    "tenor": "1m",
+                    "orientation": "increase",
+                    "venue": "kalshi",
+                    "method": "bucketed_sparse",
+                    "maturity_error_days": 5.0
+                }
+            ]
+        }"#;
+        let tree: EventTreeProjection = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(tree.cmp_provenance.len(), 2);
+        assert_eq!(tree.cmp_provenance[0].family, "policy_interest_rate");
+        assert_eq!(tree.cmp_provenance[0].method, "interpolated");
+        assert_eq!(tree.cmp_provenance[1].family, "crude_oil_price");
+        assert_eq!(tree.cmp_provenance[1].method, "bucketed_sparse");
+        // The root probabilities still extract correctly.
+        let (g, m) = tree_root_probabilities(&tree).expect("two roots");
+        assert!((g - 0.65).abs() < 1e-9);
+        assert!((m - 0.40).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cmp_provenance_defaults_to_empty_for_raw_contract_trees() {
+        // A raw-contract tree JSON without cmp_provenance — backward compatible.
+        let json = r#"{
+            "root_ids": ["mkt-G", "mkt-M"],
+            "nodes": [
+                {"id": "mkt-G", "marginal_probability": 0.6},
+                {"id": "mkt-M", "marginal_probability": 0.4}
+            ]
+        }"#;
+        let tree: EventTreeProjection = serde_json::from_str(json).expect("deserialize");
+        assert!(tree.cmp_provenance.is_empty());
+    }
+
+    #[test]
+    fn tree_weighted_expected_intrinsic_hand_check() {
+        // Quadrant intrinsics 200/150/120/80 with tree marginals g=0.6,
+        // m=0.4: probabilities 0.24/0.36/0.16/0.24; expected =
+        // 200·0.24 + 150·0.36 + 120·0.16 + 80·0.24 = 48+54+19.2+19.2 = 140.4.
+        let results: Vec<crate::scenarios::ScenarioResult> = Vec::new();
+        let _ = results; // distribute works off ScenarioResult; use direct weights below
+        let weighted = vec![
+            WeightedScenario {
+                name: "Bull",
+                intrinsic_per_share: 200.0,
+                probability: 0.24,
+            },
+            WeightedScenario {
+                name: "Land",
+                intrinsic_per_share: 150.0,
+                probability: 0.36,
+            },
+            WeightedScenario {
+                name: "Cow",
+                intrinsic_per_share: 120.0,
+                probability: 0.16,
+            },
+            WeightedScenario {
+                name: "Bear",
+                intrinsic_per_share: 80.0,
+                probability: 0.24,
+            },
+        ];
+        let expected = expected_intrinsic(&weighted);
+        assert!((expected - 140.4).abs() < 1e-9, "expected {expected}");
+    }
+
+    #[test]
+    fn weighting_mode_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(WeightingMode::Schwartz2x2).unwrap(),
+            serde_json::json!("schwartz_2x2")
+        );
+        assert_eq!(
+            serde_json::to_value(WeightingMode::EventTree).unwrap(),
+            serde_json::json!("event_tree")
+        );
+    }
 
     #[test]
     fn scenario_probabilities_sum_to_one() {

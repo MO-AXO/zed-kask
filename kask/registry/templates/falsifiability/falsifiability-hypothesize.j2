@@ -1,12 +1,6 @@
 {# goal: Chamberlin multiple working hypotheses — generate 3-7 falsifiable candidate explanations with no early commitment. #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- generate
-- hypothesize
-- predict
-- rank
-- diversify
 contract:
   input:
     admitted_target: string
@@ -16,7 +10,6 @@ contract:
     hypotheses: array
     discarded: array
     user_review_requested: boolean
-energy_cap: 4096
 visibility: Public
 ---
 {# Template: falsifiability/falsifiability-hypothesize.j2 #}

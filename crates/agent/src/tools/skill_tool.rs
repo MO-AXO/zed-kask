@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use crate::{AgentTool, ToolCallEventStream, ToolInput};
+use crate::{AgentTool, CascadeChatMessage, MemorySnippetRecord, ToolCallEventStream, ToolInput};
 
 /// XML-escape a string so a malicious skill author cannot break out of the
 /// `<skill_content>` envelope (or the `<available_skills>` catalog) by
@@ -44,7 +44,6 @@ fn neutralize_envelope_tags(input: &str) -> String {
 /// injected into prompts.
 pub fn render_skill_envelope(skill: &Skill, body: &str) -> String {
     let source = match &skill.source {
-        agent_skills::SkillSource::BuiltIn => "built-in",
         agent_skills::SkillSource::Global => "global",
         agent_skills::SkillSource::ProjectLocal { .. } => "project-local",
         // zed-kask: marketplace-installed skills are labeled with their
@@ -54,9 +53,7 @@ pub fn render_skill_envelope(skill: &Skill, body: &str) -> String {
         agent_skills::SkillSource::Public { .. } => "marketplace",
     };
     let worktree = match &skill.source {
-        agent_skills::SkillSource::BuiltIn
-        | agent_skills::SkillSource::Global
-        | agent_skills::SkillSource::Public { .. } => None,
+        agent_skills::SkillSource::Global | agent_skills::SkillSource::Public { .. } => None,
         agent_skills::SkillSource::ProjectLocal {
             worktree_root_name, ..
         } => Some(worktree_root_name.clone()),
@@ -83,20 +80,42 @@ pub fn render_skill_envelope(skill: &Skill, body: &str) -> String {
     out
 }
 
+/// Body text for a skill manifest-execution failure. Shared by the
+/// model-invocation path (`SkillTool`) and the slash-command path
+/// (`NativeAgent::send_skill_invocation`) so the failure message stays
+/// identical across both activation routes.
+pub fn manifest_execution_failed_body(skill_name: &str, error: &dyn std::fmt::Display) -> String {
+    format!(
+        "Skill '{}' manifest execution failed: {}",
+        skill_name, error
+    )
+}
+
 /// Retrieves the content and resources of a skill by name. Use this when a user's request matches a skill's description.
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct SkillToolInput {
     /// The name of the skill to retrieve
     pub name: String,
-    /// The user's task for the skill to act on. This is the natural-language
-    /// request that triggered the skill activation — it is injected into the
-    /// manifest cascade context as `task` so templates can reference `{{ task }}`
-    /// instead of running blind. When the model invokes the skill tool, this
-    /// field carries the user's intent; when a slash command activates the
-    /// skill, the trailing text after the command is used. Defaults to empty
-    /// for backward compatibility with callers that only pass `name`.
+    /// The user's full request, passed to the skill as `task`. Include the
+    /// target, question, scope, and constraints — the skill runs against this
+    /// text, so a bare summary makes it run blind.
+    //
+    // Rationale (not model-facing): injected into the cascade context as `task`
+    // so templates can reference `{{ task }}`. Slash-command activation uses the
+    // trailing text after the command. Defaults to empty for callers that pass
+    // only `name`.
     #[serde(default)]
     pub task: String,
+    /// Optional key/value context for skills that branch on configuration — e.g.
+    /// `swarm-intelligence` needs `mode` ("abw" or "local") and `swarm_id`.
+    /// Omit unless a skill documents a field it requires.
+    //
+    // Rationale (not model-facing): without this channel the cascade renders an
+    // empty `{{ mode }}` and always takes the default branch. `task` is injected
+    // after this map, so a `context["task"]` entry cannot clobber the real
+    // request.
+    #[serde(default)]
+    pub context: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,11 +151,24 @@ pub type SkillsResolver = Arc<dyn Fn(&App) -> Arc<Vec<Skill>> + Send + Sync>;
 
 pub struct SkillTool {
     skills: SkillsResolver,
-    /// hKask ManifestExecutor for cascade-based skill execution.
-    /// In zed-kask, this is always set (wired in main.rs). When None
-    /// (tests only), skill invocation returns the no-op envelope — body
-    /// injection is disabled in zed-kask.
-    manifest_executor: Option<Arc<dyn SkillManifestExecutor>>,
+    /// hKask ManifestExecutor for cascade-based skill execution, resolved
+    /// at invocation time (not at session-creation time).
+    ///
+    /// This is a resolver rather than a cached `Option<Arc<...>>` to fix the
+    /// session-creation race: if a session is created before the deferred
+    /// post-login task wires the global executor, a cached field would stay
+    /// `None` for the session's entire lifetime. By reading the global at
+    /// invocation time, sessions created before wiring pick up the executor
+    /// once `set_manifest_executor` runs. The slash-command path
+    /// (`send_skill_invocation`) already reads the global at invocation time;
+    /// this aligns the model-invocation path with it.
+    ///
+    /// In zed-kask, the resolver returns `Some` once the composition root has
+    /// wired the executor. When it returns `None` (tests only, or before
+    /// wiring), skill invocation returns the no-op envelope — body injection
+    /// is disabled in zed-kask.
+    manifest_executor_resolver:
+        Arc<dyn Fn() -> Option<Arc<dyn SkillManifestExecutor>> + Send + Sync>,
 }
 
 /// Trait for executing hKask skill manifests (D1 seam).
@@ -144,6 +176,12 @@ pub struct SkillTool {
 /// Implemented by `kask_bridge` over the compiled-in `ManifestExecutor`.
 /// This keeps zed's `agent` crate from depending on hKask crates directly —
 /// the bridge provides the implementation.
+///
+/// `CascadeProgress` is a `Send + Sync` callback that updates the active tool
+/// call in the agent UI. Tools create it from `ToolCallEventStream::thinking_sender()`
+/// and pass it through so the user can see cascade progress in real time.
+pub type CascadeProgress = Arc<dyn Fn(&str) + Send + Sync>;
+
 #[async_trait::async_trait]
 pub trait SkillManifestExecutor: Send + Sync {
     /// Execute an hKask skill manifest by name and return the result as text.
@@ -155,13 +193,86 @@ pub trait SkillManifestExecutor: Send + Sync {
     ///
     /// `skill_name` is the hKask skill ID (e.g., "grill-me", "essentialist").
     /// `context` is the initial context for the cascade (user input, etc.).
+    /// `progress` is an optional callback for real-time step-by-step feedback.
+    /// When `Some`, the executor calls it at each cascade step with a
+    /// human-readable description, which appears as the tool call title in the
+    /// agent UI. When `None` (slash commands without an event stream), no
+    /// progress is emitted.
+    ///
+    /// `title` is an optional callback for step-label updates (short labels
+    /// like "Step 2/5: scope"). When `Some`, the executor calls it at each
+    /// cascade step so the tool call header shows which step is running.
     ///
     /// Returns the cascade's final output as text, or an error message.
     async fn execute_skill(
         &self,
         skill_name: &str,
         context: std::collections::HashMap<String, serde_json::Value>,
+        prior_messages: Vec<CascadeChatMessage>,
+        memory_snippets: Vec<MemorySnippetRecord>,
+        progress: Option<CascadeProgress>,
+        title: Option<CascadeProgress>,
     ) -> Result<String, String>;
+
+    /// Compose a bundle from multiple peer-level skills via the `skill-bundler`
+    /// manifest, then execute the composed bundle's cascade.
+    ///
+    /// This is the two-phase orchestration for multi-skill prompts:
+    /// 1. Runs the `skill-bundler` manifest (compose → synthesize → validate →
+    ///    score → evolve → loop) to produce a governed `BundleManifest`.
+    /// 2. Executes the composed manifest's `steps` via `ManifestExecutor`.
+    ///
+    /// `skill_names` is the set of peer-level skills to compose (≥3 triggers
+    ///    the bundler; fewer should use `execute_skill` directly).
+    /// `task` is the user's natural-language request.
+    /// `context` carries any extra context entries merged into the cascade.
+    /// `progress` is an optional callback for real-time step-by-step feedback.
+    ///
+    /// Returns the composed bundle manifest (as JSON), the cascade's final
+    /// output text, and the deterministic composition score (for the post-run
+    /// UI's save/refine/discard affordance). The `bundle_manifest` JSON is
+    /// the `step_3_result.candidates[0].composite_manifest` extracted from
+    /// the skill-bundler cascade context.
+    async fn compose_and_execute_bundle(
+        &self,
+        skill_names: &[String],
+        task: &str,
+        context: std::collections::HashMap<String, serde_json::Value>,
+        progress: Option<CascadeProgress>,
+        title: Option<CascadeProgress>,
+    ) -> Result<BundleExecutionResult, String>;
+
+    /// Persist a composed bundle manifest to the registry so it can be
+    /// re-invoked later by name. The bridge writes the manifest as YAML to
+    /// `registry_manifests_dir/<id>.yaml` — disk is the single source of
+    /// truth (D1), so a saved bundle is immediately discoverable by
+    /// `has_manifest` and executable via `execute_skill` on subsequent turns.
+    ///
+    /// `bundle_manifest` is the JSON value carried by
+    /// `BundleExecutionResult.bundle_manifest` (the
+    /// `step_3_result.candidates[0].composite_manifest` from the bundler
+    /// cascade). Returns the bundle's `id` on success.
+    async fn save_bundle(&self, bundle_manifest: serde_json::Value) -> Result<String, String>;
+
+    /// Re-compose a bundle via goal-delta-driven evolution. Runs the
+    /// `skill-bundler/bundler-evolve` template with the supplied
+    /// `goal_delta` (0 = goal met, 1 = completely unmet) and
+    /// `convergence_failure_reason`, producing an evolved manifest, then
+    /// executes the evolved manifest's cascade. The `Refine` action in the
+    /// post-run UI calls this when the operator judges the first composition
+    /// insufficient and supplies a goal correction.
+    ///
+    /// `bundle_manifest` is the prior composition's manifest JSON (the
+    /// `current_manifest` input to `bundler-evolve`). `goal_context` is the
+    /// original goal-extract output (step_1_result). Returns the evolved
+    /// manifest and the executed output, mirroring `compose_and_execute_bundle`.
+    async fn refine_bundle(
+        &self,
+        bundle_manifest: serde_json::Value,
+        goal_context: serde_json::Value,
+        goal_delta: f64,
+        convergence_failure_reason: String,
+    ) -> Result<BundleExecutionResult, String>;
 
     /// Check whether a skill has an hKask manifest in the registry.
     ///
@@ -170,6 +281,55 @@ pub trait SkillManifestExecutor: Send + Sync {
     /// return the no-manifest envelope (body injection is disabled in
     /// zed-kask — the SKILL.md body is never injected).
     fn has_manifest(&self, skill_name: &str) -> bool;
+
+    /// Execute a pipeline manifest (category: pipeline) by file path.
+    ///
+    /// Unlike `execute_skill`, this loads a manifest from an explicit file
+    /// path (not a skill name lookup), skips the `is_skill()` guard
+    /// (pipeline manifests are not skills), and runs the `ManifestExecutor`
+    /// cascade. The manifest must declare `category: pipeline`.
+    ///
+    /// `manifest_path` is a project-root-relative path to the pipeline YAML.
+    /// `resume_from` is an optional step `id` to resume from (skips all
+    /// prior steps). `dry_run` parses and validates without executing.
+    ///
+    /// Returns the cascade's final output as text, or an error message.
+    async fn execute_pipeline(
+        &self,
+        manifest_path: &str,
+        resume_from: Option<String>,
+        dry_run: bool,
+        progress: Option<CascadeProgress>,
+        title: Option<CascadeProgress>,
+    ) -> Result<String, String>;
+}
+
+/// The result of composing and executing a skill bundle.
+///
+/// Carries the structured data the post-run UI needs for the
+/// save/refine/discard affordance (section B of the spec).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BundleExecutionResult {
+    /// The composed `BundleManifest` as JSON (the
+    /// `step_3_result.candidates[0].composite_manifest` from the
+    /// skill-bundler cascade). Persisted by the `Save` action.
+    pub bundle_manifest: serde_json::Value,
+    /// The final output text from executing the composed bundle's cascade.
+    pub output: String,
+    /// The deterministic composition score from `lisp.eval` (ordinal 5).
+    /// Lower = better. Used by `Refine` to decide if re-composition is
+    /// worthwhile, and by the UI to display the score breakdown.
+    pub composition_score: Option<f64>,
+    /// The skill names that were actually placed in the composed bundle
+    /// (may differ from the input if the bundler dropped a skill via
+    /// dead-letter resolution). Used by `Save` for registry matching.
+    pub composed_skill_names: Vec<String>,
+    /// The goal-extract step's output (step_1_result from the skill-bundler
+    /// cascade). Carried so the `Refine` action can pass it to
+    /// `bundler-evolve` as `goal_context` — without it, the evolve step runs
+    /// blind (it can't reference the original goal). `Null` if the bundler
+    /// cascade didn't produce a step_1_result.
+    pub goal_context: serde_json::Value,
 }
 
 impl SkillTool {
@@ -184,7 +344,9 @@ impl SkillTool {
     {
         Self {
             skills: Arc::new(skills),
-            manifest_executor: None,
+            // Tests only: no manifest executor, so `run` returns the no-op
+            // envelope (body injection is disabled in zed-kask).
+            manifest_executor_resolver: Arc::new(|| None),
         }
     }
 
@@ -201,9 +363,31 @@ impl SkillTool {
     where
         F: Fn(&App) -> Arc<Vec<Skill>> + Send + Sync + 'static,
     {
+        // Wrap the executor in a resolver closure that always returns it.
+        // This preserves the test-time contract (executor is pinned for the
+        // tool's lifetime) while sharing the invocation-time resolution path
+        // with the production `register_session` constructor.
+        let executor = manifest_executor;
         Self {
             skills: Arc::new(skills),
-            manifest_executor: Some(manifest_executor),
+            manifest_executor_resolver: Arc::new(move || Some(executor.clone())),
+        }
+    }
+
+    /// Construct a `SkillTool` whose manifest executor is resolved at
+    /// invocation time by calling `resolver`. This is the production path
+    /// used by `register_session`: the resolver reads the process-global
+    /// `manifest_executor()` so that sessions created before the deferred
+    /// post-login task wires the executor pick it up on later invocations
+    /// (the session-creation race fix).
+    pub fn with_manifest_executor_resolver<F, R>(skills: F, resolver: R) -> Self
+    where
+        F: Fn(&App) -> Arc<Vec<Skill>> + Send + Sync + 'static,
+        R: Fn() -> Option<Arc<dyn SkillManifestExecutor>> + Send + Sync + 'static,
+    {
+        Self {
+            skills: Arc::new(skills),
+            manifest_executor_resolver: Arc::new(resolver),
         }
     }
 }
@@ -311,12 +495,15 @@ impl AgentTool for SkillTool {
             // When a ManifestExecutor is present (D1), the skill's manifest
             // cascade is executed instead of body injection. The SKILL.md
             // frontmatter stays the discovery-only catalog entry.
-            let _skill_name = input.name.clone();
-            // Clone the task before `input` is moved into `initial_title`
-            // below, so we can inject it into the manifest cascade context.
+            // Clone the task and context before `input` is moved into
+            // `initial_title` below, so we can inject them into the manifest
+            // cascade context.
             let task = input.task.clone();
-            let is_builtin = skill.source == agent_skills::SkillSource::BuiltIn;
-            if !is_builtin {
+            let extra_context = input.context.clone();
+            // Core skills are pre-authorized (trusted by default) since they
+            // are operator-controlled, uneditable, and always-on. User skills
+            // go through the normal authorization flow.
+            if !skill.core {
                 let authorize = cx.update(|cx| {
                     let context =
                         crate::ToolPermissionContext::new(Self::NAME, vec![skill_file_path]);
@@ -327,30 +514,73 @@ impl AgentTool for SkillTool {
                 })?;
             }
 
-            let rendered = if let Some(executor) = &self.manifest_executor {
+            // Resolve the manifest executor at invocation time (not at
+            // session-creation time). This closes the session-creation race:
+            // a session created before the deferred post-login task wires the
+            // global executor would otherwise have a cached `None` for its
+            // entire lifetime. Reading the global here lets it pick up the
+            // executor once `set_manifest_executor` runs. The slash-command
+            // path (`send_skill_invocation`) already reads the global at
+            // invocation time; this aligns the model-invocation path with it.
+            let rendered = if let Some(executor) = (self.manifest_executor_resolver)() {
                 // D1: run the hKask manifest cascade (KnowAct/FlowDef/RenderAct + PDCA).
                 // Check if this skill has an hKask manifest in the registry.
                 // If it does, run the cascade; if not, return the no-manifest
                 // envelope (body injection is disabled in zed-kask).
                 let skill_name = skill.name.as_ref();
                 if executor.has_manifest(skill_name) {
+                    // Extract swarm_id before the context map is moved into
+                    // `context.extend`. Used by the cascade context provider
+                    // to determine whether to recall from the swarm store.
+                    let swarm_id = extra_context
+                        .get("swarm_id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
                     // Inject the user's task into the cascade context so templates
                     // can reference `{{ task }}`. Without this, the cascade runs
                     // blind — templates get model defaults but never the actual
                     // request the user wants the skill to act on.
                     let mut context = std::collections::HashMap::new();
+                    // Merge skill-invocation context first, then inject the
+                    // user's task last so it always wins.
+                    context.extend(extra_context);
                     context.insert(
                         "task".to_string(),
                         serde_json::Value::String(task.clone()),
                     );
-                    match executor.execute_skill(skill_name, context).await {
+
+                    // Gather short-term (thread) and long-term (memory)
+                    // context for the cascade. This closes the isolation gap
+                    // where template steps were submitted as single-prompt
+                    // calls with no conversational context and no memory.
+                    //
+                    // The cascade context provider applies the participant
+                    // matrix: user store, curator store, or swarm store,
+                    // depending on who is present in the thread.
+                    let (prior_messages, memory_snippets) =
+                        gather_cascade_context(&event_stream, &task, swarm_id, cx).await;
+
+                    // Create a thinking-trace sender from the event stream so
+                    // the user sees the LLM's live reasoning during the cascade.
+                    // Without this, the cascade runs silently and the user
+                    // cannot steer or cancel — a violation of user sovereignty.
+                    let progress = event_stream.thinking_sender();
+                    // Create a title sender for step-label updates (short labels
+                    // like "Step 2/5: scope" in the tool call header).
+                    let title = event_stream.title_sender();
+                    match executor.execute_skill(
+                        skill_name,
+                        context,
+                        prior_messages,
+                        memory_snippets,
+                        Some(progress),
+                        Some(title),
+                    ).await {
                         Ok(result_text) => render_skill_envelope(&skill, &result_text),
                         Err(e) => {
                             return Err(SkillToolOutput::Error {
-                                error: format!(
-                                    "Skill '{}' manifest execution failed: {}",
-                                    skill_name, e
-                                ),
+                                error: manifest_execution_failed_body(skill_name, &e),
                             });
                         }
                     }
@@ -376,6 +606,257 @@ impl AgentTool for SkillTool {
             Ok(SkillToolOutput::Found { rendered })
         })
     }
+}
+
+/// Gather short-term (thread) and long-term (memory) context for a skill
+/// cascade invocation.
+///
+/// Thin wrapper around `gather_cascade_context_from_thread` that extracts
+/// the thread handle from the `ToolCallEventStream`. Used by the
+/// model-invoked `skill` tool path.
+async fn gather_cascade_context(
+    event_stream: &ToolCallEventStream,
+    task: &str,
+    swarm_id: Option<String>,
+    cx: &mut gpui::AsyncApp,
+) -> (
+    Vec<crate::CascadeChatMessage>,
+    Vec<crate::MemorySnippetRecord>,
+) {
+    match event_stream.thread() {
+        Some(thread_handle) => {
+            let thread_entity = cx.update(|_cx| thread_handle.upgrade());
+            match thread_entity {
+                Some(thread) => {
+                    gather_cascade_context_from_thread(&thread, task, swarm_id, cx).await
+                }
+                None => (Vec::new(), Vec::new()),
+            }
+        }
+        None => (Vec::new(), Vec::new()),
+    }
+}
+
+/// Gather short-term (thread) and long-term (memory) context for a skill
+/// cascade invocation, given a thread entity directly.
+///
+/// This is the shared implementation used by both the model-invoked
+/// `skill` tool path (via `gather_cascade_context` → `ToolCallEventStream`)
+/// and the slash-command path (via `send_skill_invocation` → `Entity<Thread>`).
+///
+/// Snapshots the last N turns from the thread (via
+/// `Thread::recent_turn_messages`), condenses each turn to the configured
+/// token cap, and calls the `CascadeContextProvider` (if wired) to recall
+/// salient long-term memory from the participant stores.
+///
+/// Returns `(prior_messages, memory_snippets)`. Both are empty when the
+/// provider is not wired or the thread is not available — the cascade runs
+/// isolated (the pre-fix behavior).
+pub(crate) async fn gather_cascade_context_from_thread(
+    thread: &gpui::Entity<crate::Thread>,
+    task: &str,
+    swarm_id: Option<String>,
+    cx: &mut gpui::AsyncApp,
+) -> (
+    Vec<crate::CascadeChatMessage>,
+    Vec<crate::MemorySnippetRecord>,
+) {
+    use language_model::{MessageContent, Role};
+
+    // Snapshot the thread's recent turns.
+    let (thread_messages, agent_id, thread_id) = {
+        // Read the short-term turns setting from the settings store.
+        let short_term_turns = cx.update(|cx| {
+            use gpui::ReadGlobal;
+            use settings::SettingsStore;
+            SettingsStore::global(cx)
+                .get_content_for_file(settings::SettingsFile::User)
+                .and_then(|c| c.kask.clone())
+                .and_then(|c| c.memory)
+                .and_then(|m| m.cascade_short_term_turns)
+                .unwrap_or(6) as usize
+        });
+        cx.update(|cx| {
+            let thread = thread.read(cx);
+            (
+                thread.recent_turn_messages(short_term_turns),
+                thread.agent_id().map(|id| id.to_string()),
+                thread.id().to_string(),
+            )
+        })
+    };
+
+    // Convert LanguageModelRequestMessage → CascadeChatMessage (text-only).
+    // Each turn is condensed to the configured token cap via the local
+    // algorithmic condenser (WordRank for conversation, Flashrank for other
+    // content). This prevents a single verbose turn (large file read,
+    // terminal output) from blowing the context budget for every subsequent
+    // template step.
+    let turn_token_cap = cx.update(|cx| {
+        use gpui::ReadGlobal;
+        use settings::SettingsStore;
+        SettingsStore::global(cx)
+            .get_content_for_file(settings::SettingsFile::User)
+            .and_then(|c| c.kask.clone())
+            .and_then(|c| c.memory)
+            .and_then(|m| m.cascade_turn_token_cap)
+            .unwrap_or(512) as usize
+    });
+    let condenser = crate::thread_condenser();
+    let prior_messages: Vec<crate::CascadeChatMessage> = thread_messages
+        .iter()
+        .filter_map(|msg| {
+            let role = match msg.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::System => "system",
+            };
+            // Extract text content, skip non-text parts.
+            let content: String = msg
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    MessageContent::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if content.is_empty() {
+                None
+            } else {
+                let condensed = condense_turn_text(&content, turn_token_cap, condenser.as_deref());
+                Some(crate::CascadeChatMessage {
+                    role: role.to_string(),
+                    content: condensed,
+                })
+            }
+        })
+        .collect();
+
+    // Gather long-term memory via the cascade context provider (if wired).
+    // Read the cascade memory settings from the settings store so the
+    // saliency floor and max chunks are configurable via the settings UI.
+    let (saliency_floor, max_chunks) = cx.update(|cx| {
+        use gpui::ReadGlobal;
+        use settings::SettingsStore;
+        let kask_memory = SettingsStore::global(cx)
+            .get_content_for_file(settings::SettingsFile::User)
+            .and_then(|c| c.kask.clone())
+            .and_then(|c| c.memory);
+        (
+            kask_memory
+                .as_ref()
+                .and_then(|m| m.cascade_memory_saliency_floor)
+                .unwrap_or(0.3),
+            kask_memory
+                .as_ref()
+                .and_then(|m| m.cascade_memory_max_chunks)
+                .unwrap_or(5),
+        )
+    });
+    let memory_snippets = match crate::cascade_context_provider() {
+        Some(provider) => {
+            let request = crate::CascadeContextRequest {
+                thread_id,
+                task: task.to_string(),
+                agent_id,
+                swarm_id,
+                // Pass the raw thread messages so the provider can build
+                // the saliency query from task + N turns (the "chat context").
+                // These are the same messages that become `prior_messages`
+                // below — passed twice (once for saliency, once for inference)
+                // because the provider needs them for recall ranking while
+                // the executor needs them for the message array.
+                short_term_messages: thread_messages.clone(),
+                saliency_floor,
+                max_chunks,
+            };
+            match provider.gather_context(&request).await {
+                Ok(context) => context.long_term_snippets,
+                Err(e) => {
+                    log::warn!("Cascade context gathering failed — running without memory: {e}");
+                    Vec::new()
+                }
+            }
+        }
+        None => Vec::new(),
+    };
+
+    (prior_messages, memory_snippets)
+}
+
+/// Condense a turn's text content to a maximum token budget using the
+/// local algorithmic condenser.
+///
+/// Turns under the budget pass through unchanged. Turns over the budget
+/// are compressed via the `ThreadCondenser` (which dispatches to
+/// `WordRankAlgorithm` for conversation content — TF-IDF line selection
+/// with structural bonuses), then truncated to the token cap if the
+/// compressed result is still over.
+///
+/// The condenser is line-level (retention percentage), not token-level.
+/// This function adds the token cap as a second pass: compress first (to
+/// remove low-saliency lines), then truncate to the token budget (to
+/// enforce a hard cap).
+///
+/// Token estimation uses the standard 4-chars-per-token heuristic. This
+/// is imprecise (actual tokenizers vary) but conservative and sufficient
+/// for context budgeting — the cost of overestimating is slightly more
+/// truncation, not a correctness issue.
+///
+/// When `condenser` is `None` (not wired) or `max_tokens` is 0, the raw
+/// text is returned unchanged.
+fn condense_turn_text(
+    text: &str,
+    max_tokens: usize,
+    condenser: Option<&dyn crate::ThreadCondenser>,
+) -> String {
+    if max_tokens == 0 {
+        return text.to_string();
+    }
+
+    // Rough token estimate: 1 token ≈ 4 chars.
+    let estimated_tokens = text.len() / 4;
+
+    if estimated_tokens <= max_tokens {
+        return text.to_string();
+    }
+
+    // Pass 1: condense via the thread condenser. The tool name
+    // "conversation" maps to `ContextCategory::ConversationHistory` in the
+    // condenser's `classify_tool`, which selects `WordRankAlgorithm` —
+    // TF-IDF bag-of-words compression that preserves high-saliency lines.
+    let condensed = match condenser {
+        Some(c) => c.compress_tool_result("conversation", text),
+        None => text.to_string(),
+    };
+
+    // Pass 2: truncate to the token budget if still over.
+    let condensed_tokens = condensed.len() / 4;
+    if condensed_tokens <= max_tokens {
+        return condensed;
+    }
+
+    // Truncate at the char boundary closest to max_tokens * 4, then find
+    // the last whitespace to avoid cutting mid-word.
+    // Use `char_indices` to find a safe UTF-8 boundary at or before the
+    // byte cap — slicing at an arbitrary byte index panics if it falls
+    // inside a multi-byte character.
+    let byte_cap = max_tokens * 4;
+    if byte_cap >= condensed.len() {
+        return condensed;
+    }
+    let safe_boundary = condensed
+        .char_indices()
+        .take_while(|(byte_idx, _)| *byte_idx <= byte_cap)
+        .last()
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(0);
+    let truncated = &condensed[..safe_boundary];
+    let last_space = truncated
+        .rfind(|c: char| c.is_whitespace())
+        .unwrap_or(safe_boundary);
+    format!("{}…[truncated]", &condensed[..last_space])
 }
 
 #[cfg(test)]
@@ -955,6 +1436,10 @@ mod tests {
             &self,
             skill_name: &str,
             context: std::collections::HashMap<String, serde_json::Value>,
+            _prior_messages: Vec<crate::CascadeChatMessage>,
+            _memory_snippets: Vec<crate::MemorySnippetRecord>,
+            _progress: Option<CascadeProgress>,
+            _title: Option<CascadeProgress>,
         ) -> Result<String, String> {
             *self
                 .last_context
@@ -967,8 +1452,83 @@ mod tests {
             }
         }
 
+        async fn compose_and_execute_bundle(
+            &self,
+            skill_names: &[String],
+            _task: &str,
+            _context: std::collections::HashMap<String, serde_json::Value>,
+            _progress: Option<CascadeProgress>,
+            _title: Option<CascadeProgress>,
+        ) -> Result<BundleExecutionResult, String> {
+            // The stub doesn't run a real bundler cascade — it returns a
+            // minimal result so tests that exercise the skill_bundle tool's
+            // wiring (authorization, context injection, output shaping) can
+            // proceed without a live skill-bundler manifest.
+            Ok(BundleExecutionResult {
+                bundle_manifest: serde_json::json!({
+                    "name": "stub-bundle",
+                    "skills": skill_names.iter().map(|s| serde_json::json!({"name": s})).collect::<Vec<_>>(),
+                }),
+                output: self.output.clone(),
+                composition_score: Some(0.0),
+                composed_skill_names: skill_names.to_vec(),
+                goal_context: serde_json::Value::Null,
+            })
+        }
+
         fn has_manifest(&self, skill_name: &str) -> bool {
             self.known.contains(skill_name)
+        }
+
+        async fn save_bundle(&self, bundle_manifest: serde_json::Value) -> Result<String, String> {
+            // The stub doesn't write to disk — it echoes back the bundle's id
+            // (or a synthetic one if the manifest lacks an id) so tests can
+            // assert the Save action's return shape.
+            let id = bundle_manifest
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| "stub-bundle".to_string());
+            Ok(id)
+        }
+
+        async fn refine_bundle(
+            &self,
+            bundle_manifest: serde_json::Value,
+            _goal_context: serde_json::Value,
+            _goal_delta: f64,
+            _convergence_failure_reason: String,
+        ) -> Result<BundleExecutionResult, String> {
+            // The stub doesn't run a real evolve cascade — it returns the
+            // prior manifest unchanged with the stub output so tests can
+            // exercise the Refine action's wiring without a live bundler.
+            let composed_skill_names = bundle_manifest
+                .get("skills")
+                .and_then(|s| s.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Ok(BundleExecutionResult {
+                bundle_manifest,
+                output: self.output.clone(),
+                composition_score: Some(0.0),
+                composed_skill_names,
+                goal_context: serde_json::Value::Null,
+            })
+        }
+
+        async fn execute_pipeline(
+            &self,
+            _manifest_path: &str,
+            _resume_from: Option<String>,
+            _dry_run: bool,
+            _progress: Option<CascadeProgress>,
+            _title: Option<CascadeProgress>,
+        ) -> Result<String, String> {
+            Ok(self.output.clone())
         }
     }
 
@@ -1096,6 +1656,59 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_skill_tool_manifest_executor_merges_context_and_task_wins(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        // Skill-invocation context (e.g. swarm-intelligence's `mode` and
+        // `swarm_id`) must reach the cascade, and a `context["task"]` entry
+        // must NOT clobber the real user task (task is injected last).
+        let (skill, _body) = create_test_skill("context-skill", "A skill", "# Body");
+        let skills = Arc::new(vec![skill]);
+
+        let executor = Arc::new(StubManifestExecutor::new(["context-skill"], "ok"));
+        let executor_for_assert: Arc<StubManifestExecutor> = executor.clone();
+        let tool = Arc::new(SkillTool::with_manifest_executor(
+            move |_cx| skills.clone(),
+            executor,
+        ));
+
+        let (mut sender, input) = ToolInput::<SkillToolInput>::test();
+        sender.send_full(json!({
+            "name": "context-skill",
+            "task": "steer the swarm",
+            "context": {
+                "mode": "local",
+                "swarm_id": "ws_123",
+                "task": "spoofed task"
+            }
+        }));
+        let (event_stream, _rx) = ToolCallEventStream::test();
+        let task = cx.update(|cx| tool.run(input, event_stream, cx));
+        let _output = task.await.unwrap();
+
+        let ctx = executor_for_assert
+            .last_context()
+            .expect("execute_skill was not called");
+        assert_eq!(
+            ctx.get("mode"),
+            Some(&serde_json::Value::String("local".to_string())),
+            "skill-invocation context must reach the cascade"
+        );
+        assert_eq!(
+            ctx.get("swarm_id"),
+            Some(&serde_json::Value::String("ws_123".to_string())),
+            "skill-invocation context must reach the cascade"
+        );
+        assert_eq!(
+            ctx.get("task"),
+            Some(&serde_json::Value::String("steer the swarm".to_string())),
+            "the user's task must win over a context['task'] entry"
+        );
+    }
+
+    #[gpui::test]
     async fn test_skill_tool_manifest_executor_surfaces_cascade_errors(cx: &mut TestAppContext) {
         init_test(cx);
 
@@ -1133,6 +1746,83 @@ mod tests {
         );
     }
 
+    /// Pin the session-creation race fix: a `SkillTool` constructed with a
+    /// resolver that returns `None` initially (session created before the
+    /// deferred post-login task wires the executor) must pick up the executor
+    /// once the resolver starts returning `Some`. Caching the executor at
+    /// construction time would pin `None` for the session's entire lifetime.
+    ///
+    /// The resolver is a closure over a `Mutex<Option<Arc<...>>>`, mirroring
+    /// the production `manifest_executor_cloned` resolver which reads the
+    /// process-global `OnceLock`. The test flips the `Mutex` from `None` to
+    /// `Some` between two invocations of the same `SkillTool` instance and
+    /// asserts the second invocation runs the cascade.
+    #[gpui::test]
+    async fn test_skill_tool_manifest_executor_resolver_picks_up_late_wiring(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let (skill, _body) = create_test_skill("late-wiring-skill", "A skill", "# Body");
+        let skills = Arc::new(vec![skill]);
+
+        // The resolver reads this cell each time the tool runs. Initially
+        // `None` (session created before wiring), then `Some(executor)` after
+        // the simulated deferred task runs.
+        let executor_slot: Arc<std::sync::Mutex<Option<Arc<dyn SkillManifestExecutor>>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let slot_for_resolver = executor_slot.clone();
+        let tool = Arc::new(SkillTool::with_manifest_executor_resolver(
+            move |_cx| skills.clone(),
+            move || slot_for_resolver.lock().expect("slot poisoned").clone(),
+        ));
+
+        // First invocation: executor not yet wired. Must return the
+        // "not configured" envelope, NOT inject the body, and NOT error.
+        let (mut sender, input) = ToolInput::<SkillToolInput>::test();
+        sender.send_full(json!({ "name": "late-wiring-skill" }));
+        let (event_stream, _rx) = ToolCallEventStream::test();
+        let task = cx.update(|cx| tool.clone().run(input, event_stream, cx));
+        let output = task.await.unwrap();
+        let SkillToolOutput::Found { rendered } = output else {
+            panic!("expected Found before wiring, got: {output:?}");
+        };
+        assert!(
+            rendered.contains("Skill manifest executor not configured"),
+            "pre-wiring invocation must return the not-configured envelope: {rendered}"
+        );
+        assert!(
+            !rendered.contains("# Body"),
+            "SKILL.md body must not be injected when executor is unwired: {rendered}"
+        );
+
+        // Simulate the deferred post-login task wiring the global executor.
+        let executor: Arc<dyn SkillManifestExecutor> = Arc::new(StubManifestExecutor::new(
+            ["late-wiring-skill"],
+            "cascade ran",
+        ));
+        *executor_slot.lock().expect("slot poisoned") = Some(executor);
+
+        // Second invocation on the SAME tool instance: must now run the
+        // cascade. This is the race fix — a cached field would still be `None`.
+        let (mut sender, input) = ToolInput::<SkillToolInput>::test();
+        sender.send_full(json!({ "name": "late-wiring-skill" }));
+        let (event_stream, _rx) = ToolCallEventStream::test();
+        let task = cx.update(|cx| tool.run(input, event_stream, cx));
+        let output = task.await.unwrap();
+        let SkillToolOutput::Found { rendered } = output else {
+            panic!("expected Found after wiring, got: {output:?}");
+        };
+        assert!(
+            rendered.contains("cascade ran"),
+            "post-wiring invocation must run the cascade via the resolver: {rendered}"
+        );
+        assert!(
+            !rendered.contains("# Body"),
+            "SKILL.md body must not be injected even after wiring: {rendered}"
+        );
+    }
+
     // zed-kask: `render_skill_envelope` emits `<source>marketplace</source>` for
     // `SkillSource::Public` skills (not the namespaced id, which is in
     // `display_label`). This pins the stable literal the model pattern-matches
@@ -1146,17 +1836,15 @@ mod tests {
                 source_user: "alice".into(),
                 original_skill_id: "alice/bug-hunt".into(),
             },
-            directory_path: std::path::PathBuf::from(
-                "/home/user/.agents/skills/_marketplace/alice/bug-hunt",
-            ),
-            skill_file_path: std::path::PathBuf::from(
-                "/home/user/.agents/skills/_marketplace/alice/bug-hunt/SKILL.md",
-            ),
+            directory_path: agent_skills::global_skills_dir().join("_marketplace/alice/bug-hunt"),
+            skill_file_path: agent_skills::global_skills_dir()
+                .join("_marketplace/alice/bug-hunt/SKILL.md"),
             load_warnings: Vec::new(),
             disable_model_invocation: false,
             visibility: agent_skills::SkillVisibility::Private,
             dependencies: Vec::new(),
             embedded_body: None,
+            core: false,
         };
         let rendered = render_skill_envelope(&skill, "body content");
         assert!(

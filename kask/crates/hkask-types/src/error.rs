@@ -43,32 +43,11 @@ impl std::fmt::Display for DatabaseErrorKind {
     }
 }
 
-// DbProvider — Database provider enum (moved from hkask-database::types)
+// DbError — Database operation errors (moved from hkask-database::types)
 //
 // Relocated to break the circular dependency: hkask-storage -> the wallet types crate
-// -> hkask-database -> hkask-storage. DbError/DbProvider are pure types with no
-// external deps beyond thiserror + serde (already in hkask-types).
-
-/// Supported database providers.
-///
-/// New providers are added as enum variants. The `DatabaseDriver` trait
-/// dispatches to the correct implementation at runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DbProvider {
-    /// SQLite / SQLCipher via rusqlite (default, stable).
-    Sqlite,
-    /// PostgreSQL via sqlx + pgvector.
-    Postgres,
-}
-
-impl std::fmt::Display for DbProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Sqlite => write!(f, "sqlite"),
-            Self::Postgres => write!(f, "postgres"),
-        }
-    }
-}
+// -> hkask-database -> hkask-storage. DbError is a pure type with no external deps
+// beyond thiserror + serde (already in hkask-types).
 
 /// Database operation errors — provider-agnostic.
 ///
@@ -220,13 +199,6 @@ impl From<NotFound> for McpErrorKind {
     }
 }
 
-/// Convert the canonical `CapabilityDenied` struct into `McpErrorKind::PermissionDenied`.
-impl From<CapabilityDenied> for McpErrorKind {
-    fn from(_: CapabilityDenied) -> Self {
-        McpErrorKind::PermissionDenied
-    }
-}
-
 #[cfg(feature = "sql")]
 impl From<rusqlite::Error> for InfrastructureError {
     fn from(e: rusqlite::Error) -> Self {
@@ -317,6 +289,31 @@ impl std::fmt::Display for McpErrorKind {
     }
 }
 
+impl McpErrorKind {
+    /// Parse a kind from its `Display` string — the inverse of `Display`.
+    ///
+    /// Used by `tool_response::parse_tool_error` to recover the typed kind
+    /// from the server's error envelope `{"error": ..., "kind": "..."}` so
+    /// consumers can call `is_retryable()` / `requires_intervention()` instead
+    /// of re-matching on the kind string locally. Returns `None` for an
+    /// unknown kind string rather than a catch-all so a future server variant
+    /// surfaces as an unclassified error rather than silently misclassifying.
+    #[must_use]
+    pub fn from_kind_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "internal" => Self::Internal,
+            "unavailable" => Self::Unavailable,
+            "timeout" => Self::Timeout,
+            "not_found" => Self::NotFound,
+            "invalid_argument" => Self::InvalidArgument,
+            "permission_denied" => Self::PermissionDenied,
+            "rate_limited" => Self::RateLimited,
+            "failed_precondition" => Self::FailedPrecondition,
+            _ => return None,
+        })
+    }
+}
+
 // Canonical domain error types — shared across all crates.
 
 /// A resource was not found. Canonical across 17+ crates.
@@ -329,35 +326,6 @@ pub struct NotFound {
 impl std::fmt::Display for NotFound {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} not found: {}", self.entity_type, self.id)
-    }
-}
-
-/// Capability denied — shared across 5+ crates.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CapabilityDenied {
-    pub reason: String,
-}
-
-impl std::fmt::Display for CapabilityDenied {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "capability denied: {}", self.reason)
-    }
-}
-
-/// Embedding dimension mismatch — duplicated across 2 crates.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DimensionMismatch {
-    pub expected: usize,
-    pub actual: usize,
-}
-
-impl std::fmt::Display for DimensionMismatch {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "dimension mismatch: expected {}, got {}",
-            self.expected, self.actual
-        )
     }
 }
 
@@ -442,5 +410,29 @@ mod tests {
             McpErrorKind::FailedPrecondition.to_string(),
             "failed_precondition"
         );
+    }
+
+    #[test]
+    fn mcperrorkind_from_kind_str_round_trips_every_variant() {
+        // `from_kind_str` is the inverse of `Display` — every display string
+        // must parse back to its variant. Used by `tool_response::parse_tool_error`
+        // to recover the typed kind from the server's error envelope.
+        for kind in [
+            McpErrorKind::Internal,
+            McpErrorKind::Unavailable,
+            McpErrorKind::Timeout,
+            McpErrorKind::NotFound,
+            McpErrorKind::InvalidArgument,
+            McpErrorKind::PermissionDenied,
+            McpErrorKind::RateLimited,
+            McpErrorKind::FailedPrecondition,
+        ] {
+            let s = kind.to_string();
+            assert_eq!(McpErrorKind::from_kind_str(&s), Some(kind));
+        }
+        // An unknown kind string returns `None` rather than a catch-all so a
+        // future server variant surfaces as an unclassified error.
+        assert_eq!(McpErrorKind::from_kind_str("not_a_real_kind"), None);
+        assert_eq!(McpErrorKind::from_kind_str(""), None);
     }
 }

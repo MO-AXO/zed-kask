@@ -1,5 +1,5 @@
 # Essentialist Process Manifest
-# ℏKask v0.31.0 — 3-gate elimination as convergent PDCA
+# ℏKask v0.34.0 — 3-gate elimination as convergent PDCA
 
 manifest:
   id: essentialist
@@ -10,16 +10,17 @@ manifest:
     computes convergence, and iterates until no material eliminations or
     contract violations remain.
   functional_role: flowdef
-  version: 0.31.0  # synced with hKask release; SKILL.md lacks version field — should be added for traceability
+  version: "0.34.0"  # synced with hKask release; SKILL.md lacks version field — should be added for traceability
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  threshold: 0.25
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: step_2_result.convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
 
 gas:
@@ -36,7 +37,7 @@ rjoule:
 inputs:
   - name: artifact
     type: object
-    required: true
+    required: false
   - name: code_context
     type: object
     required: false
@@ -44,17 +45,8 @@ inputs:
     type: string
     required: false
 
-fusion:
-  judge: deepseek-v4-pro
-  panel:
-    - Kimi2.7
-    - Qwen3.7 Max
-    - GLM5.2
-  mode: critique
-  skills:
-    - essentialist
-    - deep-module
-  max_rounds: 3
+ledger:
+  span_namespace: reg.skill.essentialist
 
 steps:
   - ordinal: 1
@@ -63,36 +55,22 @@ steps:
     renderer: minijinja
     template_ref: essentialist/essentialist-flow
     gas_cap: 9000
-    timeout_seconds: 70
+    timeout_seconds: 180
     input_mapping:
-      artifact: "{{ artifact }}"
+      artifact: "{{ task | default(artifact) }}"
       code_context: "{{ code_context | default({}) }}"
       mode: "{{ mode | default('advisory') }}"
-      max_rounds: "{{ convergence.max_iterations | default(3) }}"
+      max_rounds: 10
       max_retries_per_gate: 3
-      # Cross-guard: total gate attempts ≤ max_rounds × gates (3 gates) × retries (3) = 27 max.
-      # Budget is enforced by gas cap (100000) and rjoule cap (2); no explicit cross-guard was present.
-      # Added: retry exhaustion on any gate triggers immediate escalation (see SKILL.md step 10).
-      budget_guard: "retry_exhaustion → escalate; zero_delta → abort"
-      scope: auto
 
   - ordinal: 2
-    action: select
-    description: Compute normalized convergence metric for essentialist cycle.
-    renderer: minijinja
-    template_ref: shared/convergence-check
-    gas_cap: 2000
-    timeout_seconds: 30
-    input_mapping:
-      primary_result: "{{ step_1_result }}"
-      convergence_description: "eliminations are stable and no material reductions remain"
-      include_blockers: false
-    fusion: false
-  - ordinal: 3
     action: loop
     description: Re-enter elimination cycle if convergence is not met.
     input_mapping:
       loop_target: "{{ 1 }}"
+      # Push the items-removed count into convergence_signal so the Cauchy
+      # criterion can detect when eliminations have stopped.
+      convergence_signal: "{{ step_1_result.elimination_report.essentialism_score.items_removed | default(0) }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -100,22 +78,3 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: essentialist/essentialist-flow
-      gas_budget: 9000
-    - resource: template
-      action: render
-      template_id: shared/convergence-check
-      gas_budget: 2000
-    - resource: manifest
-      action: execute
-      template_id: essentialist
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true

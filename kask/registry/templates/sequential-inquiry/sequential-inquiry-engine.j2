@@ -1,17 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- reason
-- analyze
-- hypothesize
-- verify
-- revise
-- branch
-- delegate
-- converge
-- synthesize
-- decompose
-- calibrate
 contract:
   input:
     problem: string
@@ -33,7 +21,6 @@ contract:
     delegation_requests: array
     skill_match_queries: array
     solution_confidence: number
-energy_cap: 8192
 visibility: Public
 ---
 {# goal: Execute sequential inquiry — think, identify deep-dive needs, delegate to sub-skills, weave results back. #}

@@ -18,6 +18,100 @@ fn tool_content_err(e: impl std::fmt::Display) -> LanguageModelToolResultContent
     LanguageModelToolResultContent::from(e.to_string())
 }
 
+/// Detect a read of a skill's `SKILL.md` — the discovery-only catalog entry
+/// whose body is never injected (see `skill_tool.rs`: body injection is disabled
+/// in zed-kask). Reading it bypasses the manifest cascade, the gas/OCAP
+/// membrane, and the convergence loop.
+///
+/// This is the enforcement point for the invariant the system prompt states.
+/// It was previously advisory (`log::warn!` only), which made the prompt prose
+/// the *sole* defense — and per the `.rules` "advertised invariants need
+/// enforcement points" trap, an invariant with no gate is a declaration. The
+/// model's trained prior actively pushes against it: every other major agent
+/// system loads skill bodies as prose, so "read the skill file" is the
+/// statistically expected action.
+///
+/// Only the catalog file itself is gated. Resource files *inside* a skill
+/// directory (templates, references, scripts) stay readable — a cascade result
+/// may legitimately direct the model to them.
+fn is_skill_catalog_file(path: &Path) -> bool {
+    if path.file_name().and_then(|n| n.to_str()) != Some("SKILL.md") {
+        return false;
+    }
+    // A skills directory is one whose parent is `.agents` (project) or the
+    // global skills root (D28: `{kask_data_dir}/skills/` or legacy
+    // `paths::data_dir()/agents/skills/`). Walk ancestors so nested layouts
+    // (`.../skills/_marketplace/<name>/SKILL.md`) match too.
+    //
+    // zed-kask: D28 — the global skills dir is resolved via
+    // `agent_skills::global_skills_dir()` which honors the override hook.
+    // We check `starts_with` against it so any kask data root (custom
+    // `HKASK_DATA_DIR`, XDG default, etc.) is accepted.
+    let global_skills_dir = agent_skills::global_skills_dir();
+    path.ancestors().skip(1).any(|anc| {
+        anc.file_name().and_then(|n| n.to_str()) == Some("skills")
+            && (anc
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n == ".agents" || n == "agents")
+                .unwrap_or(false)
+                || anc.starts_with(&global_skills_dir))
+    })
+}
+
+/// Refuse a `SKILL.md` read, returning the redirect the model should act on.
+///
+/// Returns `Err` (the tool-error channel) when `resolved_path` is a skill
+/// catalog file, so the model receives the redirect as the tool result rather
+/// than the file body.
+///
+/// The `log::warn!` counts *blocked* attempts — the measurement that tells us
+/// whether the system prompt's prohibition prose is still carrying load now that
+/// a gate exists. It is deliberately **not** in the `reg.skill.*` namespace:
+/// `reg.skill.<id>.<phase>` is reserved for per-skill feedback spans
+/// (`RegulationLedger::record_skill_span`, CI-enforced by
+/// `kask/scripts/check-skill-span-namespace.sh`), and this is a tool-boundary
+/// event about a *refused file read*, not a skill's own outcome. It is also a
+/// `log` record rather than a `tracing` event because the `agent` crate has no
+/// `tracing` dependency and no `log`→`tracing` bridge is installed, so a
+/// `target:`-style span here would not reach the regulation ledger.
+/// Telemetry key for a refused `SKILL.md` read. Named as a constant so the
+/// namespace test asserts on the value actually emitted rather than on this
+/// file's source text.
+const BLOCKED_READ_TELEMETRY_KEY: &str = "skill.catalog_read_blocked";
+
+fn refuse_skill_catalog_read(
+    resolved_path: &Path,
+    requested_path: &str,
+) -> Result<(), LanguageModelToolResultContent> {
+    if !is_skill_catalog_file(resolved_path) {
+        return Ok(());
+    }
+    log::warn!(
+        "{}: refused read_file of SKILL.md at {} (requested '{}') — \
+         SKILL.md is discovery-only; the `skill` tool executes the manifest cascade.",
+        BLOCKED_READ_TELEMETRY_KEY,
+        resolved_path.display(),
+        requested_path
+    );
+    let skill_name = resolved_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("<name>");
+    Err(LanguageModelToolResultContent::from(format!(
+        "Refused: `{requested_path}` is a skill catalog entry, not a readable \
+         document. Its body is never injected — reading it would bypass the \
+         manifest cascade, the gas/OCAP membrane, and the convergence loop.\n\n\
+         To run this skill, call the `skill` tool with name `{skill_name}` and \
+         the user's full request as `task`. The tool executes the skill's \
+         manifest and returns its result; you do not need to read or interpret \
+         the methodology yourself.\n\n\
+         Resource files inside the skill directory (templates, references) are \
+         still readable if a cascade result directs you to one."
+    )))
+}
+
 /// Resolves the optional `start_line` / `end_line` inputs from the tool schema
 /// to a concrete 1-indexed, inclusive `(start, end)` line range:
 ///
@@ -155,13 +249,15 @@ use crate::{AgentTool, ToolCallEventStream, ToolInput, outline};
 ///   Do NOT retry reading the same file without line numbers if you receive an outline.
 /// - This tool supports reading image files. Supported formats: PNG, JPEG, WebP, GIF, BMP, TIFF.
 ///   Image files are returned as visual content that you can analyze directly.
+/// - A skill's `SKILL.md` cannot be read: it is a discovery-only catalog entry, and this tool
+///   refuses it. Invoke the `skill` tool instead. Other files inside a skill directory are readable.
 ///
-/// The only supported path outside the project is `~/.agents/skills` or a descendant, for global agent skills.
+/// The only supported path outside the project is the global skills directory or a descendant, for global agent skills.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ReadFileToolInput {
     /// The relative path of the file to read.
     ///
-    /// This path should never be absolute, and the first component of the path should always be a root directory in a project, unless it's a global agent skill under `~/.agents/skills`.
+    /// This path should never be absolute, and the first component of the path should always be a root directory in a project, unless it's a global agent skill under the global skills directory.
     ///
     /// <example>
     /// If the project has the following root directories:
@@ -174,7 +270,7 @@ pub struct ReadFileToolInput {
     /// </example>
     ///
     /// <example>
-    /// To read a global agent skill file, you may provide a path under `~/.agents/skills`, such as `~/.agents/skills/my-skill/SKILL.md`.
+    /// To read a global agent skill file, use the global skills directory path shown in the system prompt.
     /// </example>
     pub path: String,
     /// Optional line number to start reading on (1-based index)
@@ -264,6 +360,7 @@ impl AgentTool for ReadFileTool {
             if let Some(skill_path) =
                 resolve_global_skill_path(Path::new(&input.path), fs.as_ref()).await
             {
+                refuse_skill_catalog_read(&skill_path, &input.path)?;
                 return read_global_skill_file(
                     &skill_path,
                     fs.as_ref(),
@@ -295,8 +392,10 @@ impl AgentTool for ReadFileTool {
                     project.absolute_path(&project_path, cx)
                 })
                 .ok_or_else(|| {
-                    anyhow!("Failed to convert {} to absolute path", &input.path)
+                    anyhow!("Failed to convert {} to absolute path", input.path)
                 }).map_err(tool_content_err)?;
+
+            refuse_skill_catalog_read(&abs_path, &input.path)?;
 
             // Check settings exclusions synchronously
             project.read_with(cx, |_project, cx| {
@@ -304,14 +403,14 @@ impl AgentTool for ReadFileTool {
                 if global_settings.is_path_excluded(&project_path.path) {
                     anyhow::bail!(
                         "Cannot read file because its path matches the global `file_scan_exclusions` setting: {}",
-                        &input.path
+                        input.path
                     );
                 }
 
                 if global_settings.is_path_private(&project_path.path) {
                     anyhow::bail!(
                         "Cannot read file because its path matches the global `private_files` setting: {}",
-                        &input.path
+                        input.path
                     );
                 }
 
@@ -319,14 +418,14 @@ impl AgentTool for ReadFileTool {
                 if worktree_settings.is_path_excluded(&project_path.path) {
                     anyhow::bail!(
                         "Cannot read file because its path matches the worktree `file_scan_exclusions` setting: {}",
-                        &input.path
+                        input.path
                     );
                 }
 
                 if worktree_settings.is_path_private(&project_path.path) {
                     anyhow::bail!(
                         "Cannot read file because its path matches the worktree `private_files` setting: {}",
-                        &input.path
+                        input.path
                     );
                 }
 
@@ -336,7 +435,7 @@ impl AgentTool for ReadFileTool {
             if fs.is_dir(&abs_path).await {
                 return Err(tool_content_err(format!(
                     "{} is a directory, not a file. Use the list_directory tool to explore directory contents.",
-                    &input.path
+                    input.path
                 )));
             }
 
@@ -546,6 +645,113 @@ mod test {
     use std::path::PathBuf;
     use std::sync::Arc;
     use util::path;
+
+    #[test]
+    fn test_is_skill_catalog_file_detects_skill_catalog_reads() {
+        // Project skill: `.agents/skills/<name>/SKILL.md`.
+        assert!(is_skill_catalog_file(Path::new(
+            "/home/u/proj/.agents/skills/hypothesis-framer/SKILL.md"
+        )));
+        // Global skill: `<data>/agents/skills/<name>/SKILL.md`.
+        assert!(is_skill_catalog_file(Path::new(
+            "/home/u/.local/share/zed-kask/agents/skills/grill-me/SKILL.md"
+        )));
+        // Marketplace skill nested under `_marketplace` is still detected.
+        assert!(is_skill_catalog_file(Path::new(
+            "/home/u/.local/share/zed-kask/agents/skills/_marketplace/published/SKILL.md"
+        )));
+        // A resource file inside a skill dir is NOT a catalog read.
+        assert!(!is_skill_catalog_file(Path::new(
+            "/home/u/proj/.agents/skills/hypothesis-framer/templates/foo.j2"
+        )));
+        // A user file named SKILL.md not under a skills dir is NOT flagged.
+        assert!(!is_skill_catalog_file(Path::new(
+            "/home/u/proj/docs/SKILL.md"
+        )));
+        // A `skills/` dir whose parent is neither `.agents` nor `agents` is NOT
+        // flagged (avoids false positives on unrelated `skills/` trees).
+        assert!(!is_skill_catalog_file(Path::new(
+            "/home/u/repos/skills/foo/SKILL.md"
+        )));
+        // zed-kask: D28 — a `skills/` dir under the kask data root (via the
+        // `global_skills_dir` override) IS flagged. Use a tempdir so the
+        // path matches what `global_skills_dir()` returns.
+        {
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let kask_skills = tmp.path().join("skills");
+            std::fs::create_dir_all(&kask_skills).expect("create skills dir");
+            agent_skills::set_global_skills_dir_override(Some(kask_skills.clone()));
+            assert!(is_skill_catalog_file(
+                &kask_skills.join("my-skill/SKILL.md")
+            ));
+            assert!(is_skill_catalog_file(
+                &kask_skills.join("_marketplace/alice/bug-hunt/SKILL.md")
+            ));
+            agent_skills::set_global_skills_dir_override(None);
+        }
+    }
+
+    #[test]
+    fn test_refuse_skill_catalog_read_redirects_to_skill_tool() {
+        // The refusal must name the `skill` tool and the skill's own name,
+        // otherwise the model has no actionable next step and will retry the
+        // read or improvise the methodology — the exact failure this gates.
+        let err = refuse_skill_catalog_read(
+            Path::new("/home/u/proj/.agents/skills/hypothesis-framer/SKILL.md"),
+            ".agents/skills/hypothesis-framer/SKILL.md",
+        )
+        .expect_err("a SKILL.md read must be refused");
+        let message = format!("{err:?}");
+        assert!(
+            message.contains("skill") && message.contains("hypothesis-framer"),
+            "refusal must redirect to the `skill` tool with the skill name: {message}"
+        );
+        assert!(
+            message.contains("task"),
+            "refusal must tell the model to pass the request as `task`: {message}"
+        );
+    }
+
+    /// The blocked-read telemetry key must stay out of the `reg.skill.*`
+    /// namespace, which is reserved for per-skill feedback spans recorded via
+    /// `RegulationLedger::record_skill_span` and CI-enforced to be exactly
+    /// `reg.skill.<manifest.id>` by `kask/scripts/check-skill-span-namespace.sh`.
+    /// A tool-boundary event squatting on that prefix would look like a skill's
+    /// own outcome span to anything grepping the logs.
+    #[test]
+    fn test_blocked_read_telemetry_key_avoids_reserved_skill_span_namespace() {
+        // Reconstruct the reserved prefix at runtime so this assertion's own
+        // source text cannot satisfy the `contains` check it performs.
+        let reserved_prefix = format!("reg{}skill{}", ".", ".");
+        let emitted_key = BLOCKED_READ_TELEMETRY_KEY;
+        assert!(
+            !emitted_key.starts_with(&reserved_prefix),
+            "blocked-read telemetry key `{emitted_key}` must not use the reserved \
+             `reg.skill.*` feedback-span namespace (CI-enforced for per-skill \
+             feedback spans)"
+        );
+        assert!(
+            emitted_key.contains("catalog_read_blocked"),
+            "the key must name the event it reports: {emitted_key}"
+        );
+    }
+
+    #[test]
+    fn test_refuse_skill_catalog_read_allows_skill_resources_and_other_files() {
+        // Resource files inside a skill directory stay readable — a cascade
+        // result may direct the model to a template or reference. Gating the
+        // whole directory would break that path.
+        refuse_skill_catalog_read(
+            Path::new("/home/u/proj/.agents/skills/hypothesis-framer/templates/finer.j2"),
+            "templates/finer.j2",
+        )
+        .expect("skill resource files must remain readable");
+
+        // A user's own file that happens to be named SKILL.md is not a catalog
+        // entry and must not be refused.
+        refuse_skill_catalog_read(Path::new("/home/u/proj/docs/SKILL.md"), "docs/SKILL.md")
+            .expect("a non-catalog SKILL.md must remain readable");
+    }
 
     #[gpui::test]
     async fn test_read_directory_path(cx: &mut TestAppContext) {
@@ -1773,6 +1979,59 @@ mod test {
         assert_eq!(
             text.as_ref(),
             "     1\t# Spec\n     2\t\n     3\tReference body."
+        );
+    }
+
+    #[gpui::test]
+    async fn test_read_file_refuses_global_skill_catalog_entry(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        // End-to-end: the tool itself must refuse, not merely the helper. The
+        // global-skills fast path resolves before project-path machinery, so it
+        // needs its own coverage — a gate wired into only one of the two call
+        // sites would leave the bypass open.
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(path!("/root"), json!({})).await;
+
+        let catalog_path = agent_skills::global_skills_dir()
+            .join("my-skill")
+            .join("SKILL.md");
+        fs.create_dir(catalog_path.parent().unwrap()).await.unwrap();
+        fs.insert_file(
+            &catalog_path,
+            b"---\nname: my-skill\n---\nSENTINEL_SKILL_BODY_TEXT".to_vec(),
+        )
+        .await;
+
+        let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
+        let action_log = cx.new(|_| ActionLog::new(project.clone()));
+        let tool = Arc::new(ReadFileTool::new(project, action_log, true));
+
+        let result = cx
+            .update(|cx| {
+                let input = ReadFileToolInput {
+                    path: catalog_path.to_string_lossy().into_owned(),
+                    start_line: None,
+                    end_line: None,
+                };
+                tool.run(
+                    ToolInput::resolved(input),
+                    ToolCallEventStream::test().0,
+                    cx,
+                )
+            })
+            .await;
+
+        let error = result.expect_err("reading a SKILL.md catalog entry must be refused");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("Refused") && message.contains("my-skill"),
+            "refusal must name the skill so the model can invoke it: {message}"
+        );
+        // The gate is pointless if the refusal echoes the content it withholds.
+        assert!(
+            !message.contains("SENTINEL_SKILL_BODY_TEXT"),
+            "the refusal must not leak the SKILL.md body it is gating: {message}"
         );
     }
 

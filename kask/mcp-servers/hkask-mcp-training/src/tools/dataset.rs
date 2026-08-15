@@ -1,14 +1,18 @@
 use crate::TrainingServer;
 use crate::dataset::DatasetPipeline;
+use crate::tools::error_mapping::map_dataset_error;
 use crate::types::{AssembleDatasetRequest, IngestQaRequest, TrainIngestDatasetRequest};
-use hkask_mcp_server::server::{McpToolError, execute_tool};
+use hkask_mcp_server::server::{
+    McpToolError, execute_tool_semantic, map_io_error, map_memory_store_error,
+};
 use hkask_storage::HMem;
-use hkask_types::Visibility;
+use hkask_types::{HMemOntology, Visibility};
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::tool;
+use rmcp::{tool, tool_router};
 use serde_json::json;
 use std::path::PathBuf;
 
+#[tool_router(router = dataset_router, vis = "pub")]
 impl TrainingServer {
     #[tool(
         description = "Ingest QA pairs for model training. Stores question-answer pairs with provenance in semantic memory for future fine-tuning dataset assembly."
@@ -21,8 +25,8 @@ impl TrainingServer {
             dataset,
         }): Parameters<IngestQaRequest>,
     ) -> String {
-        execute_tool(self, "training_ingest_qa", async {
-            let Some(semantic) = &self.semantic else {
+        execute_tool_semantic(self, "training_ingest_qa", Self::ontology_anchor("training_ingest_qa"), async {
+            let Some(store) = &self.store else {
                 return Err(McpToolError::permission_denied(
                     "Semantic memory not available — set HKASK_MEMORY_DB and HKASK_DB_PASSPHRASE",
                 ));
@@ -38,10 +42,20 @@ impl TrainingServer {
                 let entity = format!("training:qa:manual:{ds}:{source}:{i}");
                 let level = qa.bloom_level.as_deref().unwrap_or("factual");
                 let value = json!({"question": qa.question, "answer": qa.answer, "bloom_level": level, "source": source, "dataset": ds});
+                // State-axis anchoring (P5.4): a QA pair is a training-dataset
+                // record, not a process step. The bloom level is the pedagogic
+                // classification, so it belongs on the subject axis alongside
+                // the dataset name.
+                let ontology = HMemOntology::semantic(
+                    "dcterms:Dataset",
+                    vec![ds.to_string(), level.to_string()],
+                    source.clone(),
+                );
                 let h_mem = HMem::new(&entity, "training_qa_pair", value, self.webid)
                     .with_visibility(Visibility::Public)
-                    .with_confidence(1.0);
-                match semantic.store(h_mem) {
+                    .with_confidence(1.0)
+                    .with_ontology(ontology);
+                match store.store(h_mem) {
                     Ok(()) => stored += 1,
                     Err(e) => errors.push(format!("Item {i}: {e}")),
                 }
@@ -49,7 +63,7 @@ impl TrainingServer {
             if errors.is_empty() {
                 Ok(json!({ "stored": stored, "source": source, "dataset": ds }))
             } else {
-                Err(McpToolError::internal(json!({ "stored": stored, "errors": errors, "source": source, "dataset": ds }).to_string()))
+                Err(McpToolError::internal(json!({ "stored": stored, "errors": errors, "source": source, "dataset": ds }).to_string())) // rr0044-ok: partial-store-failure-aggregate
             }
         })
         .await
@@ -70,15 +84,15 @@ impl TrainingServer {
             system_prompt,
         }): Parameters<AssembleDatasetRequest>,
     ) -> String {
-        execute_tool(self, "training_assemble_dataset", async {
-            let Some(semantic) = &self.semantic else {
+        execute_tool_semantic(self, "training_assemble_dataset", Self::ontology_anchor("training_assemble_dataset"), async {
+            let Some(store) = &self.store else {
                 return Err(McpToolError::permission_denied(
                     "Semantic memory not available — set HKASK_MEMORY_DB and HKASK_DB_PASSPHRASE",
                 ));
             };
-            let h_mems = match semantic.query_by_attribute("training_qa_pair") {
+            let h_mems = match store.query_by_attribute("training_qa_pair") {
                 Ok(t) => t,
-                Err(e) => return Err(McpToolError::internal(format!("Failed to query QA h_mems: {e}"))),
+                Err(e) => return Err(map_memory_store_error(e, "semantic memory query")),
             };
             if h_mems.is_empty() {
                 return Err(McpToolError::invalid_argument("No training_qa_pair h_mems found. Ingest QA pairs first with training_ingest_qa."));
@@ -109,30 +123,36 @@ impl TrainingServer {
                 let split = split.clamp(0.0, 1.0);
                 (limit as f64 * split) as usize
             } else { limit };
-            let write_jsonl = |path: &str, items: &[serde_json::Value]| -> Result<usize, std::io::Error> {
+            let write_jsonl = |path: &std::path::Path, items: &[serde_json::Value]| -> Result<usize, std::io::Error> {
                 let mut output = String::new();
                 for item in items {
-                    output.push_str(&serde_json::to_string(item).expect("Value serialization cannot fail"));
+                    output.push_str(
+                        &serde_json::to_string(item)
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+                    );
                     output.push('\n');
                 }
                 std::fs::write(path, output)?;
                 Ok(items.len())
             };
+            // Contain the LLM-supplied output path (CWE-73): a write to
+            // ~/.ssh/authorized_keys or /etc/cron.d/... must be rejected.
+            let train_path = hkask_mcp_server::contain_for_write(&output_path)?;
             let train_items = &conversations[..train_count];
-            match write_jsonl(&output_path, train_items) {
+            match write_jsonl(&train_path, train_items) {
                 Ok(n) => {
                     let mut result = json!({"train_examples": n, "train_path": output_path, "total_matched": total});
                     if train_count < limit {
-                        let test_path = format!("{output_path}.test.jsonl");
+                        let test_path = PathBuf::from(format!("{}.test.jsonl", train_path.to_string_lossy()));
                         let test_items = &conversations[train_count..];
                         match write_jsonl(&test_path, test_items) {
-                            Ok(m) => { result["test_examples"] = json!(m); result["test_path"] = json!(test_path); }
+                            Ok(m) => { result["test_examples"] = json!(m); result["test_path"] = json!(test_path.to_string_lossy().to_string()); }
                             Err(e) => { result["test_write_error"] = json!(e.to_string()); }
                         }
                     }
                     Ok(result)
                 }
-                Err(e) => Err(McpToolError::internal(format!("Failed to write dataset file: {e}"))),
+                Err(e) => Err(map_io_error(e, "Failed to write dataset file")),
             }
         })
         .await
@@ -148,13 +168,12 @@ impl TrainingServer {
             cache_dir,
         }): Parameters<TrainIngestDatasetRequest>,
     ) -> String {
-        execute_tool(self, "training_ingest_dataset", async {
-            let file_path = PathBuf::from(&dataset_path);
-            if !file_path.exists() {
-                return Err(McpToolError::invalid_argument(format!("Dataset file not found: {dataset_path}")));
-            }
+        execute_tool_semantic(self, "training_ingest_dataset", Self::ontology_anchor("training_ingest_dataset"), async {
+            // Contain the caller-supplied dataset read path (CWE-200) and the
+            // optional cache_dir write target (CWE-73) before any pipeline op.
+            let file_path = hkask_mcp_server::contain_for_read(&dataset_path)?;
             let mut pipeline = if let Some(ref dir) = cache_dir {
-                DatasetPipeline::new(PathBuf::from(dir))
+                DatasetPipeline::new(hkask_mcp_server::contain_for_write(dir)?)
             } else {
                 self.pipeline.lock().unwrap_or_else(|e| e.into_inner()).clone()
             };
@@ -169,7 +188,7 @@ impl TrainingServer {
                         "is_preference": is_preference, "cached": true,
                     }))
                 }
-                Err(e) => Err(McpToolError::invalid_argument(format!("Dataset ingest error: {e}"))),
+                Err(e) => Err(map_dataset_error(e)),
             }
         })
         .await

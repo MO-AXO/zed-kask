@@ -13,11 +13,11 @@ pub struct SerapiProvider {
 }
 
 impl SerapiProvider {
-    pub fn new(api_key: String) -> Self {
-        Self {
-            client: super::provider_http_client(),
+    pub fn new(api_key: String) -> Result<Self, WebError> {
+        Ok(Self {
+            client: super::provider_http_client()?,
             api_key,
-        }
+        })
     }
 
     /// Extract a YouTube video ID from a URL or raw ID string.
@@ -83,7 +83,7 @@ impl SerapiProvider {
                 429 => WebError::RateLimited(format!("SerpAPI rate limited: {status}")),
                 _ => WebError::ProviderError(format!(
                     "SerpAPI transcript error {status}: {}",
-                    body.chars().take(200).collect::<String>()
+                    hkask_inference::openai_compat::sanitize_error_body(&body)
                 )),
             });
         }
@@ -203,7 +203,7 @@ impl WebSearchProvider for SerapiProvider {
                 429 => WebError::RateLimited(format!("SerpAPI rate limited: {status}")),
                 _ => WebError::ProviderError(format!(
                     "SerpAPI error {status}: {}",
-                    body.chars().take(200).collect::<String>()
+                    hkask_inference::openai_compat::sanitize_error_body(&body)
                 )),
             });
         }

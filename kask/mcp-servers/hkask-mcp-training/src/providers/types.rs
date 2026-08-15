@@ -9,7 +9,7 @@
 //! - Cost estimation
 
 use crate::huggingface::TrainingArtifacts;
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
@@ -362,6 +362,7 @@ pub struct LoraParams {
 /// LoRA initialization strategy (mirrors PEFT `init_lora_weights`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
+#[schemars(transform = strip_bare_additional_properties)]
 pub enum LoraInit {
     /// PEFT default: B=0, A~Gaussian Kaiming-uniform. Adapter is a no-op at step 0.
     #[default]
@@ -388,6 +389,49 @@ pub enum LoraInit {
     Eva,
     /// Random init (debugging only — not a no-op at step 0).
     Random,
+}
+
+/// schemars `transform` for [`LoraInit`]: strip the bare-boolean
+/// `additionalProperties: false` that schemars emits for the externally-tagged
+/// newtype variant `PissaNiter(u32)`. A boolean in a schema-valued position
+/// (`additionalProperties`, a property value, `items`, an `anyOf` member, ...)
+/// is rejected by strict-schema-decoding providers (Ollama: `400 cannot
+/// unmarshal bool into ... of type api.ToolProperty`; Gemini likewise) - see
+/// the `.rules` trap "kask MCP tool inputs that accept arbitrary JSON use
+/// `AnyJsonValue`" and `hkask_mcp_server::find_boolean_schema_positions`.
+///
+/// Removing the keyword leaves the schema correct (it still accepts
+/// `{"pissa_niter": N}`; serde ignores unknown fields by default, so allowing
+/// extras matches the deserializer's lenient behavior) but not closed with a
+/// boolean. Only a bare-boolean `additionalProperties` is removed; a
+/// schema-valued `additionalProperties` (object) is left intact. The serde wire
+/// format is unchanged (this is a `JsonSchema` transform, not a `serde` attr).
+fn strip_bare_additional_properties(schema: &mut Schema) {
+    fn strip_map(obj: &mut serde_json::Map<String, serde_json::Value>) {
+        if matches!(
+            obj.get("additionalProperties"),
+            Some(serde_json::Value::Bool(_))
+        ) {
+            obj.remove("additionalProperties");
+        }
+        for (_, child) in obj.iter_mut() {
+            strip_value(child);
+        }
+    }
+    fn strip_value(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(obj) => strip_map(obj),
+            serde_json::Value::Array(arr) => {
+                for child in arr {
+                    strip_value(child);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(obj) = schema.as_object_mut() {
+        strip_map(obj);
+    }
 }
 
 impl LoraInit {
@@ -649,7 +693,7 @@ pub enum TrainingJobStatus {
 // ── Provider error ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
-pub enum ProviderError {
+pub enum HostProviderError {
     #[error("Provider '{0}' is not available (missing CLI or configuration)")]
     Unavailable(String),
     #[error("Training job failed: {0}")]
@@ -713,29 +757,68 @@ pub struct PodStatus {
 pub trait TrainingHost: Send + Sync {
     /// Submit a training job for execution.
     /// Returns a provider-specific job ID for status tracking.
-    async fn submit(&self, job: &TrainingJob) -> Result<String, ProviderError>;
+    async fn submit(&self, job: &TrainingJob) -> Result<String, HostProviderError>;
 
     /// Query the status of a previously submitted job.
     /// Returns rich pod status including SSH connection info, IP, uptime,
     /// and GPU type. The operator MUST be able to SSH into the pod and
     /// inspect logs. If `ssh_command` is empty, the pod is not debuggable.
-    async fn status(&self, job_id: &str) -> Result<PodStatus, ProviderError>;
+    async fn status(&self, job_id: &str) -> Result<PodStatus, HostProviderError>;
 
     /// Cancel a running or queued job. Terminates the pod to stop billing.
-    async fn cancel(&self, job_id: &str) -> Result<(), ProviderError>;
+    async fn cancel(&self, job_id: &str) -> Result<(), HostProviderError>;
 }
 
-/// Metadata returned by a provider when a training job completes.
-/// DEPRECATED — completion metadata now comes from the HuggingFace
-/// completion manifest (CompletionManifest struct in huggingface.rs).
-/// This struct is retained for trait conformance but is not used.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompletionMetadata {
-    pub base_model: String,
-    pub output_name: Option<String>,
-    pub loss: Option<f32>,
-    pub training_duration_secs: Option<u64>,
-    pub tokens_processed: Option<u64>,
+/// Username characters accepted for SSH logins: alphanumerics, `.`, `_`, `-`,
+/// but no leading `-` (ssh would parse it as an option flag).
+fn is_valid_ssh_username(username: &str) -> bool {
+    !username.is_empty()
+        && !username.starts_with('-')
+        && username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
+/// Hosts accepted for SSH connections: a parseable `IpAddr` or a hostname of
+/// alphanumerics, `.`, `-`. Anything else (whitespace, shell metacharacters,
+/// leading `-` option injection) is provider-controlled hostile input.
+fn is_valid_ssh_host(host: &str) -> bool {
+    if host.is_empty() || host.starts_with('-') {
+        return false;
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    host.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
+/// Parse an `ssh_command` string of the form `ssh <user>@<host> [-p <port>]`
+/// (as built by DeepInfra/Nebius from cloud API responses) into validated
+/// (user, host, port) components. Returns None on any deviation — the
+/// provider response is untrusted input, and a malformed value must never
+/// reach process argv.
+fn parse_ssh_command(ssh_command: &str) -> Option<(String, String, Option<u16>)> {
+    let parts: Vec<&str> = ssh_command.split_whitespace().collect();
+    if parts.len() != 2 && parts.len() != 4 {
+        return None;
+    }
+    if parts[0] != "ssh" {
+        return None;
+    }
+    let (username, host) = parts[1].split_once('@')?;
+    if !is_valid_ssh_username(username) || !is_valid_ssh_host(host) {
+        return None;
+    }
+    let port = if parts.len() == 4 {
+        if parts[2] != "-p" {
+            return None;
+        }
+        Some(parts[3].parse::<u16>().ok()?)
+    } else {
+        None
+    };
+    Some((username.to_string(), host.to_string(), port))
 }
 
 /// Fetch the tail of a pod's training log via SSH. Used by training_status
@@ -744,13 +827,25 @@ pub async fn fetch_pod_logs(ssh_command: &str, lines: usize) -> Option<String> {
     if ssh_command.is_empty() {
         return None;
     }
-    let parts: Vec<&str> = ssh_command.split_whitespace().collect();
-    if parts.len() < 4 {
-        return None;
-    }
-    let user_host = parts[1];
-    let port = parts.get(3).and_then(|p| p.parse::<u16>().ok())?;
+    let (username, host, port) = match parse_ssh_command(ssh_command) {
+        Some(parts) => parts,
+        None => {
+            tracing::warn!(
+                target: "hkask.training.pod.ssh",
+                ssh_command = %ssh_command,
+                "Rejected provider-supplied ssh_command: failed host/username validation"
+            );
+            return None;
+        }
+    };
+    let port = port.unwrap_or(22);
+    let user_host = format!("{username}@{host}");
     let output = tokio::process::Command::new("ssh")
+        // StrictHostKeyChecking=no is accepted here deliberately: these are
+        // ephemeral training pods with no prior known-hosts trust anchor, so
+        // enforcement would break log fetching on every fresh pod. BatchMode
+        // and ConnectTimeout bound the interaction; the risk is scoped to
+        // MITM of a short log-read on a throwaway pod.
         .args([
             "-o",
             "StrictHostKeyChecking=no",
@@ -760,7 +855,7 @@ pub async fn fetch_pod_logs(ssh_command: &str, lines: usize) -> Option<String> {
             "BatchMode=yes",
             "-p",
             &port.to_string(),
-            user_host,
+            &user_host,
             &format!(
                 "tail -n {lines} /workspace/logs/entrypoint.log 2>/dev/null || echo no-log-file"
             ),
@@ -772,5 +867,76 @@ pub async fn fetch_pod_logs(ssh_command: &str, lines: usize) -> Option<String> {
         Some(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ssh_command_rejects_host_with_embedded_options() {
+        assert!(parse_ssh_command("ssh ubuntu@1.2.3.4 -o ProxyCommand=x").is_none());
+    }
+
+    #[test]
+    fn parse_ssh_command_rejects_option_flag_as_host() {
+        assert!(parse_ssh_command("ssh ubuntu@-o").is_none());
+    }
+
+    #[test]
+    fn parse_ssh_command_rejects_shell_metacharacters() {
+        assert!(parse_ssh_command("ssh ubuntu@1.2.3.4;rm -rf /").is_none());
+        assert!(parse_ssh_command("ssh ubuntu@`whoami`").is_none());
+        assert!(parse_ssh_command("ssh ubuntu@host,name").is_none());
+    }
+
+    #[test]
+    fn parse_ssh_command_rejects_invalid_username() {
+        assert!(parse_ssh_command("ssh -o@1.2.3.4").is_none());
+        assert!(parse_ssh_command("ssh u ser@1.2.3.4").is_none());
+        assert!(parse_ssh_command("ssh @1.2.3.4").is_none());
+    }
+
+    #[test]
+    fn parse_ssh_command_accepts_valid_ip() {
+        let (username, host, port) =
+            parse_ssh_command("ssh ubuntu@1.2.3.4").expect("valid IP must parse");
+        assert_eq!(username, "ubuntu");
+        assert_eq!(host, "1.2.3.4");
+        assert_eq!(port, None);
+
+        let (_, host, port) =
+            parse_ssh_command("ssh root@2001:db8::1 -p 2222").expect("valid IPv6 must parse");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, Some(2222));
+    }
+
+    #[test]
+    fn parse_ssh_command_accepts_valid_hostname() {
+        let (username, host, port) =
+            parse_ssh_command("ssh user@pod-42.example.com").expect("valid hostname must parse");
+        assert_eq!(username, "user");
+        assert_eq!(host, "pod-42.example.com");
+        assert_eq!(port, None);
+    }
+
+    #[test]
+    fn parse_ssh_command_preserves_port_parsing() {
+        let (_, _, port) =
+            parse_ssh_command("ssh root@1.2.3.4 -p 12345").expect("explicit port must parse");
+        assert_eq!(port, Some(12345));
+
+        assert!(parse_ssh_command("ssh root@1.2.3.4 -p notaport").is_none());
+        assert!(parse_ssh_command("ssh root@1.2.3.4 -p 70000").is_none());
+    }
+
+    #[test]
+    fn parse_ssh_command_rejects_unexpected_shapes() {
+        assert!(parse_ssh_command("").is_none());
+        assert!(parse_ssh_command("ssh").is_none());
+        assert!(parse_ssh_command("scp ubuntu@1.2.3.4").is_none());
+        assert!(parse_ssh_command("ssh ubuntu@1.2.3.4 -o BatchMode=yes extra").is_none());
+        assert!(parse_ssh_command("ssh 1.2.3.4").is_none());
     }
 }

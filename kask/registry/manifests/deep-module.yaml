@@ -1,5 +1,5 @@
 # Deep Module Process Manifest
-# ℏKask v0.31.0 — Module depth evaluation as convergent PDCA
+# ℏKask v0.34.0 — Module depth evaluation as convergent PDCA
 
 manifest:
   id: deep-module
@@ -10,23 +10,19 @@ manifest:
     deletion test in both directions, designs a deepened interface from results,
     computes convergence, and iterates until depth recommendations are stable.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  threshold: 0.15
-  improvement_gate: threshold_only
-  max_iterations: 5
-  min_iterations: 1
-  convergence_field: step_4_result.convergence_metric
+  convergence_mode: "cauchy"
+  target_artifacts_field: step_3_result.public_interface
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
-  materiality_guard:
-    enabled: true
-    min_iterations: 3
-    min_delta: 0.02
-    on_triggered: force_converge
-    blocker: irreducible_depth_gap
 
 gas:
   cap: 100000
@@ -42,7 +38,7 @@ rjoule:
 inputs:
   - name: module_path
     type: string
-    required: true
+    required: false
   - name: module_source
     type: string
     required: true
@@ -68,16 +64,8 @@ inputs:
     type: object
     required: false
 
-fusion:
-  judge: deepseek-v4-pro
-  panel:
-    - Kimi2.7
-    - Qwen3.7 Max
-    - GLM5.2
-  mode: synthesis
-  skills:
-    - deep-module
-  max_rounds: 3
+ledger:
+  span_namespace: reg.skill.deep-module
 
 steps:
   - ordinal: 1
@@ -86,9 +74,9 @@ steps:
     renderer: minijinja
     template_ref: deep-module/deep-module-assess
     gas_cap: 6000
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
-      module_path: "{{ module_path }}"
+      module_path: "{{ task | default(module_path) }}"
       module_source: "{{ module_source }}"
       caller_paths: "{{ caller_paths | default([]) }}"
       codebase_context: "{{ codebase_context | default({}) }}"
@@ -99,7 +87,7 @@ steps:
     renderer: minijinja
     template_ref: deep-module/deep-module-delete
     gas_cap: 6000
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
       module_assessment: "{{ step_1_result }}"
       caller_code: "{{ caller_code | default({}) }}"
@@ -114,11 +102,11 @@ steps:
       verdict is EXTRACT or DEEPEN. Skipped for DELETE/MERGE (designing a
       module that should not exist is undefined behavior). When skipped,
       step_3_result is undefined; downstream steps use default({}) which is
-      falsy in Jinja2, so the convergence-check correctly detects no design output.
+      falsy in Jinja2, so the Cauchy tracker sees a 0 convergence_signal reading.
     renderer: minijinja
     template_ref: deep-module/deep-module-design
     gas_cap: 6000
-    timeout_seconds: 60
+    timeout_seconds: 150
     condition: "step_2_result.recommendation == 'EXTRACT' OR step_2_result.recommendation == 'DEEPEN'"
     input_mapping:
       deletion_test_result: "{{ step_2_result }}"
@@ -127,40 +115,26 @@ steps:
       constraint_classification: "{{ constraint_classification | default({}) }}"
 
   - ordinal: 4
-    action: select
-    description: >
-      Compute normalized convergence metric for depth cycle. Consumes
-      assess (primary), delete, and design results for full-fidelity
-      evaluation. Emits re_entry_target to route the next iteration to
-      the failing step rather than defaulting to assess.
-    renderer: minijinja
-    template_ref: deep-module/deep-module-convergence-check
-    gas_cap: 2000
-    timeout_seconds: 30
-    input_mapping:
-      primary_result: "{{ step_1_result }}"
-      delete_result: "{{ step_2_result | default({}) }}"
-      design_result: "{{ step_3_result | default({}) }}"
-    fusion: false
-
-  - ordinal: 5
     action: loop
     description: >
       Re-enter depth cycle if convergence is not met. The loop_target is
-      resolved dynamically from step_4_result.re_entry_target, routing to
-      the failing step (1=assess, 2=delete, 3=design). The executor exits
-      the loop when convergence_metric ≤ threshold (0.15); the materiality
-      guard forces convergence_metric = 0.0 when the gap is irreducible.
+      fixed at step 1 (assess) — the Cauchy criterion detects when the
+      design output has stopped moving, replacing the old dynamic
+      re_entry_target routing.
 
       STATE PERSISTENCE: Step results from the prior iteration persist
-      across loop iterations. When the loop re-enters at a targeted step,
-      all prior step_N_result values remain available for input_mapping
-      references. This is required because step 2 (delete) consumes
-      step_1_result, step 3 (design) consumes step_2_result, and step 4
-      (convergence) consumes step_1_result, step_2_result, and step_3_result.
-      If the executor does not persist step results, re-entry will fail.
+      across loop iterations. When the loop re-enters, all prior
+      step_N_result values remain available for input_mapping references.
+      This is required because step 2 (delete) consumes step_1_result,
+      step 3 (design) consumes step_2_result. If the executor does not
+      persist step results, re-entry will fail.
     input_mapping:
-      loop_target: "{{ step_4_result.re_entry_target | default(1) }}"
+      loop_target: "{{ 1 }}"
+      # Push the public-interface item count into convergence_signal so the
+      # Cauchy criterion can detect when the design has stopped moving.
+      # When step 3 (design) is skipped (DELETE/MERGE recommendation),
+      # the value defaults to 0 — stable, so Cauchy fires after min_iterations.
+      convergence_signal: "{{ step_3_result.public_interface | default([]) | length }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -168,30 +142,3 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: deep-module/deep-module-assess
-      gas_budget: 6000
-    - resource: template
-      action: render
-      template_id: deep-module/deep-module-delete
-      gas_budget: 6000
-    - resource: template
-      action: render
-      template_id: deep-module/deep-module-design
-      gas_budget: 6000
-    - resource: template
-      action: render
-      template_id: deep-module/deep-module-convergence-check
-      gas_budget: 2000
-    - resource: manifest
-      action: execute
-      template_id: deep-module
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true

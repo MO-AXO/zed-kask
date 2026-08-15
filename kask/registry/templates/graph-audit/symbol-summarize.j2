@@ -1,3 +1,17 @@
+[inference]
+max_tokens = 2048
+template_type: KnowAct
+contract:
+  input:
+    kind: string
+    name: string
+    signature: string
+    doc: string|null
+    file: string
+  output:
+    summary: string
+visibility: Public
+---
 {# graph-audit/symbol-summarize.j2 — Generate one-sentence summaries of code symbols using the inference router.
    Rendered per-symbol, sent to a cheap model for summarization.
 

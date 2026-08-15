@@ -1,11 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- audit
-- detect
-- score
-- classify
-- recommend
 contract:
   input:
     skill_name: string
@@ -15,7 +9,6 @@ contract:
     health_scores: object
     coverage_gaps: array
     deprecation_recommendations: array
-energy_cap: 6144
 visibility: Public
 ---
 {# Template: skill-maintenance/skill-maintenance-audit.j2 #}
@@ -55,7 +48,7 @@ A skill is stale if it exhibits any of these signals:
 | Signal | Detection Method | Severity |
 |--------|-------------------|----------|
 | Missing registry crate | No `manifest.yaml` in `registry/manifests/<name>.yaml` (FlowDef) or `registry/templates/<name>/manifest.yaml` (crate catalog) | Critical |
-| Invalid template_type | template_type is not WordAct/KnowAct/FlowDef | Critical |
+| Invalid template_type | template_type is not WordAct/KnowAct/FlowDef/RenderAct | Critical |
 | Broken file references | Referenced path does not exist in workspace | Critical |
 | Outdated crate references | References `hkask-*` crate that has been renamed or removed | Critical |
 | Outdated architecture references | References architecture that has been superseded | High |
@@ -63,8 +56,7 @@ A skill is stale if it exhibits any of these signals:
 | Contradictory instructions | Instructions conflict with each other or with project constraints | High |
 | Vague or generic description | Description could apply to any skill, not this one specifically | Medium |
 | Magna Carta violations | Skill violates P1–P4 principles | High |
-| energy_cap out of range | energy_cap not in 2048–8192 range | Medium |
-| vocabulary terms missing | lexicon_terms not in workspace vocabulary | Medium |
+| template_type mismatch | template_type in manifest doesn't match .j2 frontmatter | Medium |
 | Deprecated patterns | Uses `todo!`, `unimplemented!`, `#[deprecated]`, or abandoned APIs | Medium |
 | Missing SKILL.md companion | SKILL.md absent from `.agents/skills/<name>/` | Low |
 | Regulation span mismatches | References `reg.*` spans not in defined namespace set | Low |

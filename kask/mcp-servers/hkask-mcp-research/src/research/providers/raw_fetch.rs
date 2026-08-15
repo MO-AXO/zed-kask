@@ -1,4 +1,4 @@
-use super::{WebBrowseProvider, WebError, WebExtractProvider, validate_provider_url};
+use super::{WebBrowseProvider, WebError, WebExtractProvider};
 use crate::research::strip_html;
 use crate::research::types::*;
 use async_trait::async_trait;
@@ -8,17 +8,11 @@ pub struct RawFetchProvider {
     client: reqwest::Client,
 }
 
-impl Default for RawFetchProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl RawFetchProvider {
-    pub fn new() -> Self {
-        Self {
-            client: super::provider_http_client(),
-        }
+    pub fn new() -> Result<Self, WebError> {
+        Ok(Self {
+            client: super::provider_http_client()?,
+        })
     }
 }
 #[async_trait]
@@ -32,8 +26,8 @@ impl WebExtractProvider for RawFetchProvider {
         url: &str,
         _opts: &ExtractOptions,
     ) -> Result<ExtractedContent, WebError> {
-        // Task 6: Validate URL at provider boundary — RawFetch is the most SSRF-sensitive provider
-        validate_provider_url(url)?;
+        // SSRF validation is at the pool boundary (extract_with_fallback) —
+        // no per-provider re-validation needed.
         let resp =
             self.client.get(url).send().await.map_err(|e| {
                 WebError::ProviderUnavailable(format!("RawFetch request failed: {e}"))
@@ -46,7 +40,7 @@ impl WebExtractProvider for RawFetchProvider {
         if !status.is_success() {
             return Err(WebError::ProviderError(format!(
                 "RawFetch error {status}: {}",
-                body.chars().take(200).collect::<String>()
+                hkask_inference::openai_compat::sanitize_error_body(&body)
             )));
         }
         Ok(ExtractedContent {
@@ -90,7 +84,7 @@ impl WebBrowseProvider for RawFetchProvider {
         instruction: &str,
         timeout: Duration,
     ) -> Result<BrowseResult, WebError> {
-        validate_provider_url(url)?;
+        // SSRF validation is at the pool boundary (browse_with_fallback).
         let resp = self
             .client
             .get(url)
@@ -108,7 +102,7 @@ impl WebBrowseProvider for RawFetchProvider {
         if !status.is_success() {
             return Err(WebError::ProviderError(format!(
                 "RawFetch browse error {status}: {}",
-                body.chars().take(200).collect::<String>()
+                hkask_inference::openai_compat::sanitize_error_body(&body)
             )));
         }
         Ok(BrowseResult {

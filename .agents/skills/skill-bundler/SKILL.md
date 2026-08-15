@@ -1,8 +1,8 @@
 ---
 name: skill-bundler
+core: true
 visibility: public
-description: "Orchestrate and compose multiple skills into a cohesive bundle. Activates a set of skills together, resolves conflicts, determines application order, and produces a manifest that governs how the skills compose. Re-composes the manifest when skills evolve.
-"
+description: "Orchestrate and compose multiple skills into a cohesive bundle. Activates skills together, resolves conflicts, determines application order, and produces a manifest that governs how the skills compose. Re-composes when skills evolve."
 ---
 
 # Skill Bundler
@@ -49,14 +49,6 @@ Orchestrate and compose multiple skills into a cohesive bundle. Activates a set 
 7. Escalate if the goal delta remains flat or increases after two recomposition cycles.
 8. Increment the manifest version and flag only the skills that actually changed.
 
-### bundler-convergence-check
-
-1. Compute a normalized convergence metric in [0,1] accounting for both structural validity and goal achievement.
-2. Calculate the structural score based on the number of validation violations (errors, not warnings).
-3. Calculate the goal score based on the goal verdict (0.0 for "done", 1.0 for "blocked", 0.5 for "continue").
-4. Determine the final convergence metric as the maximum of the structural and goal scores.
-5. Calculate the goal delta as 1.0 minus the goal verdict confidence.
-
 ## Registry Templates
 
 | Template | Type | Purpose |
@@ -65,12 +57,12 @@ Orchestrate and compose multiple skills into a cohesive bundle. Activates a set 
 | `bundler-synthesize.j2` | KnowAct | Synthesize the composed bundle manifest: decimate/fuse RDF graph, resolve ontology anchors, and produce the final PKO/DC/PROV-O-anchored manifest.  |
 | `bundler-validate.j2` | KnowAct | Validate a composed bundle manifest: check for contradictory directives in the same cascade phase, cascade depth limits, skill uniqueness, conflict resolution completeness, and convergence criteria.  |
 | `bundler-evolve.j2` | KnowAct | Re-assess a bundle when one or more skills have changed. Re-compose the manifest preserving what hasn't changed and updating what has. Detect drift from the original composition principles.  |
-| `bundler-convergence-check.j2` | KnowAct | Compute a normalized convergence metric for bundle composition loops. Synthesizes compose/validate outputs into `convergence_metric` in [0,1], where 0 means no blocking composition violations remain.  |
+
 
 ## Constraints
 
 - `bundler-compose.j2`: Public.
 - `bundler-validate.j2`: Public.
 - `bundler-evolve.j2`: Public.
-- `bundler-convergence-check.j2`: Public.
+- **`lisp.eval` is available for custom deterministic compute steps.** When composing skills into bundles, `lisp.eval` can compute custom composition scores (e.g., weighted combinations of skill coverage, overlap, and ordering constraints) inline in the manifest — no Rust change needed. This enables skill authors to define custom composition logic without modifying the executor. Security: gated to `category: skill` manifests only. The interpreter supports both prefix (`(+ a b)`) and infix (`a + b`) operator notation — use infix for simple composition-score expressions, prefix for complex nested logic.
 - Registry is authoritative — when this SKILL.md disagrees with registry templates, the registry wins.

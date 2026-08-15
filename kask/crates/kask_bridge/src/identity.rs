@@ -23,8 +23,21 @@
 //! 3. Return the resolved DB path and passphrase for `RealMemoryPort::new()`
 
 use hkask_keystore::Keychain;
-use hkask_types::keychain_keys::KEY_DB_PASSPHRASE;
+use hkask_keystore::keychain_keys::KEY_DB_PASSPHRASE;
 use hkask_types::{WebID, agent_paths::sanitize_name};
+
+/// Error type for agent provisioning (directory creation + keychain access).
+#[derive(Debug, thiserror::Error)]
+pub enum ProvisionError {
+    #[error("{0}")]
+    InvalidUsername(String),
+    #[error("Failed to create agent directory: {0}")]
+    DirectoryCreation(#[from] std::io::Error),
+    #[error("Failed to store DB passphrase in keychain: {0}")]
+    KeychainStore(String),
+    #[error("Failed to resolve DB passphrase from keychain: {0}")]
+    KeychainRead(String),
+}
 
 /// Derive the agent name from a Zed `User::username`.
 ///
@@ -41,14 +54,6 @@ pub fn agent_name_from_username(username: &str) -> Option<String> {
     } else {
         Some(sanitized)
     }
-}
-
-/// Derive the `WebID` for a Zed username.
-///
-/// Deterministic: the same username always produces the same WebID
-/// (via `WebID::for_agent_name` in the `"hkask"` namespace).
-pub fn webid_from_username(username: &str) -> Option<WebID> {
-    agent_name_from_username(username).map(|name| WebID::for_agent_name(&name))
 }
 
 /// A curated list of common English words, each 8+ letters.
@@ -173,8 +178,8 @@ fn random_passphrase_word() -> String {
     let mut rng = rand::rng();
     PASSPHRASE_WORDS
         .choose(&mut rng)
-        .expect("PASSPHRASE_WORDS is non-empty")
-        .to_string()
+        .map(|word| word.to_string())
+        .unwrap_or_else(|| "kask".to_string())
 }
 
 /// The result of provisioning an agent — everything needed to construct
@@ -209,23 +214,22 @@ pub struct ProvisionedAgent {
 /// - The username sanitizes to empty
 /// - Directory creation fails (filesystem error)
 /// - Keychain read or write fails (OS keychain unavailable)
-pub fn provision_agent(username: &str) -> Result<ProvisionedAgent, String> {
+pub fn provision_agent(username: &str) -> Result<ProvisionedAgent, ProvisionError> {
     let agent_name = agent_name_from_username(username).ok_or_else(|| {
-        format!("Username '{username}' sanitized to empty — cannot provision agent")
+        ProvisionError::InvalidUsername(format!(
+            "Username '{username}' sanitized to empty — cannot provision agent"
+        ))
     })?;
 
     let webid = WebID::for_agent_name(&agent_name);
 
     // 1. Create the agent directory structure (idempotent).
     //    Resolve against the hKask data directory so paths are absolute.
+    //    D28: scaffolding subdirs removed — `ensure_agent_dirs` now creates
+    //    only the agent root. DBs create their own parent dir on open.
     let data_dir = hkask_services_core::config::resolve_data_dir();
     let agent_root = data_dir.join(hkask_types::agent_paths::agent_dir(&agent_name));
-    std::fs::create_dir_all(&agent_root)
-        .map_err(|e| format!("Failed to create agent dir {agent_root:?}: {e}"))?;
-    for sub in hkask_types::agent_paths::AGENT_SUBDIRS {
-        std::fs::create_dir_all(agent_root.join(sub))
-            .map_err(|e| format!("Failed to create agent subdir {sub}: {e}"))?;
-    }
+    std::fs::create_dir_all(&agent_root).map_err(ProvisionError::DirectoryCreation)?;
 
     let db_path = agent_root.join("memory.db").to_string_lossy().to_string();
 
@@ -243,7 +247,7 @@ pub fn provision_agent(username: &str) -> Result<ProvisionedAgent, String> {
         resolve_or_create_passphrase()?
     };
 
-    tracing::info!("Agent provisioned: name={agent_name}, db={db_path}, webid={webid:?}");
+    tracing::info!(name = agent_name, db = db_path, webid = %webid.redacted_display(), "Agent provisioned");
 
     Ok(ProvisionedAgent {
         db_path,
@@ -257,7 +261,7 @@ pub fn provision_agent(username: &str) -> Result<ProvisionedAgent, String> {
 /// On first run, generates a random English word (8+ letters) and stores it
 /// in the OS keychain under `KEY_DB_PASSPHRASE`. The user can change it later
 /// by updating the keychain entry or setting `HKASK_DB_PASSPHRASE`.
-fn resolve_or_create_passphrase() -> Result<String, String> {
+fn resolve_or_create_passphrase() -> Result<String, ProvisionError> {
     // Try to read an existing passphrase from the keychain.
     match hkask_keystore::keychain::resolve_db_passphrase_string() {
         Ok(passphrase) => Ok(passphrase.to_string()),
@@ -267,16 +271,14 @@ fn resolve_or_create_passphrase() -> Result<String, String> {
             let keychain = Keychain::default();
             keychain
                 .store_by_key(KEY_DB_PASSPHRASE, &word)
-                .map_err(|e| format!("Failed to store generated DB passphrase in keychain: {e}"))?;
+                .map_err(|e| ProvisionError::KeychainStore(e.to_string()))?;
             tracing::info!(
                 "Generated DB passphrase (random English word) and stored in keychain. \
                  The user can change it via the keychain or HKASK_DB_PASSPHRASE env var."
             );
             Ok(word)
         }
-        Err(e) => Err(format!(
-            "Failed to resolve DB passphrase from keychain: {e}"
-        )),
+        Err(e) => Err(ProvisionError::KeychainRead(e.to_string())),
     }
 }
 
@@ -317,17 +319,10 @@ mod tests {
     }
 
     #[test]
-    fn webid_is_deterministic() {
-        let w1 = webid_from_username("mdz-axo").unwrap();
-        let w2 = webid_from_username("mdz-axo").unwrap();
-        assert_eq!(w1, w2);
-    }
-
-    #[test]
-    fn different_users_get_different_webids() {
-        let w1 = webid_from_username("alice").unwrap();
-        let w2 = webid_from_username("bob").unwrap();
-        assert_ne!(w1, w2);
+    fn agent_name_is_deterministic() {
+        let a1 = agent_name_from_username("mdz-axo").unwrap();
+        let a2 = agent_name_from_username("mdz-axo").unwrap();
+        assert_eq!(a1, a2);
     }
 
     #[test]

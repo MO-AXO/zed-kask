@@ -1,78 +1,51 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
-//! hKask Inference — multi-provider inference router
+#![warn(clippy::let_underscore_future)]
+//! hKask Inference — media generation + IPC bridge client.
 //!
-//! Routes LLM requests to 8 providers (DeepInfra, fal.ai, Together AI,
-//! OpenRouter, KiloCode, Ollama, Cline, RunPod) based on a 2-letter provider
-//! prefix in the model name. Chat dispatch goes through `chat_backend` /
-//! `vision_backend` match-fns returning `&dyn ChatBackend` / `&dyn VisionBackend`
-//! borrowed from typed `Option<Backend>` fields (single source of truth — no
-//! separate map). Fusion orchestration (`fusion_orchestrator`) provides
-//! provider-agnostic multi-model deliberation when configured.
-
-// Used via derive macros (serde/thiserror/async_trait) — invisible to unused_crate_dependencies lint
-#![allow(unused_crate_dependencies)]
+//! In zed-kask, chat inference routes through the zed IPC bridge
+//! (`InferenceIpcClient` → `LanguageModelRegistry`). This crate provides:
+//! - `MediaRouter` — DeepInfra/AtlasCloud media generation (image/video/speech/
+//!   transcription), not covered by zed's `LanguageModel` abstraction.
+//! - `InferenceIpcClient` — the IPC bridge client used by MCP servers to route
+//!   chat/vision/embed through zed's `LanguageModelRegistry`.
+//! - `InferenceConfig` — shared configuration (base URLs, API keys, default model).
+//! - `ProviderId` — provider routing enum used by the training adapter router.
 //!
 //! # Architecture
 //!
 //! ```text
-//! InferenceRouter (implements InferencePort)
-//!   ├── DeepInfraBackend    — DeepInfra/ prefix → api.deepinfra.com      (chat + vision)
-//!   ├── FalBackend          — fal.ai/ prefix → api.fal.ai            (chat + vision + media)
-//!   ├── TogetherBackend     — Together AI/ prefix → api.together.xyz     (chat + vision)
-//!   ├── OpenRouterBackend   — OpenRouter/ prefix → openrouter.ai/api   (chat + vision)
-//!   ├── KiloCodeBackend     — KiloCode/ prefix → api.kilo.ai/api/gateway (chat + vision)
-//!   ├── OllamaBackend       — ollama/ prefix → localhost:11434 (local, no key) (chat + vision)
-//!   ├── ClineBackend        — Cline/ prefix → api.cline.bot/api (cloud gateway) (chat + vision)
-//!   └── RunpodBackend       — RunPod/ prefix → RunPod serverless (vision/OCR only, NOT chat)
+//! MediaRouter (implements InferencePort — media only)
+//!   ├── DeepInfraBackend — DeepInfra media (background removal/speech/transcription)
+//!   └── AtlasCloudBackend — AtlasCloud media (image/video/audio/asr)
 //!
-//! Dispatch: chat_backend() / vision_backend() match-fns return &dyn trait objects
-//! borrowed from the typed Option<Backend> fields above.
+//! InferenceIpcClient (implements InferencePort — chat/vision/embed via zed)
+//!   └── Unix socket → zed LanguageModelRegistry
 //!
-//! EmbeddingRouter
-//!   ├── DeepInfraEmbedding — DeepInfra/ prefix → /v1/embeddings
-//!   └── OpenRouterEmbedding — OpenRouter/ prefix → /v1/embeddings
+//! resolve_inference_port() — tries IPC bridge first, falls back to MediaRouter
 //! ```rust,no_run
 //!
 //! # Model Naming
 //!
-//! - `DeepInfra/meta-llama/Llama-3.3-70B-Instruct` → DeepInfra
-//! - `Together AI/Qwen/Qwen2.5-7B-Instruct-Turbo` → Together AI
-//! - `fal.ai/paddleocr` → fal.ai
-//! - `OpenRouter/openai/gpt-4o` → OpenRouter
-//! - `ollama/qwen3:8b` → Ollama (local)
-//! - `Cline/anthropic/claude-sonnet-4-6` → Cline (cloud gateway)
-//! - `RunPod/kask-ocr` → RunPod (vision/OCR only — not available for chat)
-//! - No prefix → default provider (configurable, default: DeepInfra)
+//! - `DeepInfra/meta-llama/Llama-3.3-70B-Instruct` → DeepInfra (via IPC bridge)
+//! - `OpenRouter/openai/gpt-4o` → OpenRouter (via IPC bridge)
+//! - No prefix → default model (configurable, default: OpenRouter/z-ai/glm-5.2)
 
+pub mod atlascloud_backend;
 pub mod chat_protocol;
-pub mod cline_backend;
 pub mod config;
 pub mod deepinfra_backend;
-pub mod embedding_router;
-pub mod fal_backend;
-pub mod fal_workflow;
-pub mod fusion_orchestrator;
 pub mod inference_ipc_client;
-pub mod inference_router;
-pub mod kilocode_backend;
+pub mod media_router;
 pub mod model_constants;
-pub mod ollama_backend;
-pub mod ollama_registry;
 pub mod openai_compat;
-pub mod openrouter_backend;
-pub mod runpod_backend;
-pub mod together_backend;
+pub mod provider;
+pub mod scoring;
 
 // Re-exports — public API
-pub use config::{
-    AlgoMethod, FusionConfig, FusionMode, FusionSkill, InferenceConfig, ProviderConfig, ProviderId,
-};
-pub use embedding_router::EmbeddingRouter;
+pub use config::{InferenceConfig, ProviderConfig, ProviderId};
 pub use inference_ipc_client::InferenceIpcClient;
-pub use inference_router::InferenceRouter;
-pub use ollama_registry::{
-    LocalAdapter, ModelFrom, ModelfileSpec, OllamaRegistry, RegisteredModel, RegistryError,
-};
+pub use media_router::MediaRouter;
+pub use provider::{MediaOp, MediaProvider, ProviderRegistry};
 
 /// Unified model entry from any provider, with provider prefix applied.
 #[derive(Debug, Clone)]
@@ -185,27 +158,26 @@ impl RouterModelEntry {
 ///
 /// This is the canonical entry point for MCP servers at startup. It tries
 /// the IPC bridge first (connecting back to zed's `LanguageModelRegistry`
-/// via a Unix socket), and falls back to constructing an `InferenceRouter`
-/// from env-var API keys when the IPC socket is not available (e.g., when
-/// running the MCP server standalone outside zed).
+/// via a Unix socket), and falls back to constructing a `MediaRouter`
+/// from env-var API keys when the IPC socket is not available.
 ///
 /// # Priority
 ///
 /// 1. `InferenceIpcClient` — if `HKASK_INFERENCE_SOCKET` is set and the
 ///    socket is reachable. This routes inference through zed's
-///    `LanguageModelRegistry` (with fusion, guard, and zed's configured
-///    API keys).
-/// 2. `InferenceRouter` — constructed from `InferenceConfig::from_env()`.
-///    This uses env-var API keys (`DEEPINFRA_API_KEY`, `OPENROUTER_API_KEY`, etc.) and the
-///    OS keychain. Used when running standalone or when the IPC socket is
-///    not available.
+///    `LanguageModelRegistry` (with guard and zed's configured
+///    API keys). Chat, vision, embed, and list_models all go through here.
+/// 2. `MediaRouter` — constructed from `InferenceConfig::from_env()`.
+///    This handles only media generation (DeepInfra/AtlasCloud). Chat/vision/
+///    embed return a clear error directing the operator to the IPC bridge.
+///    Used when running standalone or when the IPC socket is not available.
 ///
 /// # Logs
 ///
 /// Logs which path was taken at `info` level so operators can verify the
 /// inference routing from server startup logs.
 ///
-/// expect: "MCP servers route inference through zed when available, fall back to env-var keys"
+/// expect: "MCP servers route inference through zed when available, fall back to MediaRouter for media-only"
 /// pre:  none (reads env vars)
 /// post: returns an `Arc<dyn InferencePort>` ready for inference calls
 #[must_use]
@@ -216,22 +188,202 @@ pub async fn resolve_inference_port() -> std::sync::Arc<dyn hkask_types::Inferen
                 target: "hkask.inference",
                 "MCP inference routed through zed IPC bridge (HKASK_INFERENCE_SOCKET)"
             );
-            std::sync::Arc::new(client)
+            std::sync::Arc::new(client) as std::sync::Arc<dyn hkask_types::InferencePort>
         }
         Some(Err(e)) => {
             tracing::warn!(
                 target: "hkask.inference",
                 error = %e,
-                "IPC bridge connection failed — falling back to InferenceRouter with env-var keys"
+                "IPC bridge connection failed — falling back to MediaRouter (media-only; chat/vision unavailable)"
             );
-            std::sync::Arc::new(InferenceRouter::new(InferenceConfig::from_env()))
+            std::sync::Arc::new(MediaRouter::new(InferenceConfig::from_env()))
         }
         None => {
             tracing::info!(
                 target: "hkask.inference",
-                "HKASK_INFERENCE_SOCKET not set — using InferenceRouter with env-var keys"
+                "HKASK_INFERENCE_SOCKET not set — using MediaRouter (media-only; chat/vision unavailable)"
             );
-            std::sync::Arc::new(InferenceRouter::new(InferenceConfig::from_env()))
+            std::sync::Arc::new(MediaRouter::new(InferenceConfig::from_env()))
         }
+    }
+}
+
+/// Resolve the tool-dispatch port for an MCP server.
+///
+/// Returns the IPC-bridge client when the socket is available (the zed
+/// process dispatches governed tools through its `McpRuntime`), or a stub
+/// that returns a clear error. Unlike `resolve_inference_port` there is no
+/// media fallback — tool dispatch only exists on the zed side.
+///
+/// Mirrors `resolve_inference_port`'s structure so MCP servers resolve both
+/// ports in one startup step (e.g. `hkask-mcp-swarm`'s local delegate loop
+/// reads `Arc<dyn ToolDispatchPort>`).
+#[must_use]
+pub async fn resolve_tool_dispatch_port() -> std::sync::Arc<dyn hkask_types::ToolDispatchPort> {
+    match InferenceIpcClient::from_env().await {
+        Some(Ok(client)) => {
+            tracing::info!(
+                target: "hkask.inference",
+                "MCP tool dispatch routed through zed IPC bridge (HKASK_INFERENCE_SOCKET)"
+            );
+            std::sync::Arc::new(client) as std::sync::Arc<dyn hkask_types::ToolDispatchPort>
+        }
+        Some(Err(e)) => {
+            tracing::warn!(
+                target: "hkask.inference",
+                error = %e,
+                "IPC bridge connection failed — tool dispatch unavailable"
+            );
+            std::sync::Arc::new(UnavailableToolDispatch)
+        }
+        None => {
+            tracing::info!(
+                target: "hkask.inference",
+                "HKASK_INFERENCE_SOCKET not set — tool dispatch unavailable"
+            );
+            std::sync::Arc::new(UnavailableToolDispatch)
+        }
+    }
+}
+
+/// Tool-dispatch stub for MCP servers without the IPC bridge. Returns a
+/// clear error naming the missing socket so the caller can distinguish
+/// "dispatch unavailable" from "tool not found".
+struct UnavailableToolDispatch;
+
+impl hkask_types::ToolDispatchPort for UnavailableToolDispatch {
+    fn invoke_tool<'a>(
+        &'a self,
+        _server: &'a str,
+        _tool: &'a str,
+        _args: serde_json::Value,
+        _allowed: &'a [String],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<serde_json::Value, hkask_types::InferenceError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            Err(hkask_types::InferenceError::Connection(
+                "tool dispatch unavailable: HKASK_INFERENCE_SOCKET not set or IPC bridge unreachable — \
+                 MCP tool calls from delegated agents require the zed process".to_string(),
+            ))
+        })
+    }
+}
+
+/// Resolve the skill-execution port for an MCP server.
+///
+/// Returns the IPC-bridge client when the socket is available (the zed
+/// process runs the cascade through its global `ManifestExecutor`), or a
+/// stub that returns a clear error. Mirrors `resolve_tool_dispatch_port`.
+#[must_use]
+pub async fn resolve_skill_exec_port() -> std::sync::Arc<dyn hkask_types::SkillExecPort> {
+    match InferenceIpcClient::from_env().await {
+        Some(Ok(client)) => {
+            tracing::info!(
+                target: "hkask.inference",
+                "MCP skill execution routed through zed IPC bridge (HKASK_INFERENCE_SOCKET)"
+            );
+            std::sync::Arc::new(client) as std::sync::Arc<dyn hkask_types::SkillExecPort>
+        }
+        Some(Err(e)) => {
+            tracing::warn!(
+                target: "hkask.inference",
+                error = %e,
+                "IPC bridge connection failed — skill execution unavailable"
+            );
+            std::sync::Arc::new(UnavailableSkillExec)
+        }
+        None => {
+            tracing::info!(
+                target: "hkask.inference",
+                "HKASK_INFERENCE_SOCKET not set — skill execution unavailable"
+            );
+            std::sync::Arc::new(UnavailableSkillExec)
+        }
+    }
+}
+
+/// Skill-execution stub for MCP servers without the IPC bridge.
+struct UnavailableSkillExec;
+
+impl hkask_types::SkillExecPort for UnavailableSkillExec {
+    fn execute_skill<'a>(
+        &'a self,
+        _name: &'a str,
+        _task: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<String, hkask_types::SkillExecError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            Err(hkask_types::SkillExecError::Unavailable(
+                "HKASK_INFERENCE_SOCKET not set or IPC bridge unreachable — running a declared skill requires the zed process"
+                    .to_string(),
+            ))
+        })
+    }
+}
+
+/// Resolve the worktree-spawn port from the zed IPC bridge. Returns an
+/// `UnavailableWorktreeSpawn` stub when the socket is absent or unreachable —
+/// the MCP server falls back to in-memory `LazyLocalSwarmRuntime::delegate()`.
+pub async fn resolve_worktree_spawn_port() -> std::sync::Arc<dyn hkask_types::WorktreeSpawnPort> {
+    match InferenceIpcClient::from_env().await {
+        Some(Ok(client)) => {
+            tracing::info!(
+                target: "hkask.inference",
+                "MCP worktree spawn routed through zed IPC bridge (HKASK_INFERENCE_SOCKET)"
+            );
+            std::sync::Arc::new(client) as std::sync::Arc<dyn hkask_types::WorktreeSpawnPort>
+        }
+        Some(Err(e)) => {
+            tracing::warn!(
+                target: "hkask.inference",
+                error = %e,
+                "IPC bridge connection failed — worktree spawn unavailable, falling back to in-memory spawn"
+            );
+            std::sync::Arc::new(UnavailableWorktreeSpawn)
+        }
+        None => {
+            tracing::info!(
+                target: "hkask.inference",
+                "HKASK_INFERENCE_SOCKET not set — worktree spawn unavailable, falling back to in-memory spawn"
+            );
+            std::sync::Arc::new(UnavailableWorktreeSpawn)
+        }
+    }
+}
+
+/// Worktree-spawn stub for MCP servers without the IPC bridge. Returns an
+/// error so `kanban_task_spawn` falls back to `LazyLocalSwarmRuntime`.
+pub struct UnavailableWorktreeSpawn;
+
+impl hkask_types::WorktreeSpawnPort for UnavailableWorktreeSpawn {
+    fn create_worktree_thread<'a>(
+        &'a self,
+        _prompt: &'a str,
+        _title: &'a str,
+        _worktree_name: Option<&'a str>,
+        _base_ref: Option<&'a str>,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<String, hkask_types::InferenceError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async {
+            Err(hkask_types::InferenceError::Connection(
+                "HKASK_INFERENCE_SOCKET not set or IPC bridge unreachable — worktree spawn requires the zed process"
+                    .to_string(),
+            ))
+        })
     }
 }

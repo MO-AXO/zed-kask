@@ -176,24 +176,24 @@ impl Model {
 
     pub fn display_name(&self) -> &str {
         match self {
-            Self::Four => "gpt-4",
-            Self::FourOmniMini => "gpt-4o-mini",
+            Self::Four => "GPT-4",
+            Self::FourOmniMini => "GPT-4o Mini",
             Self::O3 => "o3",
-            Self::Five => "gpt-5",
-            Self::FiveMini => "gpt-5-mini",
-            Self::FiveNano => "gpt-5-nano",
-            Self::FivePointOne => "gpt-5.1",
-            Self::FivePointTwo => "gpt-5.2",
-            Self::FivePointThreeCodex => "gpt-5.3-codex",
-            Self::FivePointFourNano => "gpt-5.4-nano",
-            Self::FivePointFourMini => "gpt-5.4-mini",
-            Self::FivePointFour => "gpt-5.4",
-            Self::FivePointFourPro => "gpt-5.4-pro",
-            Self::FivePointFive => "gpt-5.5",
-            Self::FivePointFivePro => "gpt-5.5-pro",
-            Self::FivePointSixSol => "gpt-5.6-sol",
-            Self::FivePointSixTerra => "gpt-5.6-terra",
-            Self::FivePointSixLuna => "gpt-5.6-luna",
+            Self::Five => "GPT-5",
+            Self::FiveMini => "GPT-5 Mini",
+            Self::FiveNano => "GPT-5 Nano",
+            Self::FivePointOne => "GPT-5.1",
+            Self::FivePointTwo => "GPT-5.2",
+            Self::FivePointThreeCodex => "GPT-5.3 Codex",
+            Self::FivePointFourNano => "GPT-5.4 Nano",
+            Self::FivePointFourMini => "GPT-5.4 Mini",
+            Self::FivePointFour => "GPT-5.4",
+            Self::FivePointFourPro => "GPT-5.4 Pro",
+            Self::FivePointFive => "GPT-5.5",
+            Self::FivePointFivePro => "GPT-5.5 Pro",
+            Self::FivePointSixSol => "GPT-5.6 Sol",
+            Self::FivePointSixTerra => "GPT-5.6 Terra",
+            Self::FivePointSixLuna => "GPT-5.6 Luna",
             Self::Custom { display_name, .. } => display_name.as_deref().unwrap_or(&self.id()),
         }
     }
@@ -741,6 +741,17 @@ pub struct Usage {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
+    // zed-kask D20: provider-reported USD cost. OpenRouter uses
+    // `cost`, DeepInfra uses `estimated_cost`, BYOK providers use `market_cost`
+    // (real compute energy). Surfaced into `TokenUsage.cost` by the event
+    // mapper so kask's rJoule budget charges observed (not operator-configured)
+    // cost. `None` for providers that don't report cost (Anthropic, OpenAI).
+    #[serde(default)]
+    pub cost: Option<f64>,
+    #[serde(default)]
+    pub estimated_cost: Option<f64>,
+    #[serde(default)]
+    pub market_cost: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -2,13 +2,16 @@ use crate::TrainingServer;
 use crate::huggingface::HuggingFaceTraining;
 use crate::lora_validation;
 use crate::providers::{TrainingHostId, TrainingJob, TrainingJobStatus};
+use crate::tools::error_mapping::{
+    map_adapter_store_error, map_host_provider_error, map_job_store_error,
+    map_training_artifact_error,
+};
 use crate::types::TrainSubmitRequest;
-use hkask_mcp_server::server::{McpToolError, execute_tool};
+use hkask_mcp_server::server::{McpToolError, execute_tool_semantic, map_io_error};
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::tool;
+use rmcp::{tool, tool_router};
 use serde_json::json;
 use sha2::Digest;
-use std::path::PathBuf;
 
 /// A/B baseline for retrain comparison.
 struct AbBaseline {
@@ -17,6 +20,7 @@ struct AbBaseline {
     previous_perplexity: f32,
 }
 
+#[tool_router(router = submit_router, vis = "pub")]
 impl TrainingServer {
     #[tool(
         description = "Submit a training job for execution. Ingests, normalizes, and submits a dataset for LoRA fine-tuning via the selected harness (Axolotl YAML, TRL Python, or Ludwig YAML) on Runpod. The harness is selected from params.harness (operator-accepted from the lora-training skill's G6 gate), defaulting to Axolotl. When `feedback_path` is provided, enters retrain mode: merges the original dataset with curated feedback, deduplicates by user question, increments the adapter version based on existing adapters with the same `skill_name`, and pre-registers adapter metadata so training_status can complete the A/B comparison on job completion."
@@ -31,13 +35,26 @@ impl TrainingServer {
             skill_name,
             adapter_name,
             merged_output_path,
+            confirmed,
         }): Parameters<TrainSubmitRequest>,
     ) -> String {
-        execute_tool(self, "training_submit", async {
-            let file_path = PathBuf::from(&dataset_path);
-            if !file_path.exists() {
-                return Err(McpToolError::invalid_argument(format!("Dataset file not found: {dataset_path}")));
+        execute_tool_semantic(self, "training_submit", Self::ontology_anchor("training_submit"), async {
+            // P2 consent gate — enforce operator authorization before GPU spend.
+            // The historical pipeline runner enforced this but was lost when the
+            // runner was removed. The manifest's `requires_consent: true` is
+            // documentation; this is the enforcement point.
+            if !confirmed {
+                return Err(McpToolError::permission_denied(
+                    "Consent required: training_submit spends real money on GPU time. \
+                     The agent must present the estimated cost to the operator and \
+                     receive explicit approval before setting `confirmed: true`."
+                ));
             }
+
+            // Contain the caller-supplied dataset path before any read: an
+            // absolute path like /etc/passwd or a traversal must not reach the
+            // pipeline reads (CWE-200).
+            let file_path = hkask_mcp_server::contain_for_read(&dataset_path)?;
 
             // G-P1: Persistence preflight — verify HuggingFace artifact persistence
             // is configured before the expensive dataset normalization step.
@@ -66,7 +83,7 @@ impl TrainingServer {
                         gate = "G-P1",
                         severity = "warn",
                         host = ?self.host_id,
-                        "Host does not configure HuggingFace artifact persistence — results may be lost"
+                        "Host does not configure HuggingFace artifact persistence — completion cannot be detected: training_status will report 'Running' indefinitely (Runpod is the only host with completion detection, via HuggingFace artifacts)"
                     );
                     None
                 }
@@ -83,13 +100,16 @@ impl TrainingServer {
             let mut version: u32 = 1;
             let resolved_skill_name: Option<String> = skill_name.clone();
             let mut resolved_adapter_name: Option<String> = adapter_name.clone();
+            // Hoisted to the outer scope so the result JSON can report retrain
+            // provenance to the operator. Only meaningful when `retrain_mode`.
+            let mut previous_adapter_exists: bool = false;
+            let mut original_examples: usize = 0;
+            let mut feedback_examples: usize = 0;
 
             let normalized_path = if retrain_mode {
-                let feedback = PathBuf::from(feedback_path.as_ref().unwrap());
-                hkask_mcp_server::validate_path("feedback_path", feedback.to_str().unwrap_or(""), 4096)?;
-                if !feedback.exists() {
-                    return Err(McpToolError::invalid_argument(format!("Feedback file not found: {}", feedback.display())));
-                }
+                let feedback = hkask_mcp_server::contain_for_read(
+                    feedback_path.as_ref().expect("retrain_mode guard ensures feedback_path is Some"),
+                )?;
                 let skill = skill_name.clone().unwrap_or_default();
                 if skill.is_empty() {
                     return Err(McpToolError::invalid_argument("skill_name is required when feedback_path is set (retrain mode)"));
@@ -102,8 +122,6 @@ impl TrainingServer {
 
                 let mut merged = String::new();
                 let mut seen_questions: std::collections::HashSet<String> = std::collections::HashSet::new();
-                let mut original_examples = 0usize;
-                let mut feedback_examples = 0usize;
 
                 for (content, counter) in [(&original_content, &mut original_examples), (&feedback_content, &mut feedback_examples)] {
                     for line in content.lines() {
@@ -129,11 +147,22 @@ impl TrainingServer {
                     return Err(McpToolError::invalid_argument("No valid examples found in either dataset"));
                 }
 
-                let merged_path = merged_output_path.unwrap_or_else(|| format!("/tmp/hkask-retrain-{skill}.jsonl"));
-                hkask_mcp_server::validate_path("merged_output_path", &merged_path, 4096)?;
-                std::fs::write(&merged_path, &merged).map_err(|e| McpToolError::internal(format!("Failed to write merged dataset: {e}")))?;
+                let merged_path = match merged_output_path {
+                    // LLM-supplied write target: contain to the project root so a
+                    // path like ~/.ssh/authorized_keys is rejected (CWE-73).
+                    Some(p) => hkask_mcp_server::contain_for_write(&p)?,
+                    // Server-chosen scratch: the pipeline cache dir is not
+                    // LLM-controlled, so no containment is needed (and it lives
+                    // under the data dir, outside the project root anyway).
+                    None => self
+                        .pipeline
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .cache_dir()
+                        .join(format!("hkask-retrain-{skill}.jsonl")),
+                };
+                std::fs::write(&merged_path, &merged).map_err(|e| map_io_error(e, "Failed to write merged dataset"))?;
 
-                let previous_adapter_exists: bool;
                 match self.adapter_store.get_by_skill_name(&skill) {
                     Ok(Some(prev)) => {
                         let prev_version = prev.version.as_deref().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
@@ -151,9 +180,8 @@ impl TrainingServer {
                 if resolved_adapter_name.is_none() {
                     resolved_adapter_name = Some(format!("{skill}-v{version}"));
                 }
-                let _ = (previous_adapter_exists, original_examples, feedback_examples);
 
-                match self.pipeline.lock().unwrap_or_else(|e| e.into_inner()).ingest(&PathBuf::from(&merged_path)) {
+                match self.pipeline.lock().unwrap_or_else(|e| e.into_inner()).ingest(&merged_path) {
                     Ok(path) => path,
                     Err(e) => return Err(McpToolError::invalid_argument(format!("Dataset pipeline error: {e}"))),
                 }
@@ -179,7 +207,7 @@ impl TrainingServer {
             }
 
             let resolver = crate::huggingface::LocalModelResolver;
-            let provenance = crate::huggingface::ModelResolver::resolve(&resolver, &base_model);
+            let provenance = resolver.resolve(&base_model);
             if let Ok(ref p) = provenance {
                 tracing::info!(target: "hkask.training.provenance.resolved", model_id = %p.model_id, architecture = %p.architecture, lora_compatible = p.lora_compatible, is_gated = p.is_gated, "Model provenance resolved");
             }
@@ -270,11 +298,23 @@ impl TrainingServer {
             };
 
             if self.host_id == TrainingHostId::Runpod {
-                let bytes = std::fs::read(&normalized_path).map_err(|error| McpToolError::internal(format!("Read normalized dataset for publication: {error}")))?;
+                let bytes = std::fs::read(&normalized_path).map_err(|error| map_io_error(error, "Read normalized dataset for publication"))?;
                 let dataset_sha256 = format!("{:x}", sha2::Sha256::digest(&bytes));
                 let training = HuggingFaceTraining::from_env().map_err(|error| McpToolError::failed_precondition(format!("Configure Hugging Face training artifacts: {error}")))?;
-                let dataset = training.publish_dataset(&job.id, bytes, &dataset_sha256).await.map_err(|error| McpToolError::internal(format!("Publish training dataset: {error}")))?;
-                job.artifacts = Some(training.prepare_training_artifacts(&job.id, dataset).await.map_err(|error| McpToolError::internal(format!("Prepare training artifacts: {error}")))?);
+                let dataset = training.publish_dataset(&job.id, bytes, &dataset_sha256).await.map_err(map_training_artifact_error)?;
+                job.artifacts = Some(training.prepare_training_artifacts(&job.id, dataset).await.map_err(map_training_artifact_error)?);
+            } else {
+                // Completion detection is not yet wired for DeepInfra/Nebius:
+                // `check_completion_manifest` short-circuits when `job.artifacts`
+                // is `None`, so `training_status` stays `Running` indefinitely.
+                // Runpod is the only host that publishes HuggingFace artifacts.
+                tracing::warn!(
+                    target: "hkask.training.completion",
+                    host = ?self.host_id,
+                    "Training completion detection is not yet wired for this host. \
+                     training_status will report 'Running' indefinitely. \
+                     Runpod is the only host with completion detection via HuggingFace artifacts."
+                );
             }
 
             if let Some(ref job_store) = self.job_store {
@@ -286,7 +326,7 @@ impl TrainingServer {
             }
 
             if let (Some(job_store), Some(artifacts)) = (&self.job_store, &job.artifacts) {
-                job_store.update_artifacts(&job.id, artifacts).map_err(|error| McpToolError::internal(format!("Persist training artifacts: {error}")))?;
+                job_store.update_artifacts(&job.id, artifacts).map_err(map_job_store_error)?;
             }
 
             if retrain_mode {
@@ -296,7 +336,7 @@ impl TrainingServer {
                     chrono::Utc::now().timestamp(), 0,
                     resolved_skill_name.clone().unwrap_or_default(), version, None, None,
                 );
-                if let Err(e) = self.adapter_store.store(&adapter).map_err(|e| McpToolError::internal(format!("Adapter store error: {e}"))) {
+                if let Err(e) = self.adapter_store.store(&adapter).map_err(map_adapter_store_error) {
                     tracing::warn!(target: "hkask.training.retrain", adapter_id = %job.id, error = %e, "Failed to pre-register adapter metadata");
                 }
             }
@@ -304,7 +344,7 @@ impl TrainingServer {
             match self.host.submit(&job).await {
                 Ok(provider_job_id) => {
                     if let Some(job_store) = &self.job_store {
-                        job_store.update_provider_job_id(&job.id, &provider_job_id).map_err(|error| McpToolError::internal(format!("Persist provider job ID: {error}")))?;
+                        job_store.update_provider_job_id(&job.id, &provider_job_id).map_err(map_job_store_error)?;
                     }
                     let mut result = json!({"job_id": job.id, "provider_job_id": provider_job_id, "status": "queued", "base_model": base_model, "host": format!("{:?}", self.host_id)});
                     result["estimated_cost_urj"] = json!(job.estimated_cost_urj);
@@ -313,6 +353,9 @@ impl TrainingServer {
                         result["skill_name"] = json!(resolved_skill_name);
                         result["adapter_name"] = json!(resolved_adapter_name);
                         result["version"] = json!(version);
+                        result["previous_adapter_exists"] = json!(previous_adapter_exists);
+                        result["original_examples"] = json!(original_examples);
+                        result["feedback_examples"] = json!(feedback_examples);
                         if let Some(b) = &ab_baseline {
                             result["ab_baseline"] = json!({"previous_version": b.previous_version, "previous_loss": b.previous_loss, "previous_perplexity": b.previous_perplexity, "description": "A/B baseline from previous adapter."});
                         }
@@ -331,7 +374,7 @@ impl TrainingServer {
                         tracing::warn!(target: "hkask.training.job.persist", job_id = %job.id, error = %store_error, "Failed to persist submission failure");
                     }
                     tracing::error!(target: "hkask.training.job.fail", job_id = %job.id, error = %e, "Training job submission failed");
-                    Err(McpToolError::internal(format!("Training job failed: {e}")))
+                    Err(map_host_provider_error(e))
                 }
             }
         })

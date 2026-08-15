@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), forbid(unsafe_code))]
+#![warn(clippy::let_underscore_future)]
 //! kask_bridge — the sole bidirectional seam between hKask and zed-kask (D8).
 //!
 //! hKask crates define port traits in `hkask-types` (`InferencePort`,
@@ -7,54 +9,69 @@
 //! Governing invariant: hKask crates NEVER depend on zed crates; zed-kask
 //! depends on hKask. This bridge is the only crate that depends on both sides.
 
+mod cascade_context;
 mod condenser_bridge;
 mod context_injector;
-mod fusion_model;
+
 mod identity;
 mod inference;
 mod inference_ipc_server;
 mod inference_providers;
 mod mcp_servers;
 mod memory;
+mod model_resolution;
 mod settings;
 mod skill_executor;
-mod tool_port;
 
+pub use cascade_context::{AgentCascadeContextProviderAdapter, BridgeCascadeContextProvider};
 pub use condenser_bridge::BridgeThreadCondenser;
 pub use context_injector::BridgeContextInjector;
-pub use fusion_model::{
-    FUSION_MODEL_ID, FUSION_PROVIDER_ID, FusionLanguageModel, FusionLanguageModelProvider,
-    discover_favorites, favorite_model_selections, fusion_model_selection, resolve_fusion_models,
-    should_auto_discover,
-};
-/// Re-export so the composition root can name the type without depending on
-/// `hkask-inference` directly.
-pub use hkask_inference::openrouter_backend::FavoriteModel;
-pub use identity::{
-    ProvisionedAgent, agent_name_from_username, provision_agent, webid_from_username,
-};
+
+pub use hkask_inference::model_constants::DEFAULT_FALLBACK_MODEL;
+/// Re-exports for the media IPC bridge — the composition root constructs the
+/// media router and passes it to `InferenceIpcServer::start`. Re-exported here
+/// so `zed` doesn't need a direct `hkask-inference` dependency for these two
+/// types.
+pub use hkask_inference::{InferenceConfig, MediaRouter};
+/// Re-exported so the settings UI can display the resolved default data
+/// directory without a direct `hkask-types` dependency.
+pub use hkask_types::agent_paths::resolve_data_dir;
+pub use identity::{ProvisionError, ProvisionedAgent, agent_name_from_username, provision_agent};
+pub use inference::BridgeEditPredictionPort;
+pub use inference::LanguageModelEmbeddingPort;
 pub use inference::LanguageModelInferencePort;
-pub use inference_ipc_server::InferenceIpcServer;
+pub use inference::NoModelInferencePort;
+pub use inference_ipc_server::{InferenceIpcServer, WorktreeSpawner, set_worktree_spawner};
 pub use inference_providers::{
-    DATA_SERVICE_CREDENTIALS, INFERENCE_PROVIDERS, InferenceProviderDescriptor,
-    credential_urls_for_mcp, delete_data_service_api_key, delete_provider_api_key,
-    ensure_openai_compatible_entries, has_data_service_api_key, has_provider_api_key,
-    provider_credential_url, write_data_service_api_key, write_provider_api_key,
+    DATA_SERVICES, DataServiceDescriptor, INFERENCE_PROVIDERS, InferenceProviderDescriptor,
+    credential_urls_for_mcp, ensure_openai_compatible_entries, mirror_env_keys_to_keychain,
+    resolve_embedding_credentials,
 };
 pub use mcp_servers::{
     BUILT_IN_MCP_SERVERS, BUILT_IN_MCP_SERVERS_IDS, BUILT_IN_MCP_SERVERS_PAIRS, BuiltinMcpServer,
-    find_server,
+    build_mcp_server_env, filter_config_env_for_server, filter_credentials_for_server, find_server,
 };
-pub use memory::{BridgeMemoryPort, LoggingMemoryPort, RealMemoryPort};
+pub use memory::{
+    BridgeAlertEscalationSink, BridgeMemoryPort, RealMemoryPort, open_curator_escalation_queue,
+    open_curator_regulation_archive,
+};
+pub use model_resolution::resolve_model_names;
 pub use settings::{
-    KaskCuratorEmailSettings, KaskCuratorSettings, KaskInferenceProvidersSettings,
-    KaskModelsSettings, KaskSettings,
+    KaskCodegraphSettings, KaskCollabSettings, KaskCompaniesSettings, KaskCondenserSettings,
+    KaskCorpusSettings, KaskCuratorEmailSettings, KaskCuratorSettings, KaskDataServiceSettings,
+    KaskInferenceProvidersSettings, KaskMcpSettings, KaskMediaSettings, KaskMemorySettings,
+    KaskModelsSettings, KaskPredictionMarketsSettings, KaskResearchSettings, KaskScenariosSettings,
+    KaskSettings, KaskSwarmSettings, KaskToolRouterSettings, KaskTrainingSettings, SwarmModeConfig,
 };
-pub use skill_executor::BridgeManifestExecutor;
-pub use tool_port::BridgeToolPort;
+pub use skill_executor::{
+    BridgeManifestExecutor, ProfileResolver, SnapshotProfileResolver, seed_registry_to_disk,
+};
 
 mod metacognition_bridge;
 pub use metacognition_bridge::BridgeMetacognitionProvider;
+
+mod directive_bridge;
+pub use directive_bridge::BridgeCuratorDirectiveSink;
 
 /// The URL prefix for kask-namespaced credentials in the keychain.
 /// Used by the settings UI to read/write API keys via zed's CredentialsProvider.
@@ -86,4 +103,17 @@ pub fn spawn_test_email(recipient: String, cx: &gpui::App) {
         }
     })
     .detach();
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_utils {
+    pub use crate::context_injector::BridgeContextInjector;
+
+    /// Expose the pure prompt-length recall gate as a free function for
+    /// proptest. `should_recall` is an associated function on
+    /// `BridgeContextInjector`; a method cannot be re-exported via `pub use`,
+    /// so this thin wrapper forwards to the `pub(crate)` impl.
+    pub fn should_recall(prompt: &str) -> bool {
+        BridgeContextInjector::should_recall(prompt)
+    }
 }

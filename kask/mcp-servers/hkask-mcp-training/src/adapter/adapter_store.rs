@@ -7,7 +7,7 @@
 //! Adapter weights live on disk; only metadata is stored in SQLite.
 
 use crate::adapter::expertise::{AdapterLifecycle, Expertise, MdsDomain, TrainingProvenance};
-use hkask_storage::database::driver::{query_map, query_row};
+use hkask_storage::database::driver::query_map;
 use hkask_storage::database::value::DbValue;
 use hkask_storage::define_driver_store;
 use hkask_types::InfrastructureError;
@@ -34,7 +34,7 @@ use uuid::Uuid;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AdapterSource {
     /// Adapter hosted on Hugging Face Hub (public, private, or gated).
-    /// /// All three inference providers (Together, Runpod) can pull from HF Hub.
+    /// All inference providers (DeepInfra, Runpod) can pull from HF Hub.
     HuggingFace {
         /// Repository path (e.g. "mdz-axo/solidity-audit-v3")
         repo: String,
@@ -150,15 +150,6 @@ pub enum AdapterStoreError {
     #[error("Adapter with id {0} not found")]
     NotFound(NotFound),
 
-    #[error("Adapter with expertise '{0}' not found")]
-    ExpertiseNotFound(String),
-
-    #[error("Checksum mismatch: expected {expected}, got {actual}")]
-    ChecksumMismatch {
-        expected: Checksum,
-        actual: Checksum,
-    },
-
     #[error("Invalid adapter state: {0}")]
     InvalidState(String),
 
@@ -199,9 +190,8 @@ impl AdapterStore {
     fn init_schema(
         driver: &std::sync::Arc<dyn hkask_storage::database::driver::DatabaseDriver>,
     ) -> Result<(), InfrastructureError> {
-        driver
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS trained_adapters (
+        driver.execute_batch(
+            "CREATE TABLE IF NOT EXISTS trained_adapters (
                         adapter_id          TEXT PRIMARY KEY NOT NULL,
                         expertise_name      TEXT NOT NULL,
                         expertise_domain    TEXT NOT NULL,
@@ -228,26 +218,8 @@ impl AdapterStore {
                     CREATE INDEX IF NOT EXISTS idx_adapter_owner
                         ON trained_adapters(owner_webid);
                     CREATE INDEX IF NOT EXISTS idx_adapter_skill
-                        ON trained_adapters(skill_name);
-                    CREATE TABLE IF NOT EXISTS lora_blobs (
-                        adapter_id TEXT PRIMARY KEY NOT NULL,
-                        data       BLOB NOT NULL,
-                        FOREIGN KEY (adapter_id) REFERENCES trained_adapters(adapter_id) ON DELETE CASCADE
-                    );
-                    CREATE TABLE IF NOT EXISTS active_endpoints (
-                        endpoint_id     TEXT PRIMARY KEY NOT NULL,
-                        adapter_id      TEXT NOT NULL,
-                        provider        TEXT NOT NULL,
-                        endpoint_url    TEXT NOT NULL,
-                        model_name      TEXT NOT NULL,
-                        expertise_name  TEXT NOT NULL,
-                        phase           TEXT NOT NULL DEFAULT 'provisioning',
-                        cost_accrued    REAL NOT NULL DEFAULT 0.0,
-                        hourly_rate     REAL NOT NULL DEFAULT 0.0,
-                        created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-                        FOREIGN KEY (adapter_id) REFERENCES trained_adapters(adapter_id)
-                    );",
-            )?;
+                        ON trained_adapters(skill_name);",
+        )?;
         Ok(())
     }
 
@@ -382,101 +354,6 @@ impl AdapterStore {
         Ok(result)
     }
 
-    /// List adapters by expertise name.
-    ///
-    /// expect: "The adapter manages LoRA adapter lifecycle and inference composition"
-    /// pre:  expertise_name is non-empty
-    /// post: returns Vec of adapters matching the expertise name
-    pub fn get_by_expertise(
-        &self,
-        expertise_name: &str,
-    ) -> Result<Vec<TrainedLoRAAdapter>, AdapterStoreError> {
-        let sql = format!("{} WHERE expertise_name = ?1", ADAPTER_SELECT);
-        let rows: Vec<TrainedLoRAAdapter> = query_map(
-            &*self.driver,
-            &sql,
-            &[DbValue::Text(expertise_name.to_string())],
-            |row| {
-                let r = Self::row_to_adapter_row(row)?;
-                Self::row_to_adapter(r)
-                    .map_err(|e| hkask_storage::database::types::DbError::Database(e.to_string()))
-            },
-        )?;
-
-        // P9: Regulation span
-        tracing::info!(target: "reg.adapter", operation = "get_by_expertise", expertise_name = %expertise_name, count = rows.len(), "REG");
-        Ok(rows)
-    }
-
-    /// List adapters owned by a specific WebID.
-    ///
-    /// expect: "The adapter manages LoRA adapter lifecycle and inference composition"
-    /// pre:  owner is a valid WebID
-    /// post: returns Vec of adapters owned by the given WebID
-    pub fn list_owner(&self, owner: WebID) -> Result<Vec<TrainedLoRAAdapter>, AdapterStoreError> {
-        let sql = format!("{} WHERE owner_webid = ?1", ADAPTER_SELECT);
-        let rows: Vec<TrainedLoRAAdapter> = query_map(
-            &*self.driver,
-            &sql,
-            &[DbValue::Text(owner.as_uuid().to_string())],
-            |row| {
-                let r = Self::row_to_adapter_row(row)?;
-                Self::row_to_adapter(r)
-                    .map_err(|e| hkask_storage::database::types::DbError::Database(e.to_string()))
-            },
-        )?;
-
-        Ok(rows)
-    }
-
-    /// Delete an adapter by ID.
-    ///
-    /// OCAP-gated: callers must present a valid DelegationToken with `adapter:delete` capability.
-    /// The token is accepted here as documentation of the gate requirement, though actual
-    /// token verification happens at the `AdapterPort` boundary (Task 5).
-    ///
-    /// expect: "The adapter manages LoRA adapter lifecycle and inference composition"
-    /// pre:  adapter exists
-    /// post: adapter row is removed
-    pub fn delete(&self, id: Uuid) -> Result<(), AdapterStoreError> {
-        let affected = self.driver.execute(
-            "DELETE FROM trained_adapters WHERE adapter_id = ?1",
-            &[DbValue::Text(id.to_string())],
-        )?;
-        if affected == 0 {
-            return Err(AdapterStoreError::NotFound(NotFound {
-                entity_type: "adapter".to_string(),
-                id: id.to_string(),
-            }));
-        }
-        // P9: Regulation span
-        tracing::info!(target: "reg.adapter", operation = "delete", adapter_id = %id, "REG");
-        Ok(())
-    }
-
-    /// Return the total count of stored adapters.
-    pub fn count(&self) -> Result<usize, AdapterStoreError> {
-        let count: i64 = query_row(
-            &*self.driver,
-            "SELECT COUNT(*) FROM trained_adapters",
-            &[],
-            |row| row.get_int(0),
-        )?
-        .unwrap_or(0);
-        Ok(count as usize)
-    }
-
-    /// List all stored adapters, ordered by creation time descending.
-    pub fn list_all(&self) -> Result<Vec<TrainedLoRAAdapter>, AdapterStoreError> {
-        let sql = format!("{} ORDER BY created_at DESC", ADAPTER_SELECT);
-        let rows: Vec<TrainedLoRAAdapter> = query_map(&*self.driver, &sql, &[], |row| {
-            let r = Self::row_to_adapter_row(row)?;
-            Self::row_to_adapter(r)
-                .map_err(|e| hkask_storage::database::types::DbError::Database(e.to_string()))
-        })?;
-        Ok(rows)
-    }
-
     /// Retrieve the latest adapter for a given skill name (most recently created).
     /// Returns `None` if no adapter exists for this skill.
     ///
@@ -529,34 +406,6 @@ impl AdapterStore {
                 let r = Self::row_to_adapter_row(row)?;
                 Self::row_to_adapter(r)
                     .map_err(|e| hkask_storage::database::types::DbError::Database(e.to_string()))
-            },
-        )?;
-        Ok(rows.into_iter().next())
-    }
-
-    /// Store adapter weight blob. The blob is stored in a separate `lora_blobs`
-    /// table, keyed by adapter ID. This is the raw weight file content.
-    pub fn store_blob(&self, adapter_id: Uuid, blob: &[u8]) -> Result<(), AdapterStoreError> {
-        self.driver.execute(
-            "INSERT OR REPLACE INTO lora_blobs (adapter_id, data) VALUES (?1, ?2)",
-            &[
-                DbValue::Text(adapter_id.to_string()),
-                DbValue::Blob(blob.to_vec()),
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Retrieve adapter weight blob by adapter ID.
-    pub fn get_blob(&self, adapter_id: Uuid) -> Result<Option<Vec<u8>>, AdapterStoreError> {
-        let rows: Vec<Vec<u8>> = query_map(
-            &*self.driver,
-            "SELECT data FROM lora_blobs WHERE adapter_id = ?1",
-            &[DbValue::Text(adapter_id.to_string())],
-            |row| {
-                row.get_blob(0)
-                    .map_err(|e| hkask_storage::database::types::DbError::Database(e.to_string()))
-                    .map(|b| b.to_vec())
             },
         )?;
         Ok(rows.into_iter().next())
@@ -682,48 +531,6 @@ mod tests {
         let retrieved = store.get_by_id(id).unwrap().expect("adapter should exist");
         assert_eq!(retrieved.id, id);
         assert_eq!(retrieved.expertise.name, "test-expertise");
-    }
-
-    #[test]
-    fn retrieve_by_expertise() {
-        let store = make_store();
-        let a1 = make_test_adapter();
-        let mut a2 = make_test_adapter();
-        a2.expertise.name = "other-expertise".into();
-        store.store(&a1).unwrap();
-        store.store(&a2).unwrap();
-
-        let results = store.get_by_expertise("test-expertise").unwrap();
-        assert_eq!(results.len(), 1);
-    }
-
-    #[test]
-    fn list_by_owner() {
-        let store = make_store();
-        let owner = WebID::from_uuid(Uuid::new_v4());
-        let mut a1 = make_test_adapter();
-        a1.owner = owner;
-        store.store(&a1).unwrap();
-
-        let results = store.list_owner(owner).unwrap();
-        assert_eq!(results.len(), 1);
-    }
-
-    #[test]
-    fn delete_adapter() {
-        let store = make_store();
-        let adapter = make_test_adapter();
-        let id = adapter.id;
-        store.store(&adapter).unwrap();
-        store.delete(id).unwrap();
-        assert!(store.get_by_id(id).unwrap().is_none());
-    }
-
-    #[test]
-    fn delete_non_existent_returns_error() {
-        let store = make_store();
-        let result = store.delete(Uuid::new_v4());
-        assert!(result.is_err());
     }
 
     #[test]

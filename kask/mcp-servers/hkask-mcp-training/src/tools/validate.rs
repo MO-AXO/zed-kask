@@ -1,11 +1,12 @@
 use crate::TrainingServer;
 use crate::lora_validation;
 use crate::types::TrainValidateConfigRequest;
-use hkask_mcp_server::server::execute_tool;
+use hkask_mcp_server::server::execute_tool_semantic;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::tool;
+use rmcp::{tool, tool_router};
 use serde_json::json;
 
+#[tool_router(router = validate_router, vis = "pub")]
 impl TrainingServer {
     #[tool(
         description = "Validate training params against the lora-training skill's math-contract gates (G-M1 no-op-at-init, G-M2 merge equivalence, G-M3 scaling form, G-M4 rank budget, G-Q1 frozen base quantized, G-Q2 adapter dtype, G-Q4 no silent upcast, G-Q5 paged optimizer, G-H1 harness-method compatibility). Also validates dataset size (G-D1) and dataset format compatibility (G-D0) if dataset_path is provided. G-D0 detects the dataset format, checks it against the expected format for the selected trainer, and emits copy-paste Python mapping code when a fixable column-name mismatch is found. When dataset_path is provided, also profiles the dataset (G-D0) and returns a DatasetProfile with format, sample count, content length statistics, token estimates, role distribution, multi-turn detection, vision data detection, and preference pair balance. Returns findings with severity (refuse/warn/info), gate ID, message, source citation, and remediation. Emits reg.lora.audit spans. This is the runtime enforcement point for the lora-training skill's audit-config phase."
@@ -18,7 +19,7 @@ impl TrainingServer {
             base_model,
         }): Parameters<TrainValidateConfigRequest>,
     ) -> String {
-        execute_tool(self, "training_validate_config", async {
+        execute_tool_semantic(self, "training_validate_config", Self::ontology_anchor("training_validate_config"), async {
             let mut findings = lora_validation::validate_training_params(&params);
 
             let trainer_preference = params
@@ -28,8 +29,11 @@ impl TrainingServer {
 
             let dataset_format_owned: Option<lora_validation::DatasetFormatResult> =
                 if let Some(ref ds_path) = dataset_path {
+                    // Contain the LLM-supplied dataset path before the format
+                    // and size validators read it (CWE-200).
+                    let resolved = hkask_mcp_server::contain_for_read(ds_path)?;
                     let format_result = lora_validation::validate_dataset_format(
-                        std::path::Path::new(ds_path),
+                        &resolved,
                         trainer_preference,
                         None,
                     );
@@ -40,7 +44,8 @@ impl TrainingServer {
                 };
 
             if let Some(ref ds_path) = dataset_path {
-                findings.extend(lora_validation::validate_dataset_size(std::path::Path::new(ds_path)));
+                let resolved = hkask_mcp_server::contain_for_read(ds_path)?;
+                findings.extend(lora_validation::validate_dataset_size(&resolved));
             }
 
             if let Some(ref model) = base_model {
@@ -96,6 +101,7 @@ impl TrainingServer {
                         lora_validation::DatasetFormatVerdict::Ready => "ready",
                         lora_validation::DatasetFormatVerdict::NeedsMapping => "needs_mapping",
                         lora_validation::DatasetFormatVerdict::Incompatible => "incompatible",
+                        lora_validation::DatasetFormatVerdict::Undetermined => "undetermined",
                     },
                     "detected_format": format!("{:?}", r.detected_format),
                     "expected_format": format!("{:?}", r.expected_format),

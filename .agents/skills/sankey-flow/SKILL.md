@@ -1,6 +1,6 @@
 ---
 name: sankey-flow
-description: "Dynamic Sankey flow diagramming. Takes a natural-language prompt, classifies which flow domain is most relevant (process, data-pipeline, resource-allocation, user-journey, energy-material, decision-funnel, value-stream, cost-breakdown, conversion, system-architecture), gathers the quantities needed to draw weighted flows, and renders a Mermaid `sankey-beta` diagram that renders natively in Zed. Runs an incremental interrogation loop when the prompt under-specifies nodes, links, or weights, asking only the minimum questions needed to converge. Can delegate deep research to analytical skills (structured-extraction, sequential-inquiry) to identify flow paths and categories from external sources. Anchors flows to the Procedural Knowledge Ontology (PKO): a Sankey is a visualization of a PKO Procedure — nodes are Steps, edges are flow between Steps, weights are quantities flowing through StepExecutions. Convergent PDCA: classify → gather → draft → evaluate → refine, max 3 iterations."
+description: "Dynamic Sankey flow diagramming. Takes a natural-language prompt, classifies the flow domain, gathers quantities, and renders a Mermaid sankey-beta diagram in Zed. Runs an interrogation loop when the prompt under-specifies nodes, links, or weights."
 ---
 
 # Sankey Flow
@@ -172,6 +172,8 @@ If the prompt does not match any domain, default to **process** with conservatio
    - A "References" section citing canonical Sankey resources when relevant (Schmidt 2008 for energy/material, FIBO for financial, etc.).
    - Output to `docs/diagrams/sankey-{domain}-{subject_slug}.md` where the subject slug is lowercased with hyphens, ≤ 40 characters.
 
+7. **Surface the diagram.** The write step produces `{output_path, markdown}` as JSON. A final `render` step (`present-sankey.j2`, RenderAct — deterministic, no LLM call) flattens the `markdown` field into a raw string, which becomes the cascade's final output. This ensures the fenced ```mermaid block reaches the chat stream — without it, the diagram stays buried inside a JSON object field that the model must discover and extract.
+
 ## Research Delegation — Detailed Protocol
 
 When the gather step takes Path B (research delegation), follow this protocol:
@@ -217,6 +219,7 @@ When the gather step takes Path B (research delegation), follow this protocol:
 - **Delegate, don't transcribe.** When the prompt references an external source, delegate extraction to a specialized skill. Do not ask the user to transcribe data that exists in a source.
 - **Cite canonical references** in the output when relevant (Schmidt 2008, FIBO, PROV-O, PKO).
 - **Registry is authoritative** — when this SKILL.md disagrees with registry templates (if any are added), the registry wins.
+- **Visual artifact surfacing** — the `present-sankey.j2` render step (RenderAct) must be the cascade's final output step. It surfaces the fenced ```mermaid block as a raw markdown string so acp_thread's mermaid renderer picks it up. Removing it causes the diagram to stay buried in the write step's JSON `{output_path, markdown}` object — the model must then discover and extract the `markdown` field, which is fragile.
 
 ## Examples
 

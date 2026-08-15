@@ -1,11 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- verify
-- evaluate
-- discriminate
-- calibrate
-- audit
 contract:
   input:
     task_description: string
@@ -18,7 +12,6 @@ contract:
     compliance_score: object
     passed: boolean
     recommendations: array
-energy_cap: 5120
 visibility: Public
 ---
 {# Template: coding-guidelines/guidelines-verify.j2 #}

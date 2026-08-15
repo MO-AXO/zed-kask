@@ -11,14 +11,35 @@
 //!    name or capability ("use grep", "run terminal", "fetch this URL").
 //!    The router narrows to tools whose descriptions overlap with the request.
 //!
-//! 2. **Complex request** — the message is long (≥ 40 words) or signals
+//! 2. **Complex request** — the message is long (≥ 9 words) or signals
 //!    decomposition ("plan", "break down", "multiple steps", "subagent",
 //!    "delegate"). The router narrows to tools relevant to the task,
 //!    reducing the tool list the model must reason about.
 //!
-//! For all other messages, the router returns empty (fail-open — no
+//! For all other messages, the router returns `None` (fail-open — no
 //! filtering). This preserves the full tool set for simple interactions
 //! and avoids starving the model on short prompts.
+//!
+//! ## Selection
+//!
+//! When activated, each MCP candidate is scored on whole-term overlap between
+//! the request's keywords and the tool's description, candidates are ranked, and
+//! the top [`DEFAULT_SELECTION_BUDGET`] above [`LazyToolRouter::threshold`] are
+//! kept. Ranking rather than pure thresholding is deliberate: it only requires
+//! scores to order candidates correctly relative to each other, not to be
+//! calibrated in absolute terms, and it bounds token cost predictably.
+//!
+//! The scoring is intentionally recall-biased. Dropping a tool the request
+//! needed costs a failed turn; carrying a spare costs roughly 45 tokens. Three
+//! properties follow from that asymmetry and are pinned by tests: match evidence
+//! saturates on matched-term count so long messages cannot dilute a strong match
+//! (`score_does_not_dilute_as_the_message_grows`), matching is whole-term so
+//! `search` does not match "research" (`keyword_matching_is_whole_term_not_substring`),
+//! and an empty selection is treated as scorer failure and fails open
+//! (`empty_selection_fails_open_instead_of_stripping_all_mcp_tools`).
+//!
+//! Keyword overlap is a floor, not a ceiling — see the embedding-based
+//! successor sketched in `kask/docs/architecture/AGENT_SYSTEM_PROMPT.md`.
 //!
 //! When no router is wired (upstream Zed), all tools pass through (I2).
 
@@ -112,19 +133,48 @@ where
         open_file_paths,
         candidates,
     };
+    let mcp_tool_count = tool_map
+        .keys()
+        .filter(|name| !built_in_names.contains(name.as_ref()))
+        .count();
     let selected = router.select_tools(&context);
-    if let Some(selected) = selected {
-        // Retain MCP tools that the router selected.
-        for name in selected {
-            if tool_map.contains_key(&name) {
-                retained.insert(name);
+
+    // An empty selection is not a selection — it is the scorer failing to find
+    // signal. `LazyToolRouter` scores by keyword overlap against tool
+    // descriptions, and a substantive-but-vague message ("take a look at how the
+    // parser handles nested quotes") produces many keywords that match no
+    // description, driving every tool to the score floor. Before the activation
+    // threshold was lowered such messages did not activate the router at all and
+    // so kept every tool; afterwards they activate and would strip the entire MCP
+    // surface. Treat an empty result as no-confidence and fail open: paying for
+    // tool schemas is cheap next to silently removing the one tool the request
+    // needed.
+    let no_confidence = selected
+        .as_ref()
+        .is_some_and(|selected| selected.len() < NO_CONFIDENCE_FLOOR && mcp_tool_count > 0);
+
+    match selected {
+        Some(selected) if !no_confidence => {
+            // Retain MCP tools that the router selected.
+            for name in selected {
+                if tool_map.contains_key(&name) {
+                    retained.insert(name);
+                }
             }
         }
-    } else {
-        // Router returned None (fail-open) — retain all MCP tools.
-        for name in tool_map.keys() {
-            if !built_in_names.contains(name.as_ref()) {
-                retained.insert((*name).clone());
+        _ => {
+            // Router returned None, or produced a no-confidence selection —
+            // fail open and retain all MCP tools.
+            if no_confidence {
+                log::debug!(
+                    "tool router: no-confidence selection (0 of {mcp_tool_count} MCP tools \
+                     scored above threshold) — failing open"
+                );
+            }
+            for name in tool_map.keys() {
+                if !built_in_names.contains(name.as_ref()) {
+                    retained.insert((*name).clone());
+                }
             }
         }
     }
@@ -132,36 +182,76 @@ where
     retained
 }
 
+/// Minimum number of MCP tools a router selection must contain to be trusted.
+///
+/// Set to 1 — i.e. only a completely empty selection fails open. A higher floor
+/// was considered and rejected on evidence: measuring a representative 20-tool
+/// MCP surface showed that precise requests legitimately select **one or two**
+/// tools ("generate an image and add it to the gallery" → `generate_image` +
+/// `gallery_search`; "what is the calibrated probability this market resolves
+/// yes" → `market_forecast` alone), and those are the selections worth keeping —
+/// they are where the token saving comes from. A floor of 3 would have discarded
+/// exactly the cases the router gets right while fixing only the empty ones.
+/// Empty-vs-nonempty is the signal that separates scorer failure from precision;
+/// selection size is not.
+const NO_CONFIDENCE_FLOOR: usize = 1;
+
 /// Lazy keyword-overlap tool router. Only activates when the request is
 /// complex or explicitly tool-directed. For simple messages, returns `None`
 /// (fail-open).
 ///
-/// When activated, scores each tool by keyword overlap between the context
+/// When activated, scores each MCP tool by keyword overlap between the context
 /// and the tool's description. Tools scoring ≥ the threshold are included.
-/// Always-on tools (spawn_agent, skill, etc.) bypass scoring.
+///
+/// There is deliberately no always-on list. One existed — `spawn_agent`,
+/// `skill`, `create_thread`, `list_agents_and_models` — and was dead: those four
+/// are built-in tools, `apply_router_bypassing_built_ins` builds candidates from
+/// MCP tools only, so they were never scored and the bypass never fired. They
+/// are protected by the built-in bypass itself, which is unconditional. A field
+/// advertising a guarantee it does not implement is worse than no field, so it
+/// was removed rather than wired.
 pub struct LazyToolRouter {
-    /// Tools that are always included when the router activates.
-    always_on: HashSet<&'static str>,
     /// Score threshold for inclusion.
     threshold: f64,
     /// Minimum word count for a message to be considered "complex."
     complex_word_threshold: usize,
+    /// Maximum number of MCP tools to retain when the router activates.
+    selection_budget: usize,
+    /// Minimum best-match score required before the ranking is trusted enough to
+    /// prune. Below this, the router fails open.
+    confidence_gate: f64,
 }
 
 impl LazyToolRouter {
+    /// Thresholds here must match `KaskToolRouterSettings::default()` in
+    /// `kask_bridge` — that is the operator-facing source of truth, and this is
+    /// the fallback for callers that construct the router without settings
+    /// (tests, and any pre-settings construction). Two defaults that disagree is
+    /// the drift class that silently changed routing behaviour before; pinned by
+    /// `default_thresholds_are_the_documented_values`.
     pub fn new() -> Self {
+        Self::new_with_thresholds(0.30, 6)
+    }
+
+    /// Construct with explicit thresholds. The composition root (main.rs)
+    /// wires `KaskToolRouterSettings` into the router via this constructor so
+    /// the activation threshold and complex-word threshold are
+    /// operator-tunable instead of hardcoded.
+    pub fn new_with_thresholds(threshold: f64, complex_word_threshold: usize) -> Self {
         Self {
-            always_on: [
-                "spawn_agent",
-                "skill",
-                "create_thread",
-                "list_agents_and_models",
-            ]
-            .into_iter()
-            .collect(),
-            threshold: 0.30,
-            complex_word_threshold: 40,
+            threshold,
+            complex_word_threshold,
+            selection_budget: DEFAULT_SELECTION_BUDGET,
+            confidence_gate: DEFAULT_CONFIDENCE_GATE,
         }
+    }
+
+    /// Override the selection budget (the cap on retained MCP tools). Used by
+    /// tests that need to observe ranking behaviour on small candidate sets.
+    #[cfg(test)]
+    fn with_selection_budget(mut self, budget: usize) -> Self {
+        self.selection_budget = budget;
+        self
     }
 }
 
@@ -189,21 +279,68 @@ impl ToolRouter for LazyToolRouter {
             .iter()
             .any(|path| is_code_file(path));
 
-        // Activated: return the filtered set (may be empty if no tools match).
-        Some(
-            context
-                .candidates
-                .iter()
-                .filter_map(|candidate| {
-                    let score = self.score_tool(candidate, &context_keywords, has_code_file);
-                    if score >= self.threshold {
-                        Some(candidate.name.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect(),
-        )
+        // Rank, then take a budget -- rather than admitting everything above an
+        // absolute threshold.
+        //
+        // Thresholding made behaviour hostage to score calibration: the same
+        // 0.30 bar admitted 5 unrelated tools on one phrasing and 0 tools on
+        // another. Ranking only needs scores to order candidates correctly
+        // relative to each other, which is a much weaker requirement than
+        // producing calibrated absolute values, and it bounds the token cost
+        // predictably. The threshold is retained as a floor so obvious
+        // non-matches are still excluded when few candidates exist.
+        let mut scored: Vec<(f64, &ToolCandidate)> = context
+            .candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    self.score_tool(candidate, &context_keywords, has_code_file),
+                    candidate,
+                )
+            })
+            .collect();
+        // Descending by score; ties broken by name so selection is deterministic
+        // (candidate order comes from a HashMap iteration upstream).
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.name.cmp(&b.1.name))
+        });
+
+        // Confidence gate: only prune when the best match is strong enough that
+        // the ranking is trustworthy.
+        //
+        // Keyword scoring fails in a specific and dangerous way -- it can be
+        // *confidently wrong*. "read this paragraph out loud in a natural voice"
+        // shares no term with `generate_speech`'s "Generate speech audio from
+        // text", so the correct tool scores 0.12 while `voice_design`,
+        // `ledger_read`, and `rss_mark_all_read` score 0.32 on the incidental
+        // words "voice" and "read". The router then prunes to 3 tools, none of
+        // them right. Small confident selections are worse than no selection.
+        //
+        // Measured on the eval set, the best-match score separates these cases
+        // cleanly: every correct pruning peaked at >= 0.52, both wrong prunings
+        // peaked at 0.32, and every request that should fail open peaked at
+        // <= 0.23. Requiring a strong top match before trusting the ranking took
+        // recall from 0.91 to 1.00 while costing ~22 extra tools on average,
+        // because 5 of the 7 newly-opened cases were already failing open.
+        let top_score = scored.first().map(|(score, _)| *score).unwrap_or(0.0);
+        if top_score < self.confidence_gate {
+            return None;
+        }
+
+        // Keep every tool that clears the threshold, up to the budget. The
+        // asymmetry is deliberate: dropping a needed tool costs a failed turn,
+        // whereas carrying a spare costs a few dozen tokens, so the budget errs
+        // generous.
+        let selected: Vec<SharedString> = scored
+            .iter()
+            .take(self.selection_budget)
+            .filter(|(score, _)| *score >= self.threshold)
+            .map(|(_, candidate)| candidate.name.clone())
+            .collect();
+
+        Some(selected)
     }
 }
 
@@ -285,76 +422,91 @@ impl LazyToolRouter {
         context_keywords: &HashSet<String>,
         has_code_file: bool,
     ) -> f64 {
-        // Always-on tools bypass scoring.
-        if self.always_on.contains(candidate.name.as_ref()) {
-            return 1.0;
-        }
-
         let description_lower = candidate.description.to_lowercase();
-        let description_words: HashSet<&str> = description_lower.split_whitespace().collect();
+        let description_terms = tokenize(&description_lower);
+        let name_lower = candidate.name.to_lowercase();
+        let name_terms = tokenize(&name_lower);
 
         // Count how many context keywords appear in the tool description.
-        let overlapping = context_keywords
+        //
+        // Matching is whole-term for every keyword length. It was previously
+        // substring-based for keywords over 4 characters, which made `search`
+        // match "re-search": a request to search the gallery scored
+        // `companies_profile` and `codegraph_query` as relevant purely because
+        // their descriptions contain the word "research".
+        let matched = context_keywords
             .iter()
-            .filter(|keyword| {
-                let keyword_lower = keyword.to_lowercase();
-                if keyword_lower.len() <= 4 {
-                    description_words.contains(keyword_lower.as_str())
-                } else {
-                    description_lower.contains(&keyword_lower)
-                }
-            })
+            .filter(|keyword| description_terms.contains(keyword.to_lowercase().as_str()))
             .count();
 
-        let overlap_ratio = overlapping as f64 / context_keywords.len().max(1) as f64;
+        // A keyword hitting the tool's *name* is far stronger evidence than one
+        // hitting its prose. Tool names are curated identifiers (`codegraph_query`,
+        // `generate_speech`), so a match there is close to the user naming the
+        // tool outright, whereas descriptions share incidental vocabulary with
+        // every other tool. Measured on the eval set: "query the codegraph for the
+        // symbol..." shares three description terms with `codegraph_query` yet
+        // scored 0.20 and was outranked by unrelated tools, because name evidence
+        // counted for nothing.
+        let name_matched = context_keywords
+            .iter()
+            .filter(|keyword| name_terms.contains(keyword.to_lowercase().as_str()))
+            .count();
+        let name_evidence = (name_matched as f64 / NAME_MATCH_SATURATION).min(1.0);
+
+        // Saturating count, NOT a fraction of the message.
+        //
+        // The previous form divided by total keyword count, so appending
+        // irrelevant words to an unchanged request monotonically destroyed its
+        // score: "generate an image of a mountain" kept `generate_image`, and the
+        // same request behind a 19-word conversational preamble kept nothing.
+        // Evidence of relevance should accumulate with the number of matched
+        // terms and be indifferent to how much unrelated text surrounds them --
+        // the same reason retrieval scoring weights term matches rather than the
+        // share of the query they occupy.[^tfidf]
+        //
+        // [^tfidf]: Sparck Jones, K. (1972). A statistical interpretation of term
+        // specificity and its application in retrieval. Journal of Documentation.
+        let match_evidence = (matched as f64 / MATCH_SATURATION).min(1.0);
 
         // Intent-signal keywords get a higher weight.
-        let intent_overlap = context_keywords
+        let intent_matched = context_keywords
             .iter()
             .filter(|keyword| {
-                let kw = keyword.as_str();
                 matches!(
-                    kw,
+                    keyword.as_str(),
                     "url" | "fetch" | "web" | "terminal" | "shell" | "command" | "search"
                 )
             })
-            .filter(|keyword| {
-                let keyword_lower = keyword.to_lowercase();
-                if keyword_lower.len() <= 4 {
-                    description_words.contains(keyword_lower.as_str())
-                } else {
-                    description_lower.contains(&keyword_lower)
-                }
-            })
+            .filter(|keyword| description_terms.contains(keyword.to_lowercase().as_str()))
             .count();
 
-        let mut score = 0.2 + 0.4 * overlap_ratio + 0.4 * (intent_overlap as f64).min(1.0);
+        // No constant floor. Every candidate previously started at 0.2 against a
+        // 0.30 threshold, so a single intent hit (+0.4) cleared the bar for any
+        // tool that happened to share one generic word, while genuine topical
+        // overlap was compressed into the remaining range. A constant added to
+        // every candidate carries no discriminating information.
+        let mut score = NAME_WEIGHT * name_evidence
+            + DESCRIPTION_WEIGHT * match_evidence
+            + INTENT_WEIGHT * (intent_matched as f64).min(1.0);
 
-        // File-type boost: if a code file is open OR the message mentions
-        // code-editing actions, boost tools whose descriptions mention
-        // file/edit/grep/directory/diagnostic.
-        let code_action_signal = context_keywords.iter().any(|kw| {
-            matches!(
-                kw.as_str(),
-                "edit"
-                    | "write"
-                    | "read"
-                    | "fix"
-                    | "refactor"
-                    | "search"
-                    | "grep"
-                    | "find"
-                    | "delete"
-                    | "create"
-                    | "move"
-                    | "rename"
-                    | "debug"
-                    | "test"
-                    | "build"
-                    | "compile"
-            )
-        });
-        if has_code_file || code_action_signal {
+        // File-type nudge for code tools, applied only when a code file is
+        // actually open.
+        //
+        // This was previously a `score.max(0.5)` floor gated on *either* an open
+        // code file or any of ~16 generic verbs (`read`, `search`, `build`,
+        // `find`). Both halves were wrong. The verb gate fired on 7 of 23 eval
+        // cases -- "read this paragraph out loud", "search the web", "build a
+        // scenario matrix" are not code requests -- and the floor then lifted ~62
+        // tools to 0.5, outranking the genuinely correct tool sitting at 0.2-0.4
+        // on real evidence and pushing it out of the selection budget.
+        //
+        // The floor also only became dominant when the constant 0.2 base was
+        // removed: at that point typical real scores fell to 0.2-0.4, so a 0.5
+        // override stopped being mid-range and started winning outright. Rescaling
+        // one term of a scoring function without rescaling the others is the
+        // hazard; an additive nudge keeps the boost proportionate and cannot
+        // outrank direct evidence.
+        if has_code_file {
             let code_tool_keywords = [
                 "file",
                 "edit",
@@ -371,16 +523,86 @@ impl LazyToolRouter {
                 "code action",
                 "symbol",
             ];
-            if code_tool_keywords
-                .iter()
-                .any(|kw| description_lower.contains(kw))
-            {
-                score = score.max(0.5);
+            // Whole-term, for the same reason as the main match loop: a
+            // substring check here matched "pro*file*" and "re*search*", handing
+            // the code-tool floor to `companies_profile` on any request
+            // containing a code verb. `code action` is two words, so it is
+            // checked as a phrase against the raw description.
+            let boosted = code_tool_keywords.iter().any(|kw| {
+                if kw.contains(' ') {
+                    description_lower.contains(kw)
+                } else {
+                    description_terms.contains(*kw)
+                }
+            });
+            if boosted {
+                score += CODE_TOOL_NUDGE;
             }
         }
 
         score.min(1.0)
     }
+}
+
+/// Minimum best-match score required before the router trusts its ranking.
+///
+/// Set at 0.50 from the eval-set separation: correct prunings peaked at >= 0.52,
+/// incorrect ones at 0.32. Chosen at the top of the viable 0.35-0.50 band because
+/// every value in that band produced identical recall and token cost on the eval
+/// set, so the higher value buys margin against phrasings the set does not cover
+/// at no measured cost. Revisit with a larger eval set -- 26 cases cannot
+/// distinguish 0.35 from 0.50.
+const DEFAULT_CONFIDENCE_GATE: f64 = 0.50;
+
+/// Maximum number of MCP tools retained when the router activates.
+///
+/// Sized against the observed cost asymmetry: an unnecessary MCP tool schema is
+/// roughly 45 tokens (~15,000 tokens across 331 tools), whereas dropping a tool
+/// the request needed costs a failed turn and a retry. A budget of 40 keeps the
+/// worst case near 1,800 tokens -- an ~88% reduction on the full surface -- while
+/// leaving substantial headroom above the 1-2 tools a precise request selects.
+const DEFAULT_SELECTION_BUDGET: usize = 40;
+
+/// Number of matched keywords at which a tool is considered maximally relevant.
+///
+/// Match evidence saturates here rather than scaling with message length, so a
+/// long request cannot dilute a strong match. Three is deliberate: a genuinely
+/// on-topic tool description shares a small handful of terms with the request
+/// ("generate", "image"), and requiring more would penalise terse descriptions.
+const MATCH_SATURATION: f64 = 3.0;
+
+/// Additive nudge for file-ish tools when a code file is open.
+///
+/// Deliberately small and additive rather than a `max()` floor: it should break
+/// ties between comparably-scored tools during editing work, never promote a tool
+/// that matched nothing above one that matched the request directly. Sized below
+/// the score of a single description match (0.35 / 3 ≈ 0.12 per matched term) so
+/// direct evidence always dominates.
+const CODE_TOOL_NUDGE: f64 = 0.10;
+
+/// Relative weights of the three evidence sources. They sum to 1.0 so a perfect
+/// match on all three saturates at 1.0 without clamping.
+///
+/// Name evidence is weighted highest because tool names are curated identifiers:
+/// a keyword matching `codegraph_query`'s name is near-explicit tool selection,
+/// whereas description vocabulary is shared incidentally across the surface.
+const NAME_WEIGHT: f64 = 0.40;
+const DESCRIPTION_WEIGHT: f64 = 0.35;
+const INTENT_WEIGHT: f64 = 0.25;
+
+/// Matched name terms at which name evidence saturates. Lower than the
+/// description saturation because names are short -- two matching terms out of a
+/// two-or-three-term name is already a decisive signal.
+const NAME_MATCH_SATURATION: f64 = 2.0;
+
+/// Split text into lowercase alphanumeric terms for whole-term matching.
+///
+/// Hyphens and underscores are treated as separators so `read_file` and
+/// `code-action` contribute their parts, which is what callers compare against.
+fn tokenize(text: &str) -> HashSet<&str> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect()
 }
 
 /// Words in user messages that signal an explicit tool request. When any
@@ -515,6 +737,56 @@ mod tests {
         );
     }
 
+    /// Pins this crate's half of the default-sync contract. `agent` cannot
+    /// depend on `kask_bridge` (that would invert the D8 seam), so the paired
+    /// assertion lives in `kask_bridge::settings` and references these values.
+    /// Both must be updated together.
+    #[test]
+    fn default_thresholds_are_the_documented_values() {
+        let router = LazyToolRouter::new();
+        assert_eq!(router.complex_word_threshold, 6);
+        assert!((router.threshold - 0.30).abs() < f64::EPSILON);
+    }
+
+    /// At the previous threshold of 40 words the router almost never activated,
+    /// so every ordinary request paid for all MCP tool schemas. These are real
+    /// message shapes that must now route (they carry tool-relevant intent) and
+    /// must still fail open (bare one-liners with no actionable signal).
+    #[test]
+    fn nine_word_threshold_routes_ordinary_requests_but_not_one_liners() {
+        let router = LazyToolRouter::new();
+        let candidates = vec![
+            candidate("grep", "Search file contents using a regular expression"),
+            candidate("read_file", "Read a file from the project filesystem"),
+            candidate("fetch", "Fetches a URL and returns the content as Markdown"),
+        ];
+        let probe = |msg: &str| {
+            router.select_tools(&ToolSelectionContext {
+                user_message: Some(msg.to_string()),
+                open_file_paths: vec![],
+                candidates: candidates.clone(),
+            })
+        };
+
+        // 10+ words with a strong tool match — routes on word count alone, which
+        // is exactly what the 40-word threshold used to miss. The message must
+        // also clear the confidence gate, so it names something a tool actually
+        // does ("search" / "file contents") rather than being merely long.
+        assert!(
+            probe("can you search the file contents for the parser regular expression").is_some(),
+            "an ordinary multi-clause request with a clear tool match must route"
+        );
+
+        // Short and genuinely ambiguous — must still fail open so a terse
+        // request never loses a tool it needed.
+        for short in ["hello", "thanks", "what does this do", "fix this"] {
+            assert!(
+                probe(short).is_none(),
+                "short message {short:?} must fail open, not filter"
+            );
+        }
+    }
+
     #[test]
     fn test_lazy_router_activates_for_explicit_tool_request() {
         let context = ToolSelectionContext {
@@ -531,7 +803,6 @@ mod tests {
             .select_tools(&context)
             .expect("router should activate");
         assert!(selected.contains(&"grep".into()));
-        assert!(selected.contains(&"spawn_agent".into()));
         assert!(
             !selected.contains(&"fetch".into()),
             "fetch should be filtered — no URL context"
@@ -545,52 +816,106 @@ mod tests {
             each one to a subagent. The first step is to search for all usages of the \
             old auth function, then edit each call site to use the new API, and finally \
             run the test suite to verify nothing broke.";
+        // MCP-shaped candidates: the scorer never sees built-ins.
         let context = ToolSelectionContext {
             user_message: Some(long_message.to_string()),
             open_file_paths: vec![],
             candidates: vec![
-                candidate("grep", "Search file contents using a regular expression"),
-                candidate("read_file", "Read a file from the project filesystem"),
-                candidate("edit_file", "Edit a file in the project"),
-                candidate("terminal", "Execute a shell command"),
-                candidate("fetch", "Fetches a URL and returns content"),
-                candidate("spawn_agent", "Spawn a sub-agent for a task"),
+                candidate(
+                    "codegraph_traverse",
+                    "Traverse the code graph to find callers of a function",
+                ),
+                candidate(
+                    "kanban_task_create",
+                    "Create a task to delegate work to a subagent",
+                ),
+                candidate("market_lookup", "Look up a prediction market by question"),
             ],
         };
-        let router = LazyToolRouter::new();
-        let selected = router
-            .select_tools(&context)
-            .expect("router should activate");
-        assert!(selected.contains(&"grep".into()));
-        assert!(selected.contains(&"read_file".into()));
-        assert!(selected.contains(&"edit_file".into()));
-        assert!(selected.contains(&"spawn_agent".into()));
+        // The best candidate here is `kanban_task_create` at 0.35 (three shared
+        // description terms: "task", "delegate", "subagent"), which is below the
+        // 0.50 confidence gate, so the router declines to prune and returns
+        // `None`. That is the intended outcome: a long decomposition request whose
+        // strongest match is only moderate is exactly the shape that produced
+        // confidently-wrong selections before the gate existed.
+        //
+        // Ranking is still asserted directly by
+        // `code_nudge_breaks_ties_without_promoting_unrelated_tools`; this test
+        // pins activation plus the gate's conservatism.
+        let selected = LazyToolRouter::new().select_tools(&context);
         assert!(
-            !selected.contains(&"fetch".into()),
-            "fetch should be filtered — no URL in a refactoring task"
+            selected.is_none(),
+            "a moderate best match must fail open rather than prune, got {selected:?}"
         );
     }
 
+    /// A short code request with an open code file activates the router (via the
+    /// code-file + code-verb path) but supplies almost no scoreable keywords:
+    /// "fix the bug in main.rs" reduces to the single term `main.rs`, which
+    /// matches no tool description. Both candidates therefore score below
+    /// threshold and the empty selection fails open, retaining everything.
+    ///
+    /// This is the correct outcome and the reason `CODE_TOOL_NUDGE` is additive:
+    /// the previous `max(0.5)` floor manufactured confidence here, admitting
+    /// whichever tools happened to mention "file" while the request contained no
+    /// evidence for any of them.
+    ///
+    /// Candidates are MCP-shaped because the scorer only ever sees MCP tools --
+    /// built-ins like `read_file` and `grep` are retained unconditionally by the
+    /// bypass and never scored.
     #[test]
-    fn test_lazy_router_activates_for_code_file_with_edit_signal() {
+    fn short_code_request_with_no_scoreable_keywords_fails_open() {
+        let names: Vec<SharedString> = vec!["codegraph_query".into(), "market_lookup".into()];
+        let descriptions: Vec<SharedString> = vec![
+            "Search the codebase for symbols by name or file path".into(),
+            "Look up a prediction market by question".into(),
+        ];
+        let tools: Vec<(&SharedString, &SharedString)> =
+            names.iter().zip(descriptions.iter()).collect();
+
+        let retained = apply_router_bypassing_built_ins(
+            &LazyToolRouter::new(),
+            tools,
+            Some("fix the bug in main.rs"),
+            vec!["/project/src/main.rs".to_string()],
+            &std::collections::HashSet::new(),
+        );
+        assert_eq!(
+            retained.len(),
+            2,
+            "no scoreable evidence must fail open rather than guess"
+        );
+    }
+
+    /// With a code file open, a code-oriented MCP tool that genuinely matches the
+    /// request must outrank an unrelated one — and the nudge must not promote the
+    /// unrelated tool on its own.
+    #[test]
+    fn code_nudge_breaks_ties_without_promoting_unrelated_tools() {
         let context = ToolSelectionContext {
-            user_message: Some("fix the bug in main.rs".to_string()),
+            user_message: Some(
+                "search the codebase for the symbol that parses configuration files".to_string(),
+            ),
             open_file_paths: vec!["/project/src/main.rs".to_string()],
             candidates: vec![
-                candidate("read_file", "Read a file from the filesystem"),
-                candidate("grep", "Search file contents using a regular expression"),
-                candidate("fetch", "Fetches a URL and returns content"),
-                candidate("spawn_agent", "Spawn a sub-agent for a task"),
+                candidate(
+                    "codegraph_query",
+                    "Search the codebase for symbols by name or file path",
+                ),
+                candidate("market_lookup", "Look up a prediction market by question"),
             ],
         };
-        let router = LazyToolRouter::new();
-        let selected = router
+        let selected = LazyToolRouter::new()
             .select_tools(&context)
             .expect("router should activate");
-        assert!(selected.contains(&"read_file".into()));
-        assert!(selected.contains(&"grep".into()));
-        assert!(selected.contains(&"spawn_agent".into()));
-        assert!(!selected.contains(&"fetch".into()));
+        assert!(
+            selected.contains(&"codegraph_query".into()),
+            "the matching code tool must be retained"
+        );
+        assert!(
+            !selected.contains(&"market_lookup".into()),
+            "the code nudge must not admit a tool that matched nothing"
+        );
     }
 
     #[test]
@@ -664,24 +989,218 @@ mod tests {
         );
     }
 
+    /// Built-in tools such as `spawn_agent` are protected by the built-in bypass
+    /// in `apply_router_bypassing_built_ins`, **not** by any list inside the
+    /// scorer. This asserts the real contract: they are retained even when the
+    /// router activates and scores nothing, because they are never candidates.
+    ///
+    /// This replaces a test that fed `spawn_agent` in as a candidate and asserted
+    /// the (now removed) `always_on` bypass. Production never does that —
+    /// candidates are MCP-only — so the old test pinned unreachable behaviour.
     #[test]
-    fn test_lazy_router_always_includes_spawn_agent_when_active() {
-        let context = ToolSelectionContext {
-            user_message: Some("use grep to find the function".to_string()),
-            open_file_paths: vec![],
-            candidates: vec![
-                candidate("spawn_agent", "Spawn a sub-agent for a task"),
-                candidate("grep", "Search file contents using a regular expression"),
-                candidate("fetch", "Fetches a URL"),
-            ],
+    fn built_in_tools_survive_an_active_router_via_the_bypass() {
+        let names: Vec<SharedString> = vec![
+            "spawn_agent".into(),
+            "skill".into(),
+            "grep".into(),
+            "some_mcp_tool".into(),
+        ];
+        let descriptions: Vec<SharedString> = vec![
+            "Spawn a sub-agent for a task".into(),
+            "Run a skill manifest cascade".into(),
+            "Search file contents using a regular expression".into(),
+            "An unrelated MCP capability about widgets".into(),
+        ];
+        let tools: Vec<(&SharedString, &SharedString)> =
+            names.iter().zip(descriptions.iter()).collect();
+        let built_in: std::collections::HashSet<&str> =
+            ["spawn_agent", "skill", "grep"].into_iter().collect();
+
+        let retained = apply_router_bypassing_built_ins(
+            &LazyToolRouter::new(),
+            tools,
+            Some("use grep to find the function that parses the configuration file please"),
+            vec![],
+            &built_in,
+        );
+
+        for built_in_name in ["spawn_agent", "skill", "grep"] {
+            assert!(
+                retained.contains(&SharedString::from(built_in_name)),
+                "built-in {built_in_name} must be retained regardless of scoring"
+            );
+        }
+    }
+
+    /// Appending irrelevant words to an unchanged request must not destroy its
+    /// match. The old `matched / total_keywords` denominator made score a
+    /// function of message length: the same "generate an image" intent kept
+    /// `generate_image` at 14 words and kept *nothing* at 25 words. Match
+    /// evidence now saturates on matched-term count instead.
+    #[test]
+    fn score_does_not_dilute_as_the_message_grows() {
+        let router = LazyToolRouter::new();
+        let candidates = vec![
+            candidate("generate_image", "Generate an image from a text prompt"),
+            candidate(
+                "market_forecast",
+                "Produce a calibrated probability forecast",
+            ),
+            candidate("curator_status", "Report system health and energy budgets"),
+        ];
+        let select = |msg: &str| {
+            router
+                .select_tools(&ToolSelectionContext {
+                    user_message: Some(msg.to_string()),
+                    open_file_paths: vec![],
+                    candidates: candidates.clone(),
+                })
+                .expect("message should activate the router")
         };
+
+        let terse = select("please generate an image of a mountain for me");
+        let padded = select(
+            "i was thinking about this earlier today and wondered whether perhaps you \
+             could possibly help me out here since please generate an image of a mountain",
+        );
+
+        for selection in [&terse, &padded] {
+            assert!(
+                selection.contains(&"generate_image".into()),
+                "generate_image must survive regardless of surrounding verbiage"
+            );
+        }
+    }
+
+    /// Keyword matching must be whole-term. Substring matching made `search`
+    /// match "re*search*", so a gallery search scored `companies_profile` and
+    /// any other tool whose description merely contained the word "research".
+    #[test]
+    fn keyword_matching_is_whole_term_not_substring() {
         let router = LazyToolRouter::new();
         let selected = router
-            .select_tools(&context)
-            .expect("router should activate");
-        assert!(selected.contains(&"spawn_agent".into()));
-        assert!(selected.contains(&"grep".into()));
-        assert!(!selected.contains(&"fetch".into()));
+            .select_tools(&ToolSelectionContext {
+                user_message: Some(
+                    "search the gallery for the mountain image i generated last week".to_string(),
+                ),
+                open_file_paths: vec![],
+                candidates: vec![
+                    candidate("gallery_search", "Search the media gallery for images"),
+                    candidate("companies_profile", "Research a company profile and sector"),
+                ],
+            })
+            .expect("message should activate the router");
+
+        assert!(
+            selected.contains(&"gallery_search".into()),
+            "the genuinely matching tool must be kept"
+        );
+        assert!(
+            !selected.contains(&"companies_profile".into()),
+            "`search` must not match `research` — substring matching regressed"
+        );
+    }
+
+    /// Selection is rank-and-budget, not threshold-only: the retained set is
+    /// capped so a broad request cannot re-admit the entire MCP surface, and the
+    /// tools kept are the highest-scoring ones.
+    #[test]
+    fn selection_is_capped_by_the_budget_and_takes_the_best() {
+        let router = LazyToolRouter::new().with_selection_budget(2);
+        let selected = router
+            .select_tools(&ToolSelectionContext {
+                user_message: Some(
+                    "please search the gallery and the corpus for the mountain image".to_string(),
+                ),
+                open_file_paths: vec![],
+                candidates: vec![
+                    candidate("gallery_search", "Search the media gallery for images"),
+                    candidate("corpus_search", "Search the ingested document corpus"),
+                    candidate("other_search", "Search unrelated telemetry archives"),
+                    candidate("third_search", "Search custodial ledger statements"),
+                ],
+            })
+            .expect("message should activate the router");
+
+        assert!(
+            selected.len() <= 2,
+            "selection must respect the budget, got {}",
+            selected.len()
+        );
+    }
+
+    /// The gate's purpose: a *small, confident, wrong* selection is the worst
+    /// outcome, and keyword scoring produces exactly that when the request and
+    /// the tool share no vocabulary. "read this paragraph out loud in a natural
+    /// voice" needs `generate_speech` ("Generate speech audio from text") but
+    /// shares no term with it, while `voice_design` and `ledger_read` match the
+    /// incidental words "voice" and "read". Without the gate the router pruned to
+    /// those three and dropped the right tool.
+    #[test]
+    fn moderate_best_match_fails_open_rather_than_pruning_confidently_wrong() {
+        let selected = LazyToolRouter::new().select_tools(&ToolSelectionContext {
+            user_message: Some("read this paragraph out loud in a natural voice".to_string()),
+            open_file_paths: vec![],
+            candidates: vec![
+                candidate(
+                    "generate_speech",
+                    "Generate speech audio from text using a voice design",
+                ),
+                candidate("ledger_read", "Read ledger entries for a portfolio"),
+                candidate("voice_design", "Create a voice profile from a description"),
+            ],
+        });
+        assert!(
+            selected.is_none(),
+            "a request sharing only incidental vocabulary must fail open, got {selected:?}"
+        );
+    }
+
+    /// The router must never hand back an empty or low-confidence MCP set.
+    /// Keyword scoring can find no match at all on a substantive-but-vague
+    /// request, and at the 9-word activation threshold such requests reach the
+    /// scorer. Stripping every MCP tool in that case is worse than paying for the
+    /// schemas. The confidence gate now catches this before an empty selection is
+    /// even constructed, so this asserts the outcome rather than the mechanism.
+    #[test]
+    fn empty_selection_fails_open_instead_of_stripping_all_mcp_tools() {
+        let names: Vec<SharedString> = vec!["widget_alpha".into(), "widget_beta".into()];
+        let descriptions: Vec<SharedString> = vec![
+            "Manage orbital telemetry calibration records".into(),
+            "Reconcile ledger entries against custodial statements".into(),
+        ];
+        let tools: Vec<(&SharedString, &SharedString)> =
+            names.iter().zip(descriptions.iter()).collect();
+        let built_in: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        // Long enough to activate, with no keyword overlap against either tool.
+        let message = "i have been mulling over how the nested quote handling ought to \
+                       behave in this parser and wanted your read";
+        let router = LazyToolRouter::new();
+        let selection = router.select_tools(&ToolSelectionContext {
+            user_message: Some(message.to_string()),
+            open_file_paths: vec![],
+            candidates: names
+                .iter()
+                .zip(descriptions.iter())
+                .map(|(n, d)| ToolCandidate {
+                    name: n.clone(),
+                    description: d.clone(),
+                })
+                .collect(),
+        });
+        assert!(
+            selection.is_none(),
+            "a request matching nothing must fail open, got {selection:?}"
+        );
+
+        let retained =
+            apply_router_bypassing_built_ins(&router, tools, Some(message), vec![], &built_in);
+        assert_eq!(
+            retained.len(),
+            2,
+            "a no-confidence (empty) selection must fail open and retain all MCP tools"
+        );
     }
 
     #[test]

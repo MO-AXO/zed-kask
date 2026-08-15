@@ -6,13 +6,11 @@ license.workspace = true
 description = "Curator MCP server — system observability, escalation management, and regulatory memory access"
 
 [dependencies]
-hkask-mcp-server = { path = "../../crates/hkask-mcp-server" }
-hkask-types = { path = "../../crates/hkask-types" }
-hkask-storage = { path = "../../crates/hkask-storage" }
-hkask-memory = { path = "../../crates/hkask-memory" }
-hkask-services-core = { path = "../../crates/hkask-services-core" }
-hkask-regulation = { path = "../../crates/hkask-regulation" }
-hkask-capability = { path = "../../crates/hkask-capability" }
+hkask-mcp-server.workspace = true
+hkask-types.workspace = true
+hkask-storage.workspace = true
+hkask-memory.workspace = true
+hkask-services-core.workspace = true
 rmcp = { workspace = true, features = ["server", "macros", "transport-io"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 serde.workspace = true
@@ -29,5 +27,8 @@ path = "src/hkask_mcp_curator.rs"
 name = "hkask-mcp-curator"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt"] }
+uuid.workspace = true

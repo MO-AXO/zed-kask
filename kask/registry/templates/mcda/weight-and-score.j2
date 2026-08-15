@@ -1,14 +1,6 @@
 {# goal: Weight criteria and score alternatives using the specified weighting method (direct or swing). Produces normalized scores and composite rankings for each alternative. #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- weight
-- score
-- normalize
-- aggregate
-- method
-- direct
-- swing
 contract:
   input:
     decision_question: string
@@ -19,7 +11,6 @@ contract:
     weights: array
     normalized_scores: array
     composite_scores: array
-energy_cap: 8192
 visibility: Public
 ---
 {# Template: mcda/weight-and-score.j2 #}

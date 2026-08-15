@@ -15,12 +15,6 @@
 
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- probe
-- verify
-- audit
-- detect
-- classify
 contract:
   input:
     manifest_paths: array
@@ -35,9 +29,11 @@ contract:
     defense_layers_missing: array
     userpod_host: string
     source_citations: array
-energy_cap: 2048
 visibility: Public
 ---
+
+[inference]
+max_tokens = 4096
 
 INPUT: manifest_paths = {{ manifest_paths }}
 INPUT: surface = {{ surface }}
@@ -59,7 +55,7 @@ PROBE ACTIONS (concrete — must use file:read, code:search, terminal, or regist
    - Epistemic mode: `Declarative` (file content observed), `Probabilistic` (unmaintained inference from version metadata only if explicit), `Subjunctive` (potential supply chain risk — must be labeled clearly, not presented as fact).
    - Provenance: `Direct measurement` (read file), `Inference` (version analysis from manifest), `Assessment` (security taxonomy mapping) — must label each finding's provenance.
 7. Apply grill-me self-challenge (like `bug-hunt`): Could this dependency specification be intentional? Is version `*` a deliberate flexibility requirement? Would a reviewer dismiss this finding? If yes, downgrade to `OBSERVATION` or omit. Only propose `BUG` / `POTENTIAL_BUG` when evidence is concrete.
-8. Check defense-layer presence (like `kali-audit` 8-layer catalog, but for supply chain):
+8. Check defense-layer presence (like `kali-audit` 7-layer catalog, but for supply chain):
    - Dependency pinning (exact version + lockfile presence)
    - Registry verification (official registry, not arbitrary git/path)
    - SBOM / deny.toml tracking (license/advisory policy present)
@@ -106,6 +102,7 @@ CONSTRAINTS (same as report — P5 minimalism, P8 evidence integrity, P12 host):
 - Registry (`manifest.yaml` + `.j2`) authoritative.
 
 CONVERGENCE INDEPENDENT: Convergence-check is a separate phase; this
-probe phase does not compute metric (that is `convergence-check.j2`
-responsibility). This maintains pipeline decomposition (P5 minimalism —
-each phase answers one 5W1H dimension clearly).
+probe phase does not compute metric (that is the `compute` step's
+responsibility (the `lisp.eval` compute step pushes the signal, and the ConvergenceTracker gates convergence)). This maintains
+pipeline decomposition (P5 minimalism — each phase answers one 5W1H
+dimension clearly).

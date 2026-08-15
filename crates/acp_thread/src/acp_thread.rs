@@ -182,7 +182,12 @@ pub struct SandboxAuthorizationDetails {
     #[serde(default)]
     pub unsandboxed: bool,
     #[serde(default)]
-    pub write_paths: Vec<PathBuf>,
+    pub write_paths: Vec<settings::GrantedWritePath>,
+    /// Windows/WSL only: the command will write to a path on a Windows drive
+    /// (DrvFs), whose sandbox-integrity guarantees are weaker. Drives the
+    /// weaker-guarantee warning banner in the approval prompt.
+    #[serde(default)]
+    pub warn_windows_fs: bool,
     /// The agent-provided justification for requesting these permissions,
     /// shown to the user (attributed to the agent) in the approval prompt.
     #[serde(default)]
@@ -436,9 +441,19 @@ impl ElicitationStore {
     }
 
     fn validate_request(request: &acp::CreateElicitationRequest) -> Result<(), acp::Error> {
-        if let acp::ElicitationMode::Url(mode) = &request.mode {
-            url::Url::parse(&mode.url)
-                .map_err(|_| acp::Error::invalid_params().data("invalid elicitation URL"))?;
+        match &request.mode {
+            acp::ElicitationMode::Form(_) => {}
+            acp::ElicitationMode::Url(mode) => {
+                let url = url::Url::parse(&mode.url)
+                    .map_err(|_| acp::Error::invalid_params().data("invalid elicitation URL"))?;
+                if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                    return Err(acp::Error::invalid_params()
+                        .data("elicitation URL must use HTTP or HTTPS and include a host"));
+                }
+            }
+            _ => {
+                return Err(acp::Error::invalid_params().data("unsupported elicitation mode"));
+            }
         }
 
         Ok(())
@@ -500,17 +515,11 @@ impl ElicitationStore {
     fn complete_url_elicitation_entry(elicitation: &mut Elicitation) -> bool {
         let previous_status = mem::replace(&mut elicitation.status, ElicitationStatus::Completed);
         match previous_status {
-            ElicitationStatus::Pending { respond_tx } => {
-                respond_tx
-                    .send(acp::CreateElicitationResponse::new(
-                        acp::ElicitationAction::Accept(acp::ElicitationAcceptAction::new()),
-                    ))
-                    .ok();
-                true
-            }
             ElicitationStatus::Accepted => true,
-            ElicitationStatus::Completed => false,
-            previous_status @ (ElicitationStatus::Declined | ElicitationStatus::Canceled) => {
+            previous_status @ (ElicitationStatus::Pending { .. }
+            | ElicitationStatus::Declined
+            | ElicitationStatus::Canceled
+            | ElicitationStatus::Completed) => {
                 elicitation.status = previous_status;
                 false
             }
@@ -867,9 +876,27 @@ pub struct ToolCall {
     /// sandboxing was active (see [`SANDBOX_NOT_APPLIED_META_KEY`]). `None` when
     /// the command was sandboxed normally (or sandboxing was off).
     pub sandbox_not_applied: Option<SandboxNotAppliedReason>,
+    /// Real-time thinking trace from the tool's execution. Populated by the
+    /// skill cascade executor via `thinking_sender()` — each cascade step
+    /// appends its reasoning here so the user sees a live thinking trace,
+    /// not just a one-line title. `None` when the tool call has no cascade
+    /// (ordinary built-in tools like `read_file`).
+    pub thoughts: Option<Entity<Markdown>>,
 }
 
 impl ToolCall {
+    /// Append a thinking trace chunk to this tool call. Creates the `Markdown`
+    /// entity lazily on first append so ordinary tool calls pay no cost.
+    pub fn append_thinking(&mut self, text: &str, cx: &mut App) {
+        if text.is_empty() {
+            return;
+        }
+        let markdown = self
+            .thoughts
+            .get_or_insert_with(|| cx.new(|cx| Markdown::new_text(SharedString::default(), cx)));
+        markdown.update(cx, |md, cx| md.append(text, cx));
+    }
+
     fn from_acp(
         tool_call: acp::ToolCall,
         status: ToolCallStatus,
@@ -936,6 +963,7 @@ impl ToolCall {
             sandbox_authorization_details,
             sandbox_fallback_authorization_details,
             sandbox_not_applied,
+            thoughts: None,
         };
         Ok(result)
     }
@@ -1218,16 +1246,18 @@ impl From<SelectedPermissionOutcome> for acp::SelectedPermissionOutcome {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum RequestPermissionOutcome {
     Cancelled,
+    InterruptedByFollowUp,
     Selected(SelectedPermissionOutcome),
 }
 
 impl From<RequestPermissionOutcome> for acp::RequestPermissionOutcome {
     fn from(value: RequestPermissionOutcome) -> Self {
         match value {
-            RequestPermissionOutcome::Cancelled => Self::Cancelled,
+            RequestPermissionOutcome::Cancelled
+            | RequestPermissionOutcome::InterruptedByFollowUp => Self::Cancelled,
             RequestPermissionOutcome::Selected(outcome) => Self::Selected(outcome.into()),
         }
     }
@@ -1258,7 +1288,7 @@ pub enum ToolCallStatus {
     WaitingForConfirmation {
         current_status: acp::ToolCallStatus,
         options: PermissionOptions,
-        respond_tx: oneshot::Sender<SelectedPermissionOutcome>,
+        respond_tx: oneshot::Sender<RequestPermissionOutcome>,
         kind: AuthorizationKind,
     },
     /// The tool call is currently running.
@@ -2126,7 +2156,15 @@ struct StreamingTextBuffer {
 impl StreamingTextBuffer {
     /// The number of milliseconds between each timer tick, controlling how quickly
     /// text is revealed.
-    const TASK_UPDATE_MS: u64 = 16;
+    //
+    // zed-kask: increased from 16ms (60fps) to 50ms (20fps) to reduce render
+    // pressure on the GPUI foreground thread. At 60fps, the streaming text
+    // reveal timer saturates the foreground thread with Markdown re-renders,
+    // starving the BlinkManager's 500ms timer and causing irregular cursor
+    // flashing. 20fps is still smooth for text reveal (the human eye can't
+    // perceive text appearing at >20fps) but reduces render pressure by 3x.
+    // See DIVERGENCE.md D14.
+    const TASK_UPDATE_MS: u64 = 50;
     /// The time in milliseconds to reveal the entire pending text.
     const REVEAL_TARGET: f32 = 200.0;
 }
@@ -3135,6 +3173,7 @@ impl AcpThread {
                     sandbox_authorization_details: None,
                     sandbox_fallback_authorization_details: None,
                     sandbox_not_applied: None,
+                    thoughts: None,
                 };
                 self.push_entry(AgentThreadEntry::ToolCall(failed_tool_call), cx);
                 return Ok(());
@@ -3173,6 +3212,22 @@ impl AcpThread {
         cx.emit(AcpThreadEvent::EntryUpdated(ix));
 
         Ok(())
+    }
+
+    /// Append a thinking trace chunk to a tool call's `thoughts` buffer.
+    /// Called from `ThreadEvent::ToolCallThinking` — the skill cascade
+    /// executor emits these so the user sees a live thinking trace during
+    /// long-running tool calls, not just a one-line title.
+    pub fn append_tool_call_thinking(
+        &mut self,
+        tool_call_id: &acp::ToolCallId,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some((ix, call)) = self.tool_call_mut(tool_call_id) {
+            call.append_thinking(text, cx);
+            cx.emit(AcpThreadEvent::EntryUpdated(ix));
+        }
     }
 
     /// Updates a tool call if id matches an existing entry, otherwise inserts a new one.
@@ -3397,10 +3452,7 @@ impl AcpThread {
         ));
 
         Ok(cx.spawn(async move |this, cx| {
-            let outcome = match rx.await {
-                Ok(outcome) => RequestPermissionOutcome::Selected(outcome),
-                Err(oneshot::Canceled) => RequestPermissionOutcome::Cancelled,
-            };
+            let outcome = rx.await.unwrap_or(RequestPermissionOutcome::Cancelled);
             this.update(cx, |_this, cx| {
                 cx.emit(AcpThreadEvent::ToolAuthorizationReceived(tool_call_id))
             })
@@ -3461,7 +3513,9 @@ impl AcpThread {
         let curr_status = mem::replace(&mut call.status, new_status);
 
         if let ToolCallStatus::WaitingForConfirmation { respond_tx, .. } = curr_status {
-            respond_tx.send(outcome).ok();
+            respond_tx
+                .send(RequestPermissionOutcome::Selected(outcome))
+                .ok();
         }
 
         cx.emit(AcpThreadEvent::EntryUpdated(ix));
@@ -3730,7 +3784,7 @@ impl AcpThread {
         self.had_error = false;
 
         let (tx, rx) = oneshot::channel();
-        let cancel_task = self.cancel(cx);
+        let cancel_task = self.cancel_inner(RequestPermissionOutcome::InterruptedByFollowUp, cx);
 
         self.turn_id += 1;
         let turn_id = self.turn_id;
@@ -3889,13 +3943,21 @@ impl AcpThread {
     }
 
     pub fn cancel(&mut self, cx: &mut Context<Self>) -> Task<()> {
+        self.cancel_inner(RequestPermissionOutcome::Cancelled, cx)
+    }
+
+    fn cancel_inner(
+        &mut self,
+        permission_outcome: RequestPermissionOutcome,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
         Self::flush_streaming_text(&mut self.streaming_text_buffer, cx);
         self.cancel_outstanding_elicitations(cx);
 
         let Some(turn) = self.running_turn.take() else {
             return Task::ready(());
         };
-        self.mark_pending_entries_as_canceled(cx);
+        self.mark_pending_entries_as_canceled(permission_outcome, cx);
         self.connection.cancel(&self.session_id, cx);
         cx.emit(AcpThreadEvent::StatusChanged);
 
@@ -3904,11 +3966,15 @@ impl AcpThread {
     }
 
     fn cancel_pending_turn_entries(&mut self, cx: &mut Context<Self>) {
-        self.mark_pending_entries_as_canceled(cx);
+        self.mark_pending_entries_as_canceled(RequestPermissionOutcome::Cancelled, cx);
         self.cancel_outstanding_elicitations(cx);
     }
 
-    fn mark_pending_entries_as_canceled(&mut self, cx: &mut Context<Self>) {
+    fn mark_pending_entries_as_canceled(
+        &mut self,
+        permission_outcome: RequestPermissionOutcome,
+        cx: &mut Context<Self>,
+    ) {
         for (ix, entry) in self.entries.iter_mut().enumerate() {
             match entry {
                 AgentThreadEntry::ToolCall(call) => {
@@ -3919,7 +3985,16 @@ impl AcpThread {
                             | ToolCallStatus::InProgress
                     );
                     if cancel {
-                        call.status = ToolCallStatus::Canceled;
+                        let previous_status =
+                            mem::replace(&mut call.status, ToolCallStatus::Canceled);
+                        if let ToolCallStatus::WaitingForConfirmation { respond_tx, .. } =
+                            previous_status
+                            && respond_tx.send(permission_outcome.clone()).is_err()
+                        {
+                            log::debug!(
+                                "Permission request closed before cancellation was delivered"
+                            );
+                        }
                         cx.emit(AcpThreadEvent::EntryUpdated(ix));
                     }
                 }
@@ -4373,8 +4448,9 @@ impl AcpThread {
         };
         let env = cx.spawn(async move |_, _| {
             let mut env = env.await.unwrap_or_default();
-            // Disables paging for `git` and hopefully other commands
-            env.insert("PAGER".into(), "".into());
+
+            disable_pagers_through_env(&mut env);
+
             for var in extra_env {
                 env.insert(var.name, var.value);
             }
@@ -4452,7 +4528,15 @@ impl AcpThread {
                 #[cfg(not(target_os = "windows"))]
                 let (task_command, task_args, task_env, sandbox, spawn_cwd) = {
                     let mut builder = ShellBuilder::new(&Shell::Program(shell), is_windows);
-                    if headless {
+                    // zed-kask: D27 — sandboxed commands run non-interactively.
+                    // The sandboxed command has stdin redirected to /dev/null and
+                    // runs in a new session (setsid) with no controlling terminal.
+                    // An interactive shell (-i) tries to set the tty process group,
+                    // fails with "Cannot set tty process group (No such process)",
+                    // and exits with code 2 — making every sandboxed terminal
+                    // command appear to fail. Always run non-interactively when
+                    // sandboxed, and when headless (no PTY at all).
+                    if headless || sandbox_wrap.is_some() {
                         builder = builder.non_interactive();
                     }
                     let (task_command, task_args) = builder
@@ -6475,7 +6559,8 @@ mod tests {
                 assert_eq!(outcome.option_id, allow_option_id);
                 assert_eq!(outcome.option_kind, acp::PermissionOptionKind::AllowOnce);
             }
-            RequestPermissionOutcome::Cancelled => {
+            RequestPermissionOutcome::Cancelled
+            | RequestPermissionOutcome::InterruptedByFollowUp => {
                 panic!("permission request should remain open after duplicate tool call update")
             }
         }
@@ -6587,7 +6672,8 @@ mod tests {
                 assert_eq!(outcome.option_id, acp::PermissionOptionId::new("allow"));
                 assert_eq!(outcome.option_kind, acp::PermissionOptionKind::AllowOnce);
             }
-            RequestPermissionOutcome::Cancelled => {
+            RequestPermissionOutcome::Cancelled
+            | RequestPermissionOutcome::InterruptedByFollowUp => {
                 panic!("resolved permission request should select an outcome")
             }
         }
@@ -6671,7 +6757,8 @@ mod tests {
                 assert_eq!(outcome.option_id, acp::PermissionOptionId::new("allow"));
                 assert_eq!(outcome.option_kind, acp::PermissionOptionKind::AllowOnce);
             }
-            RequestPermissionOutcome::Cancelled => {
+            RequestPermissionOutcome::Cancelled
+            | RequestPermissionOutcome::InterruptedByFollowUp => {
                 panic!("permission request should resolve after authorization")
             }
         }
@@ -6725,7 +6812,8 @@ mod tests {
 
         match permission_task.await {
             RequestPermissionOutcome::Cancelled => {}
-            RequestPermissionOutcome::Selected(_) => {
+            RequestPermissionOutcome::InterruptedByFollowUp
+            | RequestPermissionOutcome::Selected(_) => {
                 panic!("cancelled permission request should not select an outcome")
             }
         }
@@ -6787,7 +6875,8 @@ mod tests {
 
         match permission_task.await {
             RequestPermissionOutcome::Cancelled => {}
-            RequestPermissionOutcome::Selected(_) => {
+            RequestPermissionOutcome::InterruptedByFollowUp
+            | RequestPermissionOutcome::Selected(_) => {
                 panic!("terminal tool call update should close pending permission request")
             }
         }
@@ -7537,16 +7626,30 @@ mod tests {
         thread.update(cx, |thread, cx| {
             thread.complete_url_elicitation(&url_elicitation_id, cx);
         });
+        thread.read_with(cx, |thread, _| {
+            let Some((_, elicitation)) = thread.elicitation(&entry_id) else {
+                panic!("missing elicitation entry");
+            };
+            assert!(matches!(
+                elicitation.status,
+                ElicitationStatus::Pending { .. }
+            ));
+        });
+        thread.update(cx, |thread, cx| {
+            thread.respond_to_elicitation(
+                &entry_id,
+                acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
+                    acp::ElicitationAcceptAction::new(),
+                )),
+                cx,
+            );
+        });
         assert!(matches!(
             response_task.await.action,
             acp::ElicitationAction::Accept(_)
         ));
         thread.update(cx, |thread, cx| {
-            thread.respond_to_elicitation(
-                &entry_id,
-                acp::CreateElicitationResponse::new(acp::ElicitationAction::Decline),
-                cx,
-            );
+            thread.complete_url_elicitation(&url_elicitation_id, cx);
         });
         thread.read_with(cx, |thread, _| {
             let Some((_, elicitation)) = thread.elicitation(&entry_id) else {
@@ -8380,17 +8483,30 @@ mod tests {
         store.update(cx, |store, cx| {
             store.complete_url_elicitation(&url_elicitation_id, cx);
         });
-
+        store.read_with(cx, |store, _| {
+            let Some((_, elicitation)) = store.elicitation(&entry_id) else {
+                panic!("missing elicitation entry");
+            };
+            assert!(matches!(
+                elicitation.status,
+                ElicitationStatus::Pending { .. }
+            ));
+        });
+        store.update(cx, |store, cx| {
+            store.respond_to_elicitation(
+                &entry_id,
+                acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
+                    acp::ElicitationAcceptAction::new(),
+                )),
+                cx,
+            );
+        });
         assert!(matches!(
             response_task.await.action,
             acp::ElicitationAction::Accept(_)
         ));
         store.update(cx, |store, cx| {
-            store.respond_to_elicitation(
-                &entry_id,
-                acp::CreateElicitationResponse::new(acp::ElicitationAction::Decline),
-                cx,
-            );
+            store.complete_url_elicitation(&url_elicitation_id, cx);
         });
         store.read_with(cx, |store, _| {
             let Some((_, elicitation)) = store.elicitation(&entry_id) else {
@@ -8568,28 +8684,92 @@ mod tests {
     }
 
     #[gpui::test]
-    async fn test_url_elicitation_rejects_invalid_url(cx: &mut TestAppContext) {
+    async fn test_url_elicitation_rejects_non_browser_urls(cx: &mut TestAppContext) {
         init_test(cx);
         enable_acp_beta(cx);
+        let thread = new_test_thread(cx).await;
+        let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
+
+        for invalid_url in [
+            "not a url",
+            "file:///tmp/authorize",
+            "data:text/plain,authorize",
+            "mailto:user@example.com",
+            "zed://settings",
+        ] {
+            let result = thread.update(cx, |thread, cx| {
+                thread.request_elicitation(
+                    acp::CreateElicitationRequest::new(
+                        acp::ElicitationUrlMode::new(
+                            acp::ElicitationSessionScope::new(session_id.clone()),
+                            "url-1",
+                            invalid_url,
+                        ),
+                        "Complete this in the browser",
+                    ),
+                    cx,
+                )
+            });
+
+            let Err(error) = result else {
+                panic!("{invalid_url} should not be accepted for URL elicitation");
+            };
+            assert_eq!(error.code, acp::ErrorCode::InvalidParams);
+        }
+        thread.read_with(cx, |thread, _| assert!(thread.entries().is_empty()));
+    }
+
+    #[gpui::test]
+    async fn test_elicitation_rejects_unadvertised_mode(cx: &mut TestAppContext) {
+        init_test(cx);
         let thread = new_test_thread(cx).await;
         let session_id = thread.read_with(cx, |thread, _| thread.session_id().clone());
 
         let result = thread.update(cx, |thread, cx| {
             thread.request_elicitation(
                 acp::CreateElicitationRequest::new(
-                    acp::ElicitationUrlMode::new(
+                    acp::OtherElicitationMode::new(
+                        "future",
                         acp::ElicitationSessionScope::new(session_id),
-                        "url-1",
-                        "not a url",
+                        std::collections::BTreeMap::new(),
                     ),
-                    "Complete this in the browser",
+                    "Use a future input mode",
                 ),
                 cx,
             )
         });
 
-        assert!(result.is_err());
+        let Err(error) = result else {
+            panic!("unadvertised elicitation mode should be rejected");
+        };
+        assert_eq!(error.code, acp::ErrorCode::InvalidParams);
         thread.read_with(cx, |thread, _| assert!(thread.entries().is_empty()));
+    }
+
+    #[gpui::test]
+    async fn test_request_elicitation_store_rejects_unadvertised_mode(cx: &mut TestAppContext) {
+        init_test(cx);
+        let store = cx.update(|cx| cx.new(|_| ElicitationStore::default()));
+
+        let result = store.update(cx, |store, cx| {
+            store.request_elicitation(
+                acp::CreateElicitationRequest::new(
+                    acp::OtherElicitationMode::new(
+                        "future",
+                        acp::ElicitationRequestScope::new(acp::RequestId::Number(1)),
+                        std::collections::BTreeMap::new(),
+                    ),
+                    "Use a future input mode",
+                ),
+                cx,
+            )
+        });
+
+        let Err(error) = result else {
+            panic!("unadvertised elicitation mode should be rejected");
+        };
+        assert_eq!(error.code, acp::ErrorCode::InvalidParams);
+        store.read_with(cx, |store, _| assert!(store.elicitations().is_empty()));
     }
 
     async fn run_until_first_tool_call(
@@ -9382,10 +9562,24 @@ mod tests {
         // Send first message (turn_id=1) - handler will block
         let first_request = thread.update(cx, |thread, cx| thread.send_raw("first", cx));
         assert_eq!(thread.read_with(cx, |t, _| t.turn_id), 1);
+        let permission_task = thread
+            .update(cx, |thread, cx| {
+                thread.request_tool_call_authorization(
+                    acp::ToolCall::new("permission", "Needs permission").into(),
+                    PermissionOptions::Flat(Vec::new()),
+                    AuthorizationKind::PermissionGrant,
+                    cx,
+                )
+            })
+            .unwrap();
 
         // Send second message (turn_id=2) while first is still blocked
         // This calls cancel() which takes turn 1's running_turn and sets turn 2's
         let second_request = thread.update(cx, |thread, cx| thread.send_raw("second", cx));
+        assert!(matches!(
+            permission_task.await,
+            RequestPermissionOutcome::InterruptedByFollowUp
+        ));
         assert_eq!(thread.read_with(cx, |t, _| t.turn_id), 2);
 
         let running_turn_after_second_send =
@@ -10050,6 +10244,58 @@ mod tests {
             thread.read_with(cx, |t, _| t.status()),
             ThreadStatus::Idle,
             "running_turn must be cleared even when tx was dropped without send"
+        );
+    }
+
+    /// D14: the streaming text reveal timer interval must be 50ms, not the
+    /// upstream 16ms. At 16ms (60fps) the timer saturates the GPUI foreground
+    /// thread with Markdown re-renders during streaming, starving the
+    /// BlinkManager's 500ms timer and causing irregular cursor flashing.
+    /// 50ms (20fps) is still smooth for text reveal but reduces render
+    /// pressure by 3x.
+    #[test]
+    fn test_streaming_reveal_timer_interval_kask_contract() {
+        assert_eq!(
+            StreamingTextBuffer::TASK_UPDATE_MS,
+            50,
+            "D14: TASK_UPDATE_MS must be 50ms (20fps), not upstream's 16ms (60fps). \
+             See DIVERGENCE.md D14."
+        );
+    }
+
+    /// D27: sandboxed terminal commands must run non-interactively. The sandbox
+    /// creates a new session (setsid) with no controlling terminal and stdin
+    /// redirected to /dev/null. An interactive shell (-i) tries to set the tty
+    /// process group, fails with "Cannot set tty process group (No such
+    /// process)", and exits with code 2 — making every sandboxed terminal
+    /// command appear to fail even when the command itself succeeds. This test
+    /// pins the ShellBuilder contract: non_interactive() omits the -i flag that
+    /// interactive mode would pass.
+    #[test]
+    fn test_sandboxed_terminal_runs_non_interactively() {
+        let shell = Shell::Program("/bin/sh".to_string());
+
+        // Interactive (upstream default for non-headless GUI): -i flag present.
+        let (program, args) = ShellBuilder::new(&shell, false)
+            .redirect_stdin_to_dev_null()
+            .build(Some("echo hello".to_string()), &[]);
+        assert_eq!(program, "/bin/sh");
+        assert!(
+            args.contains(&"-i".to_string()),
+            "interactive shell must pass -i (upstream default for non-headless GUI)"
+        );
+
+        // Non-interactive (zed-kask sandboxed path): no -i flag.
+        let (program, args) = ShellBuilder::new(&shell, false)
+            .non_interactive()
+            .redirect_stdin_to_dev_null()
+            .build(Some("echo hello".to_string()), &[]);
+        assert_eq!(program, "/bin/sh");
+        assert!(
+            !args.contains(&"-i".to_string()),
+            "D27: sandboxed terminal must not pass -i — the sandbox has no \
+             controlling terminal, so -i causes \"Cannot set tty process group\" \
+             and exit code 2. See DIVERGENCE.md D27."
         );
     }
 }

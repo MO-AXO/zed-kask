@@ -8,9 +8,8 @@ use crate::types::ThreadSummaryOutput;
 
 /// System prompt for LLM-assisted thread summarization.
 ///
-/// Shared by the MCP server's `condenser_thread_summary` tool and the
-/// ChatService's `condense_history` auto-condense path. Both callers
-/// feed this as the system prompt for the inference request.
+/// Used by the MCP server's `condenser_thread_summary` tool as the system
+/// prompt for the inference request.
 pub const SUMMARY_SYSTEM_PROMPT: &str = "You are a context condensation assistant. Produce structured summaries that \
      preserve technical details (file paths, error messages, decisions) while \
      eliminating verbosity. Use bullet points. Be concise.";
@@ -74,7 +73,7 @@ pub fn approx_token_count(text: &str) -> usize {
     // ~4 characters per token for English text. Floor at 1 to avoid zero
     // for very short inputs (empty string returns 1, which is harmless
     // for threshold comparisons).
-    (text.len() / 4).max(1)
+    (text.chars().count() / 4).max(1)
 }
 
 #[cfg(test)]

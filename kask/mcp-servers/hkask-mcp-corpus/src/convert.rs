@@ -222,6 +222,34 @@ pub fn strip_html_comments(text: &str) -> String {
     re.replace_all(text, "").into_owned()
 }
 
+/// Strip URLs, file links, and hyperlinks from text before chunking.
+///
+/// Removes HTML anchor tags (keeps inner text), Markdown URL links (keeps
+/// link text), bare URLs, and protocol URIs (http, https, ftp, file, ssh,
+/// mailto). Collapses leftover double spaces. Preserves newlines and
+/// non-link text.
+pub(crate) fn sanitize_links(text: &str) -> String {
+    use regex::Regex;
+
+    let re_anchor = Regex::new(r#"(?is)<a\s[^>]*>(.*?)</a>"#).expect("anchor regex");
+    let re_md = Regex::new(r"\[([^\]]*)\]\((?:https?://|ftp://|file://|www\.|mailto:)[^)]*\)")
+        .expect("md-link regex");
+    let re_url = Regex::new(
+        r#"(?:https?|ftp|file|ssh)://[^\s<>"'\)\]]+|www\.[^\s<>"'\)\]]+|mailto:[^\s<>"'\)\]]+"#,
+    )
+    .expect("url regex");
+    let re_spaces = Regex::new(r"  +").expect("spaces regex");
+
+    let text = re_anchor.replace_all(text, "$1");
+    let text = re_md.replace_all(&text, "$1");
+    let text = re_url.replace_all(&text, "");
+    let text = re_spaces.replace_all(&text, " ");
+    text.lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +299,84 @@ mod tests {
     fn strip_html_decodes_entities() {
         let html = "<p>A &amp; B</p>";
         assert_eq!(strip_html(html), "A & B");
+    }
+
+    /// S2 unification pin: `strip_html` is the canonical HTML stripper for both
+    /// the convert pipeline (`corpus_convert`) and the embed pipeline
+    /// (`EmbedService::embed_corpus` → `fetch_text` → `strip_html_tags`).
+    /// The embed path previously used a divergent `strip_html_tags` that
+    /// decoded entities but missed block-tag spacing and script/style
+    /// removal. This test pins the unified behavior: block spacing +
+    /// entity decoding + script removal in a single document.
+    #[test]
+    fn strip_html_unifies_block_spacing_entity_decoding_and_script_removal() {
+        // Block spacing prevents word concatenation across block boundaries.
+        assert_eq!(strip_html("<p>a</p><p>b</p>"), "a b");
+        // Entity decoding survives block-tag stripping.
+        assert_eq!(strip_html("<p>a &amp; b</p><p>c</p>"), "a & b c");
+        // script/style content is removed entirely, not leaked into the text.
+        assert_eq!(
+            strip_html("<p>visible</p><script>var x = 1;</script><p>more</p>"),
+            "visible more"
+        );
+    }
+
+    // ── sanitize_links tests (moved from tools/document.rs) ──
+
+    #[test]
+    fn strips_bare_urls() {
+        let input = "Visit https://example.com for details.";
+        assert_eq!(sanitize_links(input), "Visit for details.");
+    }
+
+    #[test]
+    fn strips_www_links() {
+        let input = "See www.example.com and http://test.org.";
+        assert_eq!(sanitize_links(input), "See and");
+    }
+
+    #[test]
+    fn strips_markdown_links_keeps_text() {
+        let input = "Read [this article](https://example.com) now.";
+        assert_eq!(sanitize_links(input), "Read this article now.");
+    }
+
+    #[test]
+    fn keeps_non_url_markdown_refs() {
+        let input = "See [Figure 1](#fig1) on [page 42](page 42).";
+        assert_eq!(
+            sanitize_links(input),
+            "See [Figure 1](#fig1) on [page 42](page 42)."
+        );
+    }
+
+    #[test]
+    fn strips_html_anchors_keeps_text() {
+        let input = "Click <a href=\"https://example.com\">here</a> now.";
+        assert_eq!(sanitize_links(input), "Click here now.");
+    }
+
+    #[test]
+    fn strips_file_and_protocol_uris() {
+        let input = "Open file:///etc/passwd or ftp://files.example.com/data.";
+        assert_eq!(sanitize_links(input), "Open or");
+    }
+
+    #[test]
+    fn preserves_newlines_and_normal_text() {
+        let input = "Normal text here.\n\nAnother paragraph with no links.";
+        assert_eq!(sanitize_links(input), input);
+    }
+
+    #[test]
+    fn strips_mailto() {
+        let input = "Contact mailto:user@example.com today.";
+        assert_eq!(sanitize_links(input), "Contact today.");
+    }
+
+    #[test]
+    fn collapses_double_spaces() {
+        let input = "Visit  https://example.com  now.";
+        assert_eq!(sanitize_links(input), "Visit now.");
     }
 }

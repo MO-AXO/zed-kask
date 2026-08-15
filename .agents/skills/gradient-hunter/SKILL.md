@@ -1,7 +1,7 @@
 ---
 name: gradient-hunter
 visibility: public
-description: "Find steep gradients between populated and unpopulated regions of a codebase/telemetry/test field and investigate the reason for the gradient. The signal is in the gradient shape and its cause, not in the absence itself. Anchored to a substrate ontology (Parisi spin glass theory: non-ergodicity, frustration, metastable valleys) and seven surface gradient-shape ontologies (wombling, regression discontinuity, Rubin MCAR/MAR/MNAR, persistent homology, edge detection, oracle gap, Monod allostery with agentic-orchestrator corollary). Decomposed into phased templates: Prior → Map → Detect → Hypothesize → Report → Convergence. Composes graph-audit, pragmatic-cybernetics, falsifiability, metacognition. Emits reg.gradient.* spans. Any userpod may invoke this skill."
+description: "Find steep gradients between populated and unpopulated regions of a codebase, telemetry, or test field and investigate the reason. The signal is in the gradient shape and its cause, not in the absence itself."
 ---
 
 # Gradient Hunter
@@ -103,13 +103,12 @@ Key non-obvious rules the taxonomy encodes:
 | `gradient-detect.j2` | `KnowAct` | Detect gradients and classify shape, scale, domain, fractal recurrence. References gradient-shapes.yaml. |
 | `gradient-hypothesize.j2` | `KnowAct` | Generate reason hypotheses via Rubin + spin glass + allostery taxonomy. Delegates to falsifiability and metacognition. |
 | `gradient-report.j2` | `KnowAct` | Compile structured gradient report with priority ranking, lessons_learned, pattern_signatures. |
-| `gradient-convergence-check.j2` | `KnowAct` | Compute composite convergence metric (stabilization + coverage) with next_prior_focus for loop closure. |
 | `gradient-shapes.yaml` | `RenderAct` | Reference: eight gradient shape ontology with fractal recurrence, reason classes, and priority ordering. |
 
 ## Constraints
 
 - All flow templates are `KnowAct` type with `Public` visibility. Reference documents are `RenderAct`.
-- Energy caps: prior (4096), map (4096), detect (6144), hypothesize (6144), report (4096), convergence-check (2048).
+- Energy caps: prior (4096), map (4096), detect (6144), hypothesize (6144), report (4096).
 - Gas cap: 100,000 per invocation. Maximum 3 iterations.
 - The prior must be explicit before gradient detection.
 - The fractal recurrence check is mandatory.

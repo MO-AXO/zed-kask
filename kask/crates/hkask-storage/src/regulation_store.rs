@@ -272,16 +272,16 @@ impl RegulationArchive {
         .map_err(|e| InfrastructureError::database(e.to_string()))
     }
 
-    /// Query events by span_category prefix (e.g., "reg.guard" matches "reg.guard.input",
-    /// "reg.guard.output", etc.).
+    /// Query events by span_category prefix (e.g., "reg.outcome" matches "reg.outcome.action_blocked",
+    /// "reg.outcome.action_substituted", etc.).
     ///
-    /// The stored `span_category` column holds the short name (e.g., "guard.input",
-    /// "regulation", "gas"). Callers pass the short-name prefix (e.g., "guard",
-    /// "regulation", "gas") — NOT the full `reg.*` namespace.
+    /// The stored `span_category` column holds the short name (e.g., "outcome",
+    /// "regulation", "tool"). Callers pass the short-name prefix (e.g., "outcome",
+    /// "regulation", "tool") — NOT the full `reg.*` namespace.
     ///
     /// expect: "The system provides durable storage for event data"
     /// \[P9\] Motivating: Homeostatic Self-Regulation — query Regulation span history
-    /// pre:  `namespace_prefix` is a non-empty short-name prefix (e.g., "guard", "regulation", "gas")
+    /// pre:  `namespace_prefix` is a non-empty short-name prefix (e.g., "outcome", "regulation", "tool")
     /// post: returns Vec of RegulationRecords with span_category starting with the prefix, since the given
     ///       timestamp, ordered by timestamp ASC, limited to `limit` results
     pub fn query_by_namespace(
@@ -444,8 +444,15 @@ fn row_to_regulation_record(
         .to_utc();
     // Reconstruct Span from stored category + path
     let namespace_str = format!("reg.{}", span_category);
-    let namespace = SpanNamespace::parse(&namespace_str)
-        .unwrap_or_else(|| SpanNamespace::new("reg.gas").expect("reg.gas must be canonical"));
+    let namespace = SpanNamespace::parse(&namespace_str).unwrap_or_else(|| {
+        tracing::warn!(
+            target: "reg.storage",
+            namespace_str = %namespace_str,
+            "Failed to parse span namespace from stored span_category — \
+             defaulting to reg.gas. The stored span_category may be corrupt."
+        );
+        SpanNamespace::new("reg.gas").expect("reg.gas must be canonical")
+    });
     // Extract the local path part after the namespace prefix.
     let ns_str = namespace.as_str();
     let local_path = if span_path.starts_with(ns_str)
@@ -478,8 +485,18 @@ fn row_to_regulation_record(
         regulation,
         outcome,
         recursion_depth: recursion_depth as u8,
-        parent_event: parent_event
-            .map(|s| EventID::from_uuid(uuid::Uuid::parse_str(&s).unwrap_or_default())),
+        parent_event: parent_event.map(|s| {
+            EventID::from_uuid(uuid::Uuid::parse_str(&s).unwrap_or_else(|e| {
+                tracing::warn!(
+                    target: "reg.storage",
+                    error = %e,
+                    raw_uuid = %s,
+                    "Failed to parse parent_event UUID — \
+                     using nil UUID. The event DAG causality link may be broken."
+                );
+                uuid::Uuid::nil()
+            }))
+        }),
         visibility: visibility_str,
     })
 }
@@ -502,70 +519,6 @@ impl RegulationSink for RegulationArchive {
     }
 }
 
-impl hkask_types::LedgerStoragePort for RegulationArchive {
-    fn query_algedonic(
-        &self,
-        since: chrono::DateTime<chrono::Utc>,
-        limit: u64,
-    ) -> Result<Vec<RegulationRecord>, InfrastructureError> {
-        self.query_algedonic(since, limit)
-    }
-
-    fn replay_weighted(
-        &self,
-        since: chrono::DateTime<chrono::Utc>,
-        limit: u64,
-        config: &hkask_types::DecayConfig,
-    ) -> Result<Vec<hkask_types::WeightedEvent>, InfrastructureError> {
-        self.replay_weighted(since, limit, &map_config(config))
-            .map(|events| {
-                events
-                    .into_iter()
-                    .map(|we| hkask_types::WeightedEvent {
-                        event: we.event,
-                        weight: we.weight,
-                    })
-                    .collect()
-            })
-    }
-
-    fn persist_cursor(&self, key: &str, value: i64) -> Result<(), InfrastructureError> {
-        self.persist_cursor(key, value)
-    }
-
-    fn load_cursor(&self, key: &str) -> Result<Option<i64>, InfrastructureError> {
-        self.load_cursor(key)
-    }
-
-    fn query_by_namespace(
-        &self,
-        namespace_prefix: &str,
-        since: chrono::DateTime<chrono::Utc>,
-        limit: u64,
-    ) -> Result<Vec<RegulationRecord>, InfrastructureError> {
-        self.query_by_namespace(namespace_prefix, since, limit)
-    }
-
-    fn query_span_stats(
-        &self,
-        namespace_prefix: &str,
-        since: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Vec<(String, u64)>, InfrastructureError> {
-        self.query_span_stats(namespace_prefix, since)
-    }
-}
-
-/// Map from port-level DecayConfig to the local storage type.
-fn map_config(config: &hkask_types::DecayConfig) -> DecayConfig {
-    DecayConfig {
-        cybernetics_lambda: config.cybernetics_lambda,
-        curation_lambda: config.curation_lambda,
-        inference_lambda: config.inference_lambda,
-        episodic_lambda: config.episodic_lambda,
-        weight_threshold: config.weight_threshold,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use hkask_types::event::{Span, SpanNamespace};
@@ -582,7 +535,7 @@ mod tests {
     #[test]
     fn local_path_extraction_does_not_panic_on_exact_namespace_match() {
         let ns = SpanNamespace::new("reg.gas").unwrap();
-        let span = Span::new(ns.clone(), "reg.gas");
+        let span = Span::new(ns, "reg.gas");
         let (cat, path) = super::span_to_columns(&span);
         assert_eq!(cat, "gas");
         assert!(!path.is_empty());

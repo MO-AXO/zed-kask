@@ -1,0 +1,216 @@
+[inference]
+template_type: KnowAct
+contract:
+  input:
+    decisions: object
+    swarm_id: string
+    task: string
+    mode: string
+    steering_mode: string
+  output:
+    dispatch_intents: array
+    gate_decisions: array
+    emitted_calls: array
+    aborted_reasons: array
+    steering_directive: object|null
+    delegate_notes: string
+visibility: Public
+---
+{# Template: swarm-intelligence/swarm-act.j2 #}
+{# Functional Role: KnowAct — Emit gated composition change #}
+{# Produces: act_result #}
+{# Phase 4 — ACT (DO: gated swarm_delegate / swarm_delegate_local) #}
+{# hKask v0.31.0 — Swarm Intelligence (mode-aware v2 §15) #}
+{#
+  Emit the gated composition change. The gate is mode-dependent:
+  - abw: consent token from swarm_request_consent (the v1 gate).
+  - local: per-dispatch ceiling only — no consent token (§15.1.2 rejected) and
+    no funding gate (the ledger records spend, it does not authorize it).
+  No call is emitted without passing the gate.
+#}
+
+[inference]
+temperature = 0.2
+work_effort = "high"
+verbosity = "standard"
+max_tokens = 3072
+thinking_budget = "full"
+
+You are a swarm-dispatch executor. Emit the gated composition changes for the swarm.
+
+## Mode
+{{ mode }}
+
+## Decisions (from DECIDE)
+```json
+{{ decisions | tojson }}
+```
+
+## Swarm ID
+{{ swarm_id }}
+
+## Task
+{{ task }}
+
+## Step 1 — Construct a DispatchIntent for each proposed move
+
+For each proposed hire/fire/delegate, construct:
+
+```json
+{
+  "swarm_id": "{{ swarm_id }}",
+  "task": "{{ task }}",
+  "estimated_credits": "<from the move's estimated_credits, summed if multiple moves share a dispatch>",
+  "curator_involved": false,
+  "data_shared": ["<derived from the agents' accepts[] and the task — what data categories reach the agent>"]
+}
+```
+
+`curator_involved` defaults to **false** (ABW plan §3.7: Private/opt-in is the
+default). Set to true only if the move explicitly invokes the Xaman Ek
+curator, which requires separate per-dispatch opt-in.
+
+## Step 2 — Route through the gate
+
+{% if mode == "local" %}
+In local mode the only gate is the **per-dispatch ceiling** — no consent token
+(§15.1.2 rejected consent tokens on local tools) and **no funding gate**. Each
+delegate call to `swarm_delegate_local` takes `credits_authorized`, which is
+checked against the per-dispatch ceiling only; `PaymentRequired` is returned
+solely when `credits_authorized` exceeds that ceiling, never for insufficient
+funds. An unfunded or negative ledger does not block a delegation.
+
+Each dispatch intent must produce a gate decision:
+- `Proceed { credits_authorized }` — the operator authorized the spend.
+  The `credits_authorized` is passed directly to `swarm_delegate_local`.
+- `Abort { reason }` — the operator declined. Record the reason; emit no
+  spend for this move.
+{% else %}
+In abw mode, the gate is the consent token minted by `swarm_request_consent`
+(action + target-scoped, single-use). Each dispatch intent must produce a
+gate decision:
+- `Proceed { credits_authorized }` — the operator authorized the spend. A
+  consent token for this action+target with `credits_authorized` is required
+  for the MCP spend call.
+- `Abort { reason }` — the operator declined. Record the reason; emit no
+  spend for this move.
+
+The consent gate MUST block. If no consent token can be produced, the move
+is Aborted with reason "missing_consent_token". This is the enforcement
+point for the .rules "Advertised invariants need enforcement points" trap.
+{% endif %}
+
+## Step 3 — Emit the gated MCP calls
+
+{% if mode == "local" %}
+For each Proceed decision, emit the corresponding hkask-mcp-swarm local call:
+- `delegate` → `swarm_delegate_local` with `{ agent_name, task,
+  credits_authorized }`. The agent must exist in the local registry
+  (`agents/local/curated/<id>/agent_card.json`). No `workspace_id` — the
+  workspace is the session (§15.1.9 rejected workspace_id on local tools).
+  No consent token and no funding gate — local agents run on the operator's own
+  substrate, so an unfunded (or negative) ledger does NOT block a local
+  delegation. Do not treat a low local balance as a reason to skip a move.
+  The per-dispatch ceiling is the only local bound.
+  In steering mode, batch all delegate calls into a single
+  `swarm_execute_plan_local` call instead (see Step 5) — the tool runs
+  each delegation, evaluates results, and returns the collected array.
+- `remove` → `swarm_remove_local` with `{ agent_name }` (the local
+  counterpart of firing — deletes the card; a synced card's ABW agent is
+  untouched).
+- `reconfigure_agent` → `swarm_reconfigure_local_agent` with
+  `{ agent_name, system_prompt, model?, mcp_tools?, skills? }` (Cybernetic
+  Swarm Plan C6). The new `system_prompt` is produced upstream (seed
+  `swarm_generate_prompt` — an ABW authoring aid — with the blamed agent's
+  current prompt + the failure log, or author it locally; the prompt text
+  arrives in the move's rationale/payload). The tool preserves `agent_id`,
+  `agent_type`, `description`, `accepts`, `produces`, `dependencies`, and
+  `cloud_id`, and reloads the registry. Reconfigure is preferred over `remove`
+  when the blamed agent's type covers a required transform (firing would
+  re-open the variety deficit). No consent token — local mode.
+- `create` → `swarm_create_local_agent` with the full card fields
+  (`agent_id`, `agent_type`, `description`, `system_prompt`, `accepts`,
+  `produces`, `model?`, `mcp_tools?`, `skills?`) when DECIDE proposes hiring an
+  agent not yet in the local registry.
+- `author_agent` → `swarm_create_local_agent` with the move's `authored_card`
+  fields (`agent_id`, `agent_type`, `description`, `system_prompt`, `accepts`,
+  `produces`, `model?`, `mcp_tools?`, `skills?`). Agent creation + authoring as
+  a first-class move: the cascade authored the `system_prompt` for an
+  uncovered transform; ACT creates the card directly into the local registry
+  (no `swarm_hire_local` tool — §15.1.1 rejected). The new agent is
+  immediately delegable; a separate `delegate` move runs it.
+- `fanout` → `swarm_fanout_local` with `{ delegations: [{ agent_name, task,
+  credits_authorized }, ...] }` when DECIDE proposes parallel multi-agent
+  dispatch (capped at MAX_FANOUT=10; runs sequentially to avoid ledger
+  TOCTOU).
+
+For each Abort, emit no call. Record the abort reason in aborted_reasons.
+{% else %}
+For each Proceed decision, emit the corresponding hkask-mcp-swarm call:
+- `hire` → `swarm_hire` with `{ workspace_id, agent_name, include_optional:
+  false, consent_token, credits_authorized }`. The consent token must have
+  been minted for action "hire" and target = agent_name. Own agents (created
+  via `swarm_create_agent`) route through `/add` automatically.
+- `delegate` → `swarm_delegate` with `{ workspace_id, agent_name, task,
+  consent_token, credits_authorized }` (workspace delegation semantics, one
+  level deep — the delegate loses delegate_to_agent/execute_agent).
+- `remove`/`fire` → `swarm_fire` with `{ workspace_id, agent_name }` (removes
+  the agent from the roster — the redundant-duplicate pruning; no credit
+  cost, no consent token). The agent itself is NOT deleted — use
+  `swarm_delete_agent` for that.
+- `author_agent` → author then create the agent: (1) if the move's
+  `authored_card.system_prompt` is empty, call `swarm_generate_prompt` with
+  the move's `description`/`agent_type` to seed the prompt; (2) optionally call
+  `swarm_generate_ontology` with a `domain_description` when the agent needs a
+  knowledge-graph ontology; (3) call `swarm_create_agent` with the
+  authored/generated fields (`agent_name`, `agent_type`, `system_prompt`,
+  `description`, `model?`, `tags?`, `dependencies_required?`,
+  `dependencies_optional?`, `mcp_tools?`, `skills?`). Creation is followed by a
+  separate `hire` move (consent-gated via `swarm_request_consent`) to add the
+  new agent to the workspace — emit both the `author_agent` (create) call and
+  the dependent `hire` call.
+
+For each Abort, emit no call. Record the abort reason in aborted_reasons.
+{% endif %}
+
+## Step 4 — Record what was emitted
+
+emitted_calls lists the actual MCP calls made (move_type, agent, tool_name,
+credits_authorized). This is the ground truth the CHECK phase reconciles
+against /api/wallet/transactions.
+
+## Step 5 — Steering directive (Cybernetic Swarm Plan C5/C6 execution boundary)
+
+{% if steering_mode == "steering" %}
+In steering mode, the swarm-intelligence output is not the final product — the
+**Kask Curator** (local swarms) or **Xaman Ek** (cloud swarms) executes the
+emitted_calls and feeds the results back. Emit a `steering_directive` object:
+
+```json
+{
+  "execute": "<the emitted_calls array — the plan to run>",
+  "via": "swarm_execute_plan_local" (local) | "swarm_xaman" (cloud),
+  "collect": "LocalDelegateResult array with task_success verdicts stamped — feed back as delegate_results on the next swarm-intelligence invocation",
+  "feedback": "re-invoke swarm-intelligence with delegate_results set to the collected results so ORIENT attributes fault and C6 reconfigures"
+}
+```
+
+The Curator (local) calls `swarm_execute_plan_local` with the emitted_calls
+as delegations (each with an optional deterministic evaluator), collects the
+returned `LocalDelegateResult` array (with `task_success` verdicts already
+stamped by the tool), and re-invokes swarm-intelligence with `delegate_results`
+set to that array — closing the feedback loop in one tool call. For cloud
+swarms, delegate to Xaman Ek via `swarm_xaman` with the plan as the message;
+Xaman Ek has steering **built in** (cloud-side) and executes the plan.
+{% else %}
+In advisory mode (the default), the plan IS the final output. Set
+steering_directive = null — the operator executes the emitted_calls manually
+and feeds `delegate_results` back on the next invocation (Option A).
+{% endif %}
+
+## Output
+
+Produce a JSON object with: dispatch_intents (array), gate_decisions (array
+of { decision: "Proceed"|"Abort", credits_authorized?, reason? }), emitted_calls
+(array), aborted_reasons (array), steering_directive (object or null — present
+in steering mode, null in advisory mode), delegate_notes.

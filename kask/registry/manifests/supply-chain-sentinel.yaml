@@ -1,5 +1,5 @@
 # Supply Chain Sentinel Process Manifest
-# ℏKask v0.31.0 — Dependency manifest audit (Cargo.toml, deny.toml, lockfiles)
+# ℏKask v0.34.0 — Dependency manifest audit (Cargo.toml, deny.toml, lockfiles)
 # Anchored to MITRE CWE (CWE-1104, CWE-829, CWE-1357), OWASP Supply Chain taxonomy, OSC&R framework.
 
 manifest:
@@ -11,17 +11,19 @@ manifest:
     for version pinning, registry verification, license conflicts, unmaintained
     indicators, and transitive dependency visibility.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  threshold: 0.10
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: step_4_result.convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
+  target_artifacts_field: "current_artifacts"
 
 gas:
   cap: 100000
@@ -37,7 +39,10 @@ rjoule:
 inputs:
   - name: manifest_path
     type: string
-    required: true
+    required: false
+
+ledger:
+  span_namespace: reg.skill.supply-chain-sentinel
 
 steps:
   - ordinal: 1
@@ -47,7 +52,7 @@ steps:
     renderer: minijinja
     template_ref: supply-chain-sentinel/select-surface
     gas_cap: 2048
-    timeout_seconds: 60
+    timeout_seconds: 120
   - ordinal: 2
     action: select
     description: >
@@ -56,7 +61,7 @@ steps:
     renderer: minijinja
     template_ref: supply-chain-sentinel/probe
     gas_cap: 2048
-    timeout_seconds: 60
+    timeout_seconds: 120
   - ordinal: 3
     action: select
     description: >
@@ -64,22 +69,22 @@ steps:
     renderer: minijinja
     template_ref: supply-chain-sentinel/report
     gas_cap: 2048
-    timeout_seconds: 60
+    timeout_seconds: 120
   - ordinal: 4
-    action: validate
+    action: loop
     description: >
-      Convergence check — evaluate supply-chain audit quality and coverage.
-    renderer: minijinja
-    template_ref: supply-chain-sentinel/convergence-check
-    gas_cap: 1024
-    timeout_seconds: 30
+      Re-enter supply chain audit cycle if convergence is not met. Routes
+      back to step 1 (scan manifests) to re-check dependencies.
+    input_mapping:
+      loop_target: "{{ 1 }}"
+      convergence_signal: "{{ step_3_result.findings | default([]) | length }}"
 
-# Registry invariant X5 (skill-maintenance): verified.
-# Manifest version: 0.31.0. Registry authoritative; SKILL.md is companion.
-# Created as audit fix A (missing manifest recovery) + C (invariant X5 enforcement).
+# Registry invariant X4 (skill-maintenance): verified.
+# Manifest version: 0.34.0. Registry authoritative; SKILL.md is companion.
+# Created as audit fix A (missing manifest recovery) + C (invariant X4 enforcement).
 # Note: Full .j2 templates in registry/templates/ (authoritative per SKILL.md).
 # Cross-artifact invariant: manifest id matches .agents/skills/ directory name.
 # Visibility: Public. Functional role: flowdef. Category: skill.
 # Energy/gas budgets: standard patterns. No invented vocabulary terms.
-# validation: invariant_x5 verified (2026-07-18, audit-cascade) — recorded as
+# validation: invariant_x4 verified (2026-07-18, audit-cascade) — recorded as
 # comment since `validation` is not a BundleManifest schema field.

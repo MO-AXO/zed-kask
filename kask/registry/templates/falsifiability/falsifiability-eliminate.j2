@@ -1,12 +1,6 @@
 {# goal: Apply evidence, eliminate hypotheses whose predictions fail, corroborate survivors — never confirm. #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- eliminate
-- corroborate
-- rule_out
-- record
-- justify
 contract:
   input:
     hypotheses: array
@@ -19,7 +13,6 @@ contract:
     survived_by_default: array
     falsification_log: array
     verdict: string
-energy_cap: 4096
 visibility: Public
 ---
 {# Template: falsifiability/falsifiability-eliminate.j2 #}

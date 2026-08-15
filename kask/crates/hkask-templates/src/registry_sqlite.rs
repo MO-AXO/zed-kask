@@ -12,7 +12,7 @@ use hkask_types::{InfrastructureError, NotFound, Visibility};
 use hkask_types::{
     RegistryEntry, RegistryError, RegistryIndex, Skill, SkillRegistryIndex, SkillZone,
 };
-use rusqlite::{Connection, params};
+use rusqlite::params;
 use tracing;
 
 type SkillRow = (
@@ -43,20 +43,6 @@ fn parse_template_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TemplateRow> 
         row.get(5)?,
         row.get(6)?,
     ))
-}
-
-fn query_column(conn: &Connection, sql: &str, id: &str) -> Result<Vec<String>> {
-    let db_err = |ctx: &str, e| {
-        TemplateError::Database(InfrastructureError::database(format!("{ctx}: {e}")))
-    };
-    let results: Vec<String> = conn
-        .prepare(sql)
-        .map_err(|e| db_err("Prepare", e))?
-        .query_map(params![id], |row| row.get::<_, String>(0))
-        .map_err(|e| db_err("Query", e))?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(results)
 }
 
 // ── SqliteRegistry ─────────────────────────────────────────────────────────
@@ -120,13 +106,9 @@ impl SqliteRegistry {
             .map_err(|e| TemplateError::Database(InfrastructureError::database(e.to_string())))?
             .execute_batch(concat!(
             "CREATE TABLE IF NOT EXISTS templates(id TEXT PRIMARY KEY, template_type TEXT NOT NULL, name TEXT NOT NULL DEFAULT '', description TEXT, source_path TEXT NOT NULL, cascade_level INTEGER NOT NULL DEFAULT 0, matroshka_limit INTEGER NOT NULL DEFAULT 7, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);",
-            "CREATE TABLE IF NOT EXISTS lexicon_terms(template_id TEXT NOT NULL, term TEXT NOT NULL, PRIMARY KEY(template_id, term), FOREIGN KEY(template_id) REFERENCES templates(id));",
-            "CREATE TABLE IF NOT EXISTS template_capabilities(template_id TEXT NOT NULL, capability TEXT NOT NULL, PRIMARY KEY(template_id, capability), FOREIGN KEY(template_id) REFERENCES templates(id));",
             "CREATE TABLE IF NOT EXISTS provenance(id INTEGER PRIMARY KEY AUTOINCREMENT, template_id TEXT NOT NULL, git_sha TEXT NOT NULL, modified_by TEXT NOT NULL, modified_at DATETIME DEFAULT CURRENT_TIMESTAMP, branch TEXT, commit_message TEXT, FOREIGN KEY(template_id) REFERENCES templates(id));",
             "CREATE INDEX IF NOT EXISTS idx_templates_type ON templates(template_type);",
-            "CREATE INDEX IF NOT EXISTS idx_lexicon_terms ON lexicon_terms(term);",
             "CREATE INDEX IF NOT EXISTS idx_provenance_template ON provenance(template_id);",
-            "CREATE INDEX IF NOT EXISTS idx_template_capabilities ON template_capabilities(capability);",
             "CREATE TABLE IF NOT EXISTS skills(id TEXT PRIMARY KEY, domain TEXT NOT NULL, word_act TEXT, flow_def TEXT, know_act TEXT, polarity TEXT, content_hash TEXT, visibility TEXT NOT NULL DEFAULT 'private', zone TEXT NOT NULL DEFAULT 'private', namespace TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);",
             "CREATE INDEX IF NOT EXISTS idx_skills_domain ON skills(domain);",
             "CREATE INDEX IF NOT EXISTS idx_skills_visibility ON skills(visibility);",
@@ -145,18 +127,10 @@ impl SqliteRegistry {
     /// \[P3\] Motivating: Generative Space — persists template registration
     /// pre:  entry.id is non-empty, entry.template_type is valid
     /// post: entry inserted or replaced in templates table
-    /// post: lexicon_terms and capabilities synced
+    /// post: capabilities synced
     pub fn register(&mut self, entry: RegistryEntry) -> Result<()> {
         for warning in &entry.validate() {
             tracing::warn!(target: "hkask.templates", "{}", warning);
-        }
-        // F-07 fix: unknown lexicon terms are now errors, not warnings.
-        let vocab_warnings = crate::vocabulary::validate_entry(&entry);
-        if !vocab_warnings.is_empty() {
-            return Err(TemplateError::Validation(format!(
-                "lexicon validation failed: {}",
-                vocab_warnings.join("; ")
-            )));
         }
         let mut conn = self
             .pool
@@ -169,38 +143,12 @@ impl SqliteRegistry {
             "INSERT OR REPLACE INTO templates (id, template_type, name, description, source_path, cascade_level, matroshka_limit, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)",
             params![entry.id, entry.template_type.as_str(), entry.name, entry.description, entry.source_path, entry.cascade_level, entry.matroshka_limit],
         ).map_err(|e| TemplateError::Manifest(format!("Insert: {}", e)))?;
-        for (table, col, items) in [
-            ("lexicon_terms", "term", &entry.lexicon_terms),
-            (
-                "template_capabilities",
-                "capability",
-                &entry.required_capabilities,
-            ),
-        ] {
-            tx.execute(
-                &format!("DELETE FROM {} WHERE template_id = ?1", table),
-                params![entry.id],
-            )
-            .map_err(|e| TemplateError::Manifest(format!("Delete {col}: {}", e)))?;
-            for item in items {
-                tx.execute(
-                    &format!(
-                        "INSERT INTO {} (template_id, {}) VALUES (?1, ?2)",
-                        table, col
-                    ),
-                    params![entry.id, item],
-                )
-                .map_err(|e| TemplateError::Manifest(format!("Insert {col}: {}", e)))?;
-            }
-        }
         tx.commit()
             .map_err(|e| TemplateError::Manifest(format!("Commit: {}", e)))?;
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn row_to_entry(
-        conn: &Connection,
         id: &str,
         tt: TemplateType,
         name: String,
@@ -215,16 +163,6 @@ impl SqliteRegistry {
             name,
             description: desc,
             source_path: sp,
-            lexicon_terms: query_column(
-                conn,
-                "SELECT term FROM lexicon_terms WHERE template_id = ?1",
-                id,
-            )?,
-            required_capabilities: query_column(
-                conn,
-                "SELECT capability FROM template_capabilities WHERE template_id = ?1",
-                id,
-            )?,
             cascade_level: cl,
             matroshka_limit: ml,
         })
@@ -254,10 +192,10 @@ impl SqliteRegistry {
                     id: format!("Template '{}': {}", id, e),
                 })
             })?;
-        Self::row_to_entry(&conn, &row.0, row.1, row.2, row.3, row.4, row.5, row.6)
+        Self::row_to_entry(&row.0, row.1, row.2, row.3, row.4, row.5, row.6)
     }
 
-    /// Delete a template and all associated data (lexicon terms, capabilities, provenance).
+    /// Delete a template and all associated data (capabilities, provenance).
     /// Returns the entry if it existed, None otherwise.
     ///
     /// expect: "The system persists template registrations to SQLite"
@@ -274,7 +212,7 @@ impl SqliteRegistry {
                 return entry;
             }
         };
-        for table in &["lexicon_terms", "template_capabilities", "provenance"] {
+        for table in &["provenance"] {
             if let Err(e) = conn.execute(
                 &format!("DELETE FROM {} WHERE template_id = ?1", table),
                 params![id],
@@ -288,37 +226,12 @@ impl SqliteRegistry {
         entry
     }
 
-    /// Search templates by lexicon term.
-    ///
-    /// expect: "The system persists template registrations to SQLite"
-    /// \[P3\] Motivating: Generative Space — vocabulary-aware template search
-    /// \[P8\] Constraining: Semantic Grounding — search uses lexicon terms
-    /// pre:  term is non-empty
-    /// post: returns `Vec<RegistryEntry>` for templates declaring this term
-    pub fn search_by_lexicon(&self, term: &str) -> Result<Vec<RegistryEntry>> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| TemplateError::Database(InfrastructureError::database(e.to_string())))?;
-        let rows: Vec<TemplateRow> = conn
-    			.prepare("SELECT t.id, t.template_type, t.name, t.description, t.source_path, t.cascade_level, t.matroshka_limit FROM templates t JOIN lexicon_terms l ON t.id = l.template_id WHERE l.term = ?1")
-    			.map_err(|e| TemplateError::Database(InfrastructureError::database(format!("Prepare: {}", e))))?
-    			.query_map(params![term], parse_template_row)
-    			.map_err(|e| TemplateError::Database(InfrastructureError::database(format!("Query: {}", e))))?
-    			.filter_map(|r| r.ok()).collect();
-        let mut results = Vec::new();
-        for (id, tt, name, desc, sp, cl, ml) in rows {
-            results.push(Self::row_to_entry(&conn, &id, tt, name, desc, sp, cl, ml)?);
-        }
-        Ok(results)
-    }
-
     /// Count registered templates.
     ///
     /// expect: "The system persists template registrations to SQLite"
     /// \[P3\] Motivating: Generative Space — reports persisted registry size
     /// post: returns count of templates in registry
-    /// post: returns 0 on lock error (graceful degradation)
+    /// post: returns 0 on lock/query error (graceful degradation, with a `warn!`)
     pub fn count(&self) -> usize {
         let conn = match self.pool.get() {
             Ok(c) => c,
@@ -327,10 +240,19 @@ impl SqliteRegistry {
                 return 0;
             }
         };
-        conn.query_row("SELECT COUNT(*) FROM templates", [], |row| {
+        match conn.query_row("SELECT COUNT(*) FROM templates", [], |row| {
             row.get::<_, i64>(0)
-        })
-        .unwrap_or(0) as usize
+        }) {
+            Ok(count) => count as usize,
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    error = %e,
+                    "count: SELECT COUNT(*) failed, returning 0 — a locked or corrupt templates table reads as zero"
+                );
+                0
+            }
+        }
     }
 
     const _T_SELECT: &str = "SELECT id, template_type, name, description, source_path, cascade_level, matroshka_limit FROM templates WHERE id = ?1";
@@ -342,7 +264,14 @@ impl RegistryIndex for SqliteRegistry {
     fn list(&self, domain_hint: Option<TemplateType>) -> Vec<RegistryEntry> {
         let conn = match self.pool.get() {
             Ok(c) => c,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    error = %e,
+                    "list: pool get failed, returning empty"
+                );
+                return Vec::new();
+            }
         };
         let sql = "SELECT id, template_type, name, description, source_path, cascade_level, matroshka_limit FROM templates";
         let (query_sql, query_params): (&str, &[rusqlite::types::Value]) = match &domain_hint {
@@ -354,22 +283,36 @@ impl RegistryIndex for SqliteRegistry {
         };
         let mut stmt = match conn.prepare(query_sql) {
             Ok(s) => s,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    error = %e,
+                    "list: prepare failed, returning empty"
+                );
+                return Vec::new();
+            }
         };
-        let rows: Vec<TemplateRow> = stmt
-            .query_map(
-                rusqlite::params_from_iter(
-                    query_params
-                        .iter()
-                        .map(|v| v as &dyn rusqlite::types::ToSql),
-                ),
-                parse_template_row,
-            )
-            .map(|rows| rows.filter_map(|r| r.ok()).collect())
-            .unwrap_or_default();
+        let rows: Vec<TemplateRow> = match stmt.query_map(
+            rusqlite::params_from_iter(
+                query_params
+                    .iter()
+                    .map(|v| v as &dyn rusqlite::types::ToSql),
+            ),
+            parse_template_row,
+        ) {
+            Ok(m) => m.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    error = %e,
+                    "list: query_map failed, returning empty"
+                );
+                return Vec::new();
+            }
+        };
         rows.into_iter()
             .filter_map(|(id, tt, name, desc, sp, cl, ml)| {
-                Self::row_to_entry(&conn, &id, tt, name, desc, sp, cl, ml).ok()
+                Self::row_to_entry(&id, tt, name, desc, sp, cl, ml).ok()
             })
             .collect()
     }
@@ -475,37 +418,74 @@ impl BundleRegistryIndex for SqliteRegistry {
     }
 
     fn get_bundle(&self, id: &str) -> Option<BundleManifest> {
-        self.pool
-            .get()
-            .ok()
-            .and_then(|conn| {
-                conn.query_row(
-                    "SELECT manifest_json FROM bundles WHERE id = ?1",
-                    params![id],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-            })
-            .and_then(|json| serde_json::from_str(&json).ok())
+        let conn = match self.pool.get() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    bundle_id = %id,
+                    error = %e,
+                    "get_bundle: pool get failed, returning None"
+                );
+                return None;
+            }
+        };
+        match conn.query_row(
+            "SELECT manifest_json FROM bundles WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(json) => serde_json::from_str(&json).ok(),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    bundle_id = %id,
+                    error = %e,
+                    "get_bundle: query failed (not NotFound), returning None"
+                );
+                None
+            }
+        }
     }
 
     fn list_bundles(&self) -> Vec<BundleManifest> {
         let conn = match self.pool.get() {
             Ok(c) => c,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    error = %e,
+                    "list_bundles: pool get failed, returning empty"
+                );
+                return Vec::new();
+            }
         };
         let mut stmt = match conn.prepare("SELECT manifest_json FROM bundles") {
             Ok(s) => s,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    error = %e,
+                    "list_bundles: prepare failed, returning empty"
+                );
+                return Vec::new();
+            }
         };
-        stmt.query_map([], |row| row.get::<_, String>(0))
-            .ok()
-            .map(|rows| {
-                rows.filter_map(|r| r.ok())
-                    .filter_map(|json| serde_json::from_str(&json).ok())
-                    .collect()
-            })
-            .unwrap_or_default()
+        match stmt.query_map([], |row| row.get::<_, String>(0)) {
+            Ok(rows) => rows
+                .filter_map(|r| r.ok())
+                .filter_map(|json| serde_json::from_str(&json).ok())
+                .collect(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    error = %e,
+                    "list_bundles: query_map failed, returning empty"
+                );
+                Vec::new()
+            }
+        }
     }
 
     fn remove_bundle(
@@ -546,7 +526,6 @@ impl BundleRegistryIndex for SqliteRegistry {
 // ── Owned-skill retrieval ──────────────────────────────────────────────────
 
 impl SqliteRegistry {
-    #[allow(clippy::too_many_arguments)]
     fn row_to_skill(
         id: String,
         domain_str: String,
@@ -591,22 +570,65 @@ impl SqliteRegistry {
     /// \[P3\] Motivating: Generative Space — retrieves owned skill record
     /// pre:  id is non-empty
     /// post: returns Some(Skill) if found, None otherwise
+    ///
+    /// `NotFound` (no row for `id`) returns `None` with no warn — that is the
+    /// expected "no such skill" case. Every other failure (pool unavailable,
+    /// query error, schema mismatch) returns `None` *with* a `warn!` so an
+    /// operator can distinguish "no such skill" from "the DB is broken" —
+    /// collapsing the two made a locked table read as "no skills" (F7).
     pub fn get_skill_owned(&self, id: &str) -> Option<Skill> {
-        let conn = self.pool.get().ok()?;
-        conn.query_row(
+        let conn = match self.pool.get() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    skill_id = %id,
+                    error = %e,
+                    "get_skill_owned: pool get failed, returning None"
+                );
+                return None;
+            }
+        };
+        match conn.query_row(
             "SELECT id, domain, word_act, flow_def, know_act, polarity, content_hash, visibility, zone, namespace FROM skills WHERE id = ?1", params![id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?)),
-        ).ok().and_then(|(id, ds, wa, fd, ka, ps, ch, vs, zs, ns)| Self::row_to_skill(id, ds, wa, fd, ka, ps, ch, vs, zs, ns))
+        ) {
+            Ok((id, ds, wa, fd, ka, ps, ch, vs, zs, ns)) => Self::row_to_skill(id, ds, wa, fd, ka, ps, ch, vs, zs, ns),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    skill_id = %id,
+                    error = %e,
+                    "get_skill_owned: query failed (not NotFound), returning None"
+                );
+                None
+            }
+        }
     }
 
     fn query_skills(&self, sql: &str, params: &[rusqlite::types::Value]) -> Vec<Skill> {
         let conn = match self.pool.get() {
             Ok(c) => c,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    error = %e,
+                    "query_skills: pool get failed, returning empty"
+                );
+                return Vec::new();
+            }
         };
         let mut stmt = match conn.prepare(sql) {
             Ok(s) => s,
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    error = %e,
+                    "query_skills: prepare failed, returning empty"
+                );
+                return Vec::new();
+            }
         };
         let rows: Vec<SkillRow> = match stmt.query_map(
             rusqlite::params_from_iter(params.iter().map(|v| v as &dyn rusqlite::types::ToSql)),
@@ -626,7 +648,14 @@ impl SqliteRegistry {
             },
         ) {
             Ok(m) => m.filter_map(|r| r.ok()).collect(),
-            Err(_) => return Vec::new(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.templates",
+                    error = %e,
+                    "query_skills: query_map failed, returning empty"
+                );
+                return Vec::new();
+            }
         };
         let mut skills = Vec::with_capacity(rows.len());
         for (id, ds, wa, fd, ka, ps, ch, vs, zs, ns) in rows {
@@ -675,5 +704,101 @@ impl SqliteRegistry {
             ),
             &[rusqlite::types::Value::Text(tid.to_string())],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Construct an in-memory registry with the schema initialized.
+    fn fresh_registry() -> SqliteRegistry {
+        SqliteRegistry::new(None).expect("in-memory registry")
+    }
+
+    /// F5/F6/F7 — a registry whose `templates`/`skills`/`bundles` tables have
+    /// been dropped (simulating a corrupt or migrated schema) must not panic.
+    /// `count` returns 0, `list`/`list_skills_owned`/`list_bundles` return empty,
+    /// and `get_skill_owned`/`get_bundle` return `None`. The `warn!`s are the
+    /// operator's signal that the table is broken (previously these collapsed
+    /// silently — a locked table read as "0 templates" with no signal).
+    #[test]
+    fn methods_degrade_gracefully_on_missing_tables() {
+        let registry = fresh_registry();
+        // Drop the tables to simulate a corrupt/migrated schema.
+        {
+            let conn = registry.pool.get().expect("pool");
+            conn.execute_batch("DROP TABLE templates; DROP TABLE skills; DROP TABLE bundles;")
+                .expect("drop tables");
+        }
+        // `count` — query_row fails (no table), must return 0 not panic.
+        assert_eq!(
+            registry.count(),
+            0,
+            "count must return 0 on missing templates table"
+        );
+        // `list` — prepare fails, must return empty not panic.
+        assert!(
+            RegistryIndex::list(&registry, None).is_empty(),
+            "list must return empty on missing templates table"
+        );
+        // `list_skills_owned` — prepare fails, must return empty not panic.
+        assert!(
+            registry.list_skills_owned().is_empty(),
+            "list_skills_owned must return empty on missing skills table"
+        );
+        // `list_bundles` — prepare fails, must return empty not panic.
+        assert!(
+            registry.list_bundles().is_empty(),
+            "list_bundles must return empty on missing bundles table"
+        );
+        // `get_skill_owned` — query fails (not NotFound), must return None not panic.
+        assert!(
+            registry.get_skill_owned("any").is_none(),
+            "get_skill_owned must return None on missing skills table"
+        );
+        // `get_bundle` — query fails (not NotFound), must return None not panic.
+        assert!(
+            registry.get_bundle("any").is_none(),
+            "get_bundle must return None on missing bundles table"
+        );
+    }
+
+    /// F7 — `get_skill_owned` distinguishes `NotFound` (no row) from a query
+    /// error. Both return `None`, but only the latter `warn!`s. This test pins
+    /// the behavioral contract: a missing skill returns `None` without panic,
+    /// and a skill that exists returns `Some`.
+    #[test]
+    fn get_skill_owned_returns_none_for_missing_skill() {
+        let registry = fresh_registry();
+        assert!(
+            registry.get_skill_owned("does-not-exist").is_none(),
+            "get_skill_owned must return None for a missing skill (NotFound, no warn)"
+        );
+    }
+
+    /// Sanity: `count` returns the actual template count when the table is healthy.
+    #[test]
+    fn count_returns_actual_count_on_healthy_table() {
+        let registry = fresh_registry();
+        // Insert two templates directly.
+        {
+            let conn = registry.pool.get().expect("pool");
+            conn.execute(
+                "INSERT INTO templates (id, template_type, name, source_path) VALUES (?1, ?2, ?3, ?4)",
+                params!["t1", "flowdef", "Test 1", "/path/t1"],
+            )
+            .expect("insert t1");
+            conn.execute(
+                "INSERT INTO templates (id, template_type, name, source_path) VALUES (?1, ?2, ?3, ?4)",
+                params!["t2", "flowdef", "Test 2", "/path/t2"],
+            )
+            .expect("insert t2");
+        }
+        assert_eq!(
+            registry.count(),
+            2,
+            "count must return the actual template count"
+        );
     }
 }

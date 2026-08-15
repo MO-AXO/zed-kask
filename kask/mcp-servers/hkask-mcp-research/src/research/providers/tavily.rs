@@ -9,11 +9,11 @@ pub struct TavilyProvider {
 }
 
 impl TavilyProvider {
-    pub fn new(api_key: String) -> Self {
-        Self {
-            client: super::provider_http_client(),
+    pub fn new(api_key: String) -> Result<Self, WebError> {
+        Ok(Self {
+            client: super::provider_http_client()?,
             api_key,
-        }
+        })
     }
 }
 #[async_trait]
@@ -56,7 +56,7 @@ impl WebSearchProvider for TavilyProvider {
                 429 => WebError::RateLimited(format!("Tavily rate limited: {status}")),
                 _ => WebError::ProviderError(format!(
                     "Tavily API error {status}: {}",
-                    body.chars().take(200).collect::<String>()
+                    hkask_inference::openai_compat::sanitize_error_body(&body)
                 )),
             });
         }

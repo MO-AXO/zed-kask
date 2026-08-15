@@ -1,11 +1,21 @@
 # Task Breakdown Process Manifest
-# hKask v0.31.0 — Convergent plan generation
-# Adapted from addyosmani/planning-and-task-breakdown
+# hKask v0.34.0 — Convergent plan generation anchored on target conditions
+#
+# Target-condition anchoring (v0.35.0 redesign):
+#   The skill anchors on a TARGET CONDITION — the goal, end state, or outcome the
+#   agent is working toward — not a written specification to decompose. This
+#   follows the Improvement Kata pattern (see kata-improvement.yaml): the user's
+#   `task` string (injected by the skill tool as `context["task"]`) becomes the
+#   target condition. The skill grasps the current condition (what exists now),
+#   then decomposes the gap between current and target into component target
+#   conditions (sub-tasks), each with acceptance criteria framed as "what must be
+#   true for this sub-target to be achieved."
 #
 # PDCA cycle (single-producer loop — mirrors diataxis-diagram):
-#   1. PLAN      — read-only context + dependency graph + risks
-#   2. DECOMPOSE — slice vertically + write tasks in one producer (DO)
-#   3. EVALUATE  — score against six weighted criteria (CHECK)
+#   1. PLAN      — grasp the current condition relative to the target condition
+#                  (read-only context + dependency graph + risks)
+#   2. DECOMPOSE — decompose the target into component target conditions (DO)
+#   3. EVALUATE  — score against seven weighted criteria (CHECK)
 #   4. QUALITY-GATE — independent evaluation, bias detection (CHECK)
 #   5. CONVERGE  — normalized metric (CHECK)
 #   6. WRITE-PLAN — finalize tasks/plan.md + tasks/todo.md + pko_anchors (ACT)
@@ -18,12 +28,27 @@
 #     avoiding a forced non-converged write-plan execution (Finding 2). With
 #     improvement_gate: threshold_only the forced second pass added no value.
 #
+# v0.35.0 redesign (target-condition anchoring):
+#   1. Primary input renamed from `spec_or_intent` to `target_condition`. The
+#      skill tool injects `context["task"]` (the user's natural-language
+#      request); step 1's input_mapping maps `target_condition: "{{ task }}"`
+#      so the user's goal becomes the target condition the skill decomposes.
+#   2. Plan step reframed: grasp the current condition (what exists now) relative
+#      to the target condition, rather than "read the spec."
+#   3. Decompose step reframed: decompose the target condition into component
+#      target conditions (sub-tasks), each with acceptance criteria framed as
+#      "what must be true for this sub-target to be achieved."
+#   4. Evaluate step gains a seventh criterion: target_condition_coverage — do
+#      the decomposed tasks collectively achieve the target condition?
+#   5. Write-plan step includes the target condition at the top of plan.md so
+#      the plan is always anchored to what it's achieving.
+#
 # v0.31.0 refinement (self-improvement cycle 1, proposed-not-committed):
 #   1. Loop step now explicitly routes refinement_directives back to decompose
 #      (was implicit, depended on manifest executor preserving cross-iteration
 #      step results — now mechanical and documented).
-#   2. Plan step validates empty spec_or_intent (was silent failure — empty spec
-#      produced empty plan that converged at 0.0).
+#   2. Plan step validates empty target_condition (was silent failure — empty
+#      target produced empty plan that converged at 0.0).
 #   3. Evaluate and quality-gate now receive context_summary (Good Regulator —
 #      evaluators can check project-specific conventions, not just generic criteria).
 #   4. skill_catalog wired as manifest input (was in decompose contract but not
@@ -40,30 +65,35 @@ manifest:
   category: skill
   name: Task Breakdown
   description: >
-    Convergent planning process. Gathers read-only context and a dependency graph,
-    decomposes work vertically into small verifiable tasks with acceptance criteria
-    and checkpoints, evaluates the plan against sizing/red-flag/checkpoint criteria,
-    and iterates until the plan is stable. Finalizes tasks/plan.md and tasks/todo.md
-    with PKO process-axis anchors. Distinct from kanban-task-decomposition (single-pass
-    board populate) and tdd (consumes the plan one vertical slice at a time).
+    Convergent planning process anchored on target conditions. Grasps the current
+    condition relative to a target condition (the user's goal), decomposes the
+    gap into component target conditions (sub-tasks) with acceptance criteria
+    framed as "what must be true for this sub-target to be achieved," evaluates
+    the plan against sizing/coverage/red-flag/checkpoint criteria, and iterates
+    until the plan is stable. Finalizes tasks/plan.md and tasks/todo.md with PKO
+    process-axis anchors. Distinct from kanban-task-management (single-pass board
+    populate) and tdd (consumes the plan one vertical slice at a time).
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  # Layer A opt-in: enforce the declared `inputs` contract at the skill-execution
+  # boundary. The primary input is `target_condition`, mapped from `{{ task }}`
+  # (the user's natural-language request, injected by the skill tool as
+  # `context["task"]`). Without enforcement, an invocation that omits the
+  # target condition silently runs the cascade on an empty goal and produces a
+  # placeholder plan scoring 1.0/100. See hkask_templates::validate_inputs and
+  # the `code-review` manifest for the same opt-in pattern.
+  enforce_inputs: true
 
 convergence:
-  # 0.15 — same band as diataxis-diagram / idiomatic-rust ("maximally correct").
-  # A converged plan has: correct sizing, vertical slices, specific ACs, ordered
-  # dependencies, checkpoints between phases, and zero red flags.
-  threshold: 0.15
-  improvement_gate: threshold_only
-  max_iterations: 3
-  # 0: allow first-pass convergence. With threshold_only gating the forced second
-  # pass provides no improvement-tracking benefit and guarantees a non-converged
-  # write-plan execution. A first-pass-perfect plan (metric <= 0.15) converges now.
-  min_iterations: 0
-  convergence_field: step_5_result.convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
+  target_artifacts_field: "current_artifacts"
 
 gas:
   cap: 60000
@@ -77,10 +107,19 @@ rjoule:
   hard_limit: true
 
 inputs:
-  - name: spec_or_intent
+  - name: target_condition
     type: string
-    description: "The spec, feature description, or clear requirements to decompose"
-    required: true
+    description: >
+      The target condition — the goal, end state, or outcome to work toward.
+      Mapped from `{{ task }}` (the user's natural-language request injected by
+      the skill tool) in step 1's input_mapping. Declared as not required because
+      `task` is a system key (always injected by the skill tool, not declared in
+      `inputs`) — validate_inputs runs before step 1's input_mapping applies, so
+      requiring `target_condition` here would reject every invocation that relies
+      on the `task` mapping. The PLAN template's empty-target validation catches
+      an empty `task`. Callers MAY pass `target_condition` explicitly via the
+      context map to override the `task` mapping.
+    required: false
   - name: crate_scope
     type: string
     description: "Optional target crate or module path to scope the plan"
@@ -125,15 +164,19 @@ steps:
   - ordinal: 1
     action: select
     description: >
-      PLAN — read-only mode. Read the spec and relevant codebase sections,
-      identify patterns/conventions, build the dependency graph, note risks.
-      No code is written.
+      PLAN — grasp the current condition relative to the target condition.
+      Read-only mode: identify what exists now (patterns, conventions, existing
+      modules), build the dependency graph, note risks. The gap between the
+      current condition and the target condition drives the decomposition. No
+      code is written.
     renderer: minijinja
     template_ref: task-breakdown/task-breakdown-plan
     gas_cap: 6144
-    timeout_seconds: 90
+    timeout_seconds: 150
     input_mapping:
-      spec_or_intent: "{{ spec_or_intent }}"
+      # The user's natural-language request (injected by the skill tool as
+      # context["task"]) becomes the target condition this skill decomposes.
+      target_condition: "{{ task }}"
       crate_scope: "{{ crate_scope | default('') }}"
       code_context: "{{ code_context | default({}) }}"
       prior_outcome: "{{ prior_outcome | default({}) }}"
@@ -149,148 +192,162 @@ steps:
     renderer: minijinja
     template_ref: task-breakdown/task-breakdown-decompose
     gas_cap: 8192
-    timeout_seconds: 90
+    timeout_seconds: 180
     input_mapping:
       context_summary: "{{ step_1_result.context_summary | default('') }}"
       dependency_graph: "{{ step_1_result.dependency_graph | default([]) }}"
       risks: "{{ step_1_result.risks | default([]) }}"
-      refinement_directives: "{{ step_3_result.refinement_directives | default([]) }}"
+      refinement_directives: "{{ prev_step_4_result.refinement_directives | default([]) }}"
       parallelization_hint: "{{ parallelization_hint | default('') }}"
       skill_catalog: "{{ skill_catalog | default([]) }}"
-      prior_outcome: "{{ prior_outcome | default({}) }}"
-      prior_operator_feedback: "{{ prior_operator_feedback | default({}) }}"
 
+  # ── Step 3: Lisp deterministic step — task structural completeness check ──
+  # The LLM generates tasks in step 2, but LLMs are unreliable at checking
+  # every task has the required structural fields (title, acceptance_criteria).
+  # The manifest's own step 2 description flags "no ACs" as a catastrophic plan
+  # — this Lisp step catches that deterministically before the evaluate step
+  # runs. Returns a list of defect strings — empty = passed, non-empty = step 4
+  # (evaluate) notes the structural gaps.
   - ordinal: 3
-    action: select
+    action: compute
+    compute_ref: lisp.eval
     description: >
-      EVALUATE — score the plan against six weighted criteria. Emit task-addressable
-      refinement directives for criteria above threshold. v0.31.0: receives
-      context_summary so evaluators can check project-specific conventions
-      (Good Regulator), not just generic criteria.
-    renderer: minijinja
-    template_ref: task-breakdown/task-breakdown-evaluate
-    gas_cap: 6144
-    timeout_seconds: 60
+      Lisp task completeness check. Deterministically verifies every task has
+      a title and acceptance_criteria key present. Returns a list of defect
+      strings. No LLM round-trip.
+    gas_cap: 100
+    timeout_seconds: 10
     input_mapping:
-      tasks: "{{ step_2_result.tasks | default([]) }}"
-      dependency_graph: "{{ step_1_result.dependency_graph | default([]) }}"
-      slices: "{{ step_2_result.slices | default([]) }}"
-      context_summary: "{{ step_1_result.context_summary | default('') }}"
+      form: >
+        (let ((tasks (assoc "tasks" step_2_result)))
+          (if (is_null tasks)
+              (list "no_tasks_field")
+              (begin
+                (define check-task
+                  (lambda (ts acc)
+                    (if (is_null ts)
+                        acc
+                        (let ((t (car ts)))
+                          (let ((acc2 (if (is_null (assoc "title" t))
+                                          (cons "missing_title" acc)
+                                          acc)))
+                            (let ((acc3 (if (is_null (assoc "acceptance_criteria" t))
+                                            (cons "missing_acceptance_criteria" acc2)
+                                            acc2)))
+                              (check-task (cdr ts) acc3)))))))
+                (check-task tasks (list)))))
+      env:
+        step_2_result: "{{ step_2_result }}"
 
+  # ── Step 4: LLM probabilistic step — evaluate (renumbered from ordinal 3) ──
   - ordinal: 4
     action: select
     description: >
-      QUALITY-GATE — independent evaluation of the plan (fusion: false, deterministic
-      rubric, no self-assessment bias). Scores the six criteria independently of the
-      producer-coupled evaluate step and flags compensation masking. Mirrors
-      superforecasting's forecast-quality-gate separation of concerns. v0.31.0:
-      receives context_summary for project-specific convention checking.
+      EVALUATE — score the plan against seven weighted criteria. Emit task-addressable
+      refinement directives for criteria above threshold. v0.35.0: includes
+      target_condition_coverage (do the tasks collectively achieve the target?).
+      v0.31.0: receives context_summary so evaluators can check project-specific
+      conventions (Good Regulator), not just generic criteria. Receives task_defects
+      from the Lisp structural check (step 3) so the evaluator can flag structural
+      gaps in its scoring.
     renderer: minijinja
-    template_ref: task-breakdown/task-breakdown-quality-gate
-    gas_cap: 4096
-    timeout_seconds: 60
+    template_ref: task-breakdown/task-breakdown-evaluate
+    gas_cap: 6144
+    timeout_seconds: 150
     input_mapping:
       tasks: "{{ step_2_result.tasks | default([]) }}"
-      slices: "{{ step_2_result.slices | default([]) }}"
       dependency_graph: "{{ step_1_result.dependency_graph | default([]) }}"
-      evaluation_result: "{{ step_3_result }}"
+      slices: "{{ step_2_result.slices | default([]) }}"
       context_summary: "{{ step_1_result.context_summary | default('') }}"
-    fusion: false
+      target_condition: "{{ task | default('') }}"
 
   - ordinal: 5
     action: select
     description: >
-      CONVERGE — compute normalized metric from the INDEPENDENT gate's scores (not the
-      producer's self-assessment). Below 0.15 means the plan is complete, correctly
-      ordered, properly sized, and free of red flags. Applies the materiality guard
-      using the carried prior_metric to detect a stable-but-unconverged plan.
+      QUALITY-GATE — independent evaluation of the plan (deterministic
+      rubric, no self-assessment bias). Scores the seven criteria independently of the
+      producer-coupled evaluate step and flags compensation masking. Mirrors
+      superforecasting's forecast-quality-gate separation of concerns. v0.35.0:
+      includes target_condition_coverage. v0.31.0: receives context_summary for
+      project-specific convention checking.
     renderer: minijinja
-    template_ref: task-breakdown/task-breakdown-convergence
-    gas_cap: 2048
-    timeout_seconds: 30
+    template_ref: task-breakdown/task-breakdown-quality-gate
+    gas_cap: 4096
+    timeout_seconds: 150
     input_mapping:
+      tasks: "{{ step_2_result.tasks | default([]) }}"
+      slices: "{{ step_2_result.slices | default([]) }}"
+      dependency_graph: "{{ step_1_result.dependency_graph | default([]) }}"
       evaluation_result: "{{ step_4_result }}"
-      iteration: "{{ loop_context.iteration | default(1) }}"
-      prior_metric: "{{ prior_metric | default(null) }}"
-    fusion: false
+      context_summary: "{{ step_1_result.context_summary | default('') }}"
+      target_condition: "{{ task | default('') }}"
 
+  # ── Step 6: Lisp deterministic step — convergence score from evaluate output ──
+  # The evaluate step (step 4) produces `weighted_total` (0 = perfect,
+  # 1 = severely deficient). Lower = more converged. Replaces the phantom
+  # `convergence_metric` binding that silently defaulted to 1.0.
   - ordinal: 6
+    action: compute
+    compute_ref: lisp.eval
+    description: >
+      Lisp convergence score. Deterministically reads the evaluate step's
+      `weighted_total` (0 = perfect plan, 1 = severely deficient) and returns
+      it as the Cauchy hypotenuse signal. Missing field degrades to 1.0
+      (not converged). No LLM round-trip.
+    gas_cap: 100
+    timeout_seconds: 10
+    input_mapping:
+      form: >
+        (let ((wt (assoc "weighted_total" step_4_result)))
+          (if (is_null wt) 1.0 wt))
+      env:
+        step_4_result: "{{ step_4_result }}"
+
+  - ordinal: 7
     action: select
     description: >
-      WRITE-PLAN — finalize tasks/plan.md (overview, architecture decisions, phased
-      task list with checkpoints, risks, open questions) and tasks/todo.md (checklist),
-      with a pko_anchors map giving each element a PKO process-axis identity.
-      v0.31.0: includes refinement_history section in plan.md showing what was
-      refined across PDCA iterations.
+      WRITE-PLAN — finalize tasks/plan.md (target condition, overview, architecture
+      decisions, phased task list with checkpoints, risks, open questions) and
+      tasks/todo.md (checklist), with a pko_anchors map giving each element a PKO
+      process-axis identity. v0.35.0: includes the target condition at the top of
+      plan.md so the plan is always anchored to what it's achieving. v0.31.0:
+      includes refinement_history section in plan.md showing what was refined
+      across PDCA iterations.
     renderer: minijinja
     template_ref: task-breakdown/task-breakdown-write-plan
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 180
     input_mapping:
       context_summary: "{{ step_1_result.context_summary | default('') }}"
+      target_condition: "{{ task | default('') }}"
       dependency_graph: "{{ step_1_result.dependency_graph | default([]) }}"
       tasks: "{{ step_2_result.tasks | default([]) }}"
       slices: "{{ step_2_result.slices | default([]) }}"
       risks: "{{ step_1_result.risks | default([]) }}"
       evaluation_result: "{{ step_4_result }}"
-      refinement_directives: "{{ step_3_result.refinement_directives | default([]) }}"
+      refinement_directives: "{{ step_4_result.refinement_directives | default([]) }}"
 
-  - ordinal: 7
+  - ordinal: 8
     action: loop
     description: >
-      If convergence not met (metric > 0.15) and refinement directives exist, loop
+      If convergence not met and refinement directives exist, loop
       back to DECOMPOSE (step 2) with directives as focused, task-addressable
       improvement targets. v0.31.0: explicitly routes refinement_directives back
       to decompose (was implicit, depended on manifest executor preserving
-      cross-iteration step results). Carries the prior convergence_metric forward
-      so the next convergence check's materiality guard can detect a stable-but-
-      unconverged plan. Each iteration narrows the gap.
+      cross-iteration step results). Each iteration narrows the gap.
     input_mapping:
       loop_target: "{{ 2 }}"
-      prior_metric: "{{ step_5_result.convergence_metric }}"
-      refinement_directives: "{{ step_3_result.refinement_directives | default([]) }}"
+      convergence_signal: "{{ step_6_result }}"
+      refinement_directives: "{{ step_4_result.refinement_directives | default([]) }}"
 
 error_handling:
   on_gas_exceeded: abort
+  # on_timeout: retry is now enforced — StepMachine::dispatch_with_retry
+  # retries a TemplateError::Timeout up to max_retries times.
   on_timeout: retry
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: task-breakdown/task-breakdown-plan
-      gas_budget: 6144
-    - resource: template
-      action: render
-      template_id: task-breakdown/task-breakdown-decompose
-      gas_budget: 8192
-    - resource: template
-      action: render
-      template_id: task-breakdown/task-breakdown-evaluate
-      gas_budget: 6144
-    - resource: template
-      action: render
-      template_id: task-breakdown/task-breakdown-quality-gate
-      gas_budget: 4096
-    - resource: template
-      action: render
-      template_id: task-breakdown/task-breakdown-convergence
-      gas_budget: 2048
-    - resource: template
-      action: render
-      template_id: task-breakdown/task-breakdown-write-plan
-      gas_budget: 4096
-    - resource: manifest
-      action: execute
-      template_id: task-breakdown
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true
 
 ledger:
   emit_spans: true

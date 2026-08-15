@@ -1,11 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- translate
-- adapt
-- extract
-- compose
-- verify
 contract:
   input:
     source_skill: string
@@ -14,7 +8,6 @@ contract:
   output:
     translated_skill: string
     translation_summary: object
-energy_cap: 8192
 visibility: Public
 ---
 {# Template: skill-maintenance/skill-maintenance-translate.j2 #}
@@ -51,12 +44,12 @@ You are a skill translator. Convert a classified source skill into a hKask regis
 
 ## Translation Rules
 
-1. **Manifest** — Produce a `manifest.yaml` with crate metadata and one template entry per classified step. Each entry must declare: id, path, type (KnowAct/WordAct/FlowDef/RenderAct), lexicon_terms, description.
+1. **Manifest** — Produce a `manifest.yaml` with crate metadata and one template entry per classified step. Each entry must declare: id, path, type (KnowAct/WordAct/FlowDef/RenderAct), description.
 2. **Templates** — Produce one `.j2` file per classified step:
    - Cognitive steps → KnowAct `.j2` with `[inference]` frontmatter, system prompt, `{{ variables }}`, JSON output schema.
    - Workflow steps → WordAct (transformation) or FlowDef (dispatch/routing) `.j2` with same structure.
    - Reference content → RenderAct `.j2` or `.yaml` (no inference).
-   - Guardrails → Encoded as `visibility`, `energy_cap`, and constraints in `.j2` body.
+   - Guardrails → Encoded as `visibility` and constraints in `.j2` body.
 3. **Process manifest** — Produce a `registry/manifests/<skill-name>.yaml` FlowDef cascade with:
    - `manifest.category: skill` (or `pipeline`/`runtime-config` for non-agent infrastructure)
    - `convergence:` block (threshold 0.05-0.30, max_iterations, min_iterations, convergence_field, on_not_reached)
@@ -64,10 +57,10 @@ You are a skill translator. Convert a classified source skill into a hKask regis
    - `rjoule:` block (cap > 0 if any step uses inference, 0 otherwise)
    - `steps:` array with canonical actions only
 4. **State model** — hKask skills are stateless by default. Source state → `.j2` contract input/output.
-5. **Consent model** — hKask uses OCAP. User-confirmation gates → `.j2` contract visibility.
+5. **Consent model** — hKask uses capability matching. User-confirmation gates → `.j2` contract visibility.
 6. **Observability** — Map to Regulation span references in `.j2` body.
 7. **Domain references** — Substitute using the domain substitution table.
-8. **Validation** — template_type MUST be KnowAct/WordAct/FlowDef/RenderAct. visibility MUST be Private/Public/Shared. energy_cap MUST be 2048-8192.
+8. **Validation** — template_type MUST be KnowAct/WordAct/FlowDef/RenderAct. visibility MUST be Private/Public/Shared. 
 
 ### Source Action → Canonical Action Mapping
 
@@ -133,7 +126,6 @@ templates:
   - id: <skill-name>/<template-id>
     path: <template-id>.j2
     type: KnowAct | WordAct | FlowDef
-    lexicon_terms: [term, ...]
     description: <one-line>
 vocabulary_terms: [term, ...]
 ```
@@ -143,14 +135,12 @@ vocabulary_terms: [term, ...]
 ```
 [inference]
 template_type: KnowAct | WordAct | FlowDef
-lexicon_terms: [term, ...]
 contract:
   input:
     <field>: <type>
   output:
     <field>: <type>
-  energy_cap: <2048-8192>
-  visibility: Private | Public | Shared
+visibility: Private | Public | Shared
 ---
 {# Template header #}
 [System prompt, {{ variables }}, JSON output schema]
@@ -207,13 +197,14 @@ Respond with a JSON object:
 - The primary deliverable is the registry crate (manifest.yaml + .j2 templates) plus the process manifest (registry/manifests/<name>.yaml). SKILL.md is derived from them.
 - `template_type` must be KnowAct, WordAct, FlowDef, or RenderAct — never Cognition, Prompt, or Process.
 - `visibility` must be Private, Public, or Shared.
-- `energy_cap` must be in 2048–8192 range.
-- `lexicon_terms` must exist in the vocabulary or be proposed as new terms.
+- `template_type` must be one of KnowAct, WordAct, FlowDef, RenderAct.
 - `contract.input` and `contract.output` must be structured JSON types.
 - Every step in the process manifest must use a canonical action (select, populate, compute, execute, feedback, validate, retrieve, render, flowdef, loop, choice, abort, escalate).
 - The process manifest must have a `gas:` block with `cap > 0`.
 - The process manifest must have an `rjoule:` block with `cap > 0` if any step uses `action: select`.
 - The process manifest must have a `convergence:` block (for `category: skill`).
+- Every `lisp.eval` compute step must have a non-empty `form` string using only supported special forms and builtins (E12, E14). `=` is numeric-only; string equality uses `string=`. String concatenation uses `concat`. List concatenation uses `append`. Boolean literals are `true`/`false`/`nil`.
+- Every `{% raw %}{{ step_N_result }}{% endraw %}` reference in a `lisp.eval` step's `env` must point backward (ordinal < current). Bare-list results must be bound directly, not via `.field` (E13).
 - Every step from `step_classifications` must appear in the output (preserved, adapted, or dropped with reason).
 - Do not invent hKask tools or MCP servers that do not exist. Use the domain substitution table.
 - Do not execute arbitrary Python code in Jinja2 expressions (sandboxed execution).

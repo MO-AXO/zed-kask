@@ -1,20 +1,55 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use crate::DelegationToken;
 use hkask_types::NotFound;
 
-/// Governance membrane error types.
+/// Tool dispatch error types.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ToolPortError {
-    #[error("Capability denied: {0}")]
-    CapabilityDenied(String),
-    #[error("Gas budget exceeded: {0}")]
+    /// The runaway-loop breaker tripped: this agent exhausted its per-tick call
+    /// ceiling. Not an authorization decision — see [`ToolPort::invoke`].
+    #[error("Call cap exceeded: {0}")]
     EnergyBudgetExceeded(String),
     #[error("Tool not found: {0}")]
     NotFound(NotFound),
+    /// The tool could not be reached and the request **provably never left**:
+    /// there was no live connection, or the transport rejected the send.
+    ///
+    /// Distinct from [`ToolPortError::InvocationFailed`] because the call never
+    /// ran, so a caller may retry it without risking a duplicate side effect.
+    /// Callers that render errors to a user should present this as a transient
+    /// connection state rather than a failure of the requested operation.
+    #[error("Tool unavailable: {0}")]
+    Unavailable(String),
+    /// The request was delivered but the connection dropped before a response
+    /// arrived. **The tool may or may not have applied its effect.**
+    ///
+    /// This is deliberately *not* retryable. `rmcp` reports both "the send
+    /// failed" and "the response channel dropped" as `ServiceError::
+    /// TransportClosed`, so once a request has been handed to a live peer, a
+    /// transport loss cannot be read as proof of non-delivery. Auto-retrying
+    /// here would duplicate side effects — two tasks created, a hire charged
+    /// twice. The operator must reconcile state and decide.
+    #[error("Tool outcome unknown (connection lost mid-call): {0}")]
+    Interrupted(String),
+    /// The call reached the tool and the tool failed. Retrying repeats it.
     #[error("Tool invocation failed: {0}")]
     InvocationFailed(String),
+}
+
+impl ToolPortError {
+    /// Whether re-issuing the identical call is both plausibly useful and free
+    /// of duplicate-side-effect risk.
+    ///
+    /// True only for [`ToolPortError::Unavailable`], where the request provably
+    /// never reached the tool. [`ToolPortError::Interrupted`] is excluded on
+    /// purpose: its outcome is unknown, so a retry could apply an effect twice.
+    /// A cap breach needs a new regulation tick, and a failed or unknown tool
+    /// will fail identically.
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, ToolPortError::Unavailable(_))
+    }
 }
 
 impl From<NotFound> for ToolPortError {
@@ -26,18 +61,25 @@ impl From<NotFound> for ToolPortError {
 /// Pinned boxed future type used by [`ToolPort`] for dyn-compatibility.
 pub type ToolFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Governance membrane for MCP tool invocation.
+/// Dispatch port for MCP tool invocation.
 ///
-/// `McpRuntime` checks OCAP authority → budget → dispatch → account cost → emit outcome.
+/// `McpRuntime` meters the call → dispatches → emits the outcome span.
 ///
-/// # Authentication asymmetry
+/// # This port does not authorize
 ///
-/// `invoke()` requires a [`DelegationToken`] — every tool execution is OCAP-gated (P4).
-/// `discover_tools()` and `get_tool_info()` are **intentionally unauthenticated** — tool
-/// schemas are public metadata (the agent must know what tools exist before it can request
-/// a token to use them). This follows the MCP protocol's own design: `tools/list` is an
-/// unauthenticated handshake. OCAP enforcement applies at the actuator boundary
-/// (`invoke`), not the sensor boundary (`discover`).
+/// `invoke` performs **no** per-call capability check. It previously compared a
+/// `DelegationToken`'s declared `(resource, resource_id, action)` against the
+/// invoked tool, but every production mint site derived `resource_id` from the
+/// same tool name it then passed to `invoke` — the comparison was a value
+/// against itself and could not deny. Authority is enforced *outside* this
+/// port, at the boundaries that hold a list the caller cannot choose:
+///
+/// - the per-request `tool_allowlist` on the inference IPC dispatch
+///   (`kask_bridge::inference_ipc_server`, fail-closed on missing/empty),
+/// - each swarm agent card's declared `mcp_tools` allowlist,
+/// - the per-server MCP env/credential allowlists.
+///
+/// The `agent` argument is an accounting identity, not a credential.
 ///
 /// # Dyn-compatibility
 ///
@@ -45,44 +87,38 @@ pub type ToolFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// is object-safe: `Arc<dyn ToolPort>` works. This eliminates the adapter layers that
 /// previously wrapped `McpRuntime` to satisfy a non-dyn `ToolPort`.
 pub trait ToolPort: Send + Sync {
-    /// Invoke a tool. Requires a [`DelegationToken`] proving OCAP authorization.
+    /// Invoke a tool on behalf of `agent`.
     ///
-    /// pre:  token must be valid and not expired
-    /// post: returns tool output or `ToolPortError::CapabilityDenied` if token is insufficient
+    /// `agent` identifies who to charge and attribute the call to — it is a
+    /// meter reading, not a capability. The only way this returns an error
+    /// before dispatch is [`ToolPortError::EnergyBudgetExceeded`], the
+    /// runaway-loop breaker.
+    ///
+    /// post: returns tool output, or `EnergyBudgetExceeded` if `agent` exhausted
+    ///       its per-tick call ceiling
     fn invoke<'a>(
         &'a self,
         server: &'a str,
         tool: &'a str,
         args: serde_json::Value,
-        token: &'a DelegationToken,
+        agent: hkask_types::WebID,
     ) -> ToolFuture<'a, Result<serde_json::Value, ToolPortError>>;
 
-    /// Discover available tools. Public metadata — no token required.
+    /// Discover available tools.
     ///
-    /// Tool schemas are public per the MCP protocol design:
-    /// `tools/list` is an unauthenticated handshake. OCAP enforcement
-    /// applies at the actuator boundary (`invoke`), not here.
+    /// Tool schemas are public per the MCP protocol design: `tools/list` is an
+    /// unauthenticated handshake.
     fn discover_tools<'a>(&'a self) -> ToolFuture<'a, Vec<String>>;
 
-    /// Get metadata for a specific tool. Public metadata — no token required.
+    /// Get metadata for a specific tool.
     fn get_tool_info<'a>(&'a self, tool_name: &'a str) -> ToolFuture<'a, Option<ToolInfo>>;
 }
 
-/// Canonical tool metadata for OCAP capability matching.
+/// Canonical tool metadata.
 #[derive(Debug, Clone)]
 pub struct ToolInfo {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
     pub server_id: String,
-    /// The capability required to invoke this tool, derived from the server ID.
-    /// Maps `hkask-mcp-<domain>` → `tool:<domain>:execute`.
-    /// `None` for servers that don't follow the `hkask-mcp-` naming convention.
-    pub required_capability: Option<String>,
-    /// FIDES taint label for information flow control (Layer 5 defense).
-    /// Source: Microsoft Research FIDES (arXiv:2505.23643)
-    /// Defaults to `Pure` (no side effects, no external data).
-    /// `Source`: returns untrusted data. `Sink`: state-changing.
-    /// `Endorser`: trusted extraction from untrusted input.
-    pub taint: hkask_types::ToolTaint,
 }

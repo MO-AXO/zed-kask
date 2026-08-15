@@ -1,5 +1,5 @@
 # Pragmatic Cybernetics Process Manifest
-# ℏKask v0.31.0 — Loop diagnostics as convergent PDCA
+# ℏKask v0.34.0 — Loop diagnostics as convergent PDCA
 # EXTENDED: Wired variety-check and vsm-map templates (previously orphaned).
 
 manifest:
@@ -12,16 +12,16 @@ manifest:
     computes convergence, and iterates until diagnostic recommendations are
     stable for intervention design.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  threshold: 0.25
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: step_4_result.convergence_metric
+  convergence_mode: ""
+  # No convergence-check compute step: the loop runs N iterations then escalates.
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
 
 gas:
@@ -38,10 +38,13 @@ rjoule:
 inputs:
   - name: loop_description
     type: string
-    required: true
+    required: false
   - name: system_context
     type: string
     required: false
+
+ledger:
+  span_namespace: reg.skill.pragmatic-cybernetics
 
 steps:
   - ordinal: 1
@@ -50,9 +53,9 @@ steps:
     renderer: minijinja
     template_ref: pragmatic-cybernetics/cybernetics-analyze-loop
     gas_cap: 5000
-    timeout_seconds: 45
+    timeout_seconds: 150
     input_mapping:
-      loop_description: "{{ loop_description }}"
+      loop_description: "{{ task | default(loop_description) }}"
       system_context: "{{ system_context | default('') }}"
 
   - ordinal: 2
@@ -61,7 +64,7 @@ steps:
     renderer: minijinja
     template_ref: pragmatic-cybernetics/cybernetics-variety-check
     gas_cap: 4000
-    timeout_seconds: 45
+    timeout_seconds: 150
     input_mapping:
       loop_analysis: "{{ step_1_result }}"
       system_context: "{{ system_context | default('') }}"
@@ -72,32 +75,20 @@ steps:
     renderer: minijinja
     template_ref: pragmatic-cybernetics/cybernetics-vsm-map
     gas_cap: 4000
-    timeout_seconds: 45
+    timeout_seconds: 150
     input_mapping:
       loop_analysis: "{{ step_1_result }}"
       variety_result: "{{ step_2_result | default({}) }}"
       system_context: "{{ system_context | default('') }}"
 
   - ordinal: 4
-    action: select
-    description: Compute normalized convergence metric for cybernetics cycle.
-    renderer: minijinja
-    template_ref: shared/convergence-check
-    gas_cap: 2000
-    timeout_seconds: 30
-    input_mapping:
-      primary_result:
-        loop_analysis: "{{ step_1_result }}"
-        variety_assessment: "{{ step_2_result }}"
-        vsm_mapping: "{{ step_3_result }}"
-      convergence_description: "loop diagnostics are stable, variety deficits are addressed, and VSM viability is assessed"
-      include_blockers: true
-
-  - ordinal: 5
     action: loop
     description: Re-enter cybernetics cycle if convergence is not met.
     input_mapping:
       loop_target: "{{ 1 }}"
+      # Push the unviable-component count into convergence_signal so the Cauchy
+      # criterion can detect when the diagnostic has stopped moving.
+      convergence_signal: "{{ step_3_result.unviable_components | default([]) | length }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -105,30 +96,3 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: pragmatic-cybernetics/cybernetics-analyze-loop
-      gas_budget: 5000
-    - resource: template
-      action: render
-      template_id: pragmatic-cybernetics/cybernetics-variety-check
-      gas_budget: 4000
-    - resource: template
-      action: render
-      template_id: pragmatic-cybernetics/cybernetics-vsm-map
-      gas_budget: 4000
-    - resource: template
-      action: render
-      template_id: shared/convergence-check
-      gas_budget: 2000
-    - resource: manifest
-      action: execute
-      template_id: pragmatic-cybernetics
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true

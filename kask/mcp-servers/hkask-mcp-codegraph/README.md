@@ -4,7 +4,7 @@ Code understanding MCP server — exposes `hkask-codegraph` as a set of MCP tool
 
 Part of hKask's code intelligence layer. Indexes the current workspace on first tool invocation, with incremental re-indexing on subsequent calls.
 
-## Tools (10)
+## Tools (9)
 
 | Tool | Description | Requires Config |
 |------|-------------|-----------------|
@@ -16,7 +16,6 @@ Part of hKask's code intelligence layer. Indexes the current workspace on first 
 | `codegraph_structure` | Get project overview: top symbols ranked by PageRank | — |
 | `codegraph_stats` | Get index statistics with optional health and meta breakdown | — |
 | `codegraph_reindex` | Force full re-index of the workspace | — |
-| `codegraph_feedback` | Record which symbols from a context_id were actually used (feedback loop) | — |
 | `codegraph_index_embeddings` | Generate embeddings for all symbols via inference router | `DEEPINFRA_API_KEY` or `OPENROUTER_API_KEY` |
 
 ## Context Budgets
@@ -56,7 +55,6 @@ Part of hKask's code intelligence layer. Indexes the current workspace on first 
 | `AnalysisRequest` | `kind` (dead_code/complexity) |
 | `StructureRequest` | `limit` (default 20) |
 | `StatsRequest` | `include_health` (bool), `include_meta` (bool) |
-| `FeedbackRequest` | `context_id`, `symbols_provided`, `symbols_used` |
 | `EmbedIndexRequest` | `model` (optional), `batch_size` (default 32) |
 
 ## Running
@@ -80,7 +78,7 @@ DEEPINFRA_API_KEY=your-key HKASK_CODEGRAPH_DB=/path/to/codegraph.db hkask-mcp-co
 - `hkask-codegraph` — Domain engine (search, traversal, analysis, context)
 - `hkask-mcp` — MCP server framework (`mcp_server!`, `execute_tool`, `run_server`)
 - `hkask-types` — `WebID`
-- `hkask-inference` — `EmbeddingRouter` for embedding generation
+- `hkask-inference` — `InferenceIpcClient` for embedding generation (routes through zed's `LanguageModelEmbeddingPort` via IPC bridge)
 - `rmcp` — MCP protocol
 - `minijinja` — Jinja2 templates for embedding prompts
 - `tracing` — Regulation event emission

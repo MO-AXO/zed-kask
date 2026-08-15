@@ -10,10 +10,7 @@ description = "Cybernetic Nervous System for hKask"
 path = "src/hkask_regulation.rs"
 
 [dependencies]
-hkask-types = { path = "../hkask-types" }
-# Regulation defines WalletBudgetPort; regulation::WalletManager implements it
-# directly (gas/rJoule tracking without chain/wallet infrastructure).
-hkask-storage = { path = "../hkask-storage" }
+hkask-types.workspace = true
 
 serde.workspace = true
 serde_json.workspace = true
@@ -28,7 +25,10 @@ parking_lot = { workspace = true }
 
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
+[lints]
+workspace = true
+
 [dev-dependencies]
-hkask-storage = { path = "../hkask-storage" }
+hkask-test-harness.workspace = true
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

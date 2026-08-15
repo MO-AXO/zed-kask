@@ -1,18 +1,12 @@
 [inference]
+max_tokens = 2048
 template_type: WordAct
-lexicon_terms:
-- prompt
-- acknowledge
-- affirm
-- adapt
-- propose
 contract:
   input:
     context: object
     contribution: string
   output:
     response: string
-energy_cap: 4096
 visibility: Public
 ---
 {# hKask v0.31.0 — A Minimal Viable Container for UserPods #}

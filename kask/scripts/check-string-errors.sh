@@ -20,11 +20,18 @@ trap 'rm -f "$TMPFILE"' EXIT
 # `kask_bridge` and panel `kask_panel` are zed-kask-side adapters (D8/D10)
 # that legitimately use `String` errors to cross the GPUI/tokio boundary,
 # not hKask library code. See zed-host-architecture-plan.md:640.
+#
+# `hkask-test-harness`'s oracle API (`hkask_test_harness.rs`) is also excluded:
+# `oracle_invariant` returns `Result<(), String>` where the `String` is a
+# human-readable verdict message fed to `OracleVerdict::Fail(String)` — it is
+# never matched on variants, so `String` is the correct type, not an
+# anti-pattern. The discarded-error `oracle_inconclusive` was converted to
+# `Option<JsonValue>`; only the verdict-message case remains `String`.
 grep -rn -- 'Result<' crates/hkask-* mcp-servers/hkask-* \
     --include='*.rs' \
     --exclude-dir=target \
     2>/dev/null \
-    | grep -vE '/(tests|examples)/|main\.rs' \
+    | grep -vE '/(tests|examples)/|main\.rs|crates/hkask-test-harness/src/hkask_test_harness\.rs' \
     > "$TMPFILE" || true
 
 while IFS=: read -r file line text; do
@@ -45,7 +52,7 @@ if [ $FAIL -eq 0 ]; then
 else
     echo ""
     echo "FAIL: Result<_, String> patterns found. Replace String error types with thiserror enums."
-    echo "See: crates/hkask-acp/src/cloud.rs (CloudError example)"
-    echo "     crates/hkask-agents/src/curator/semantic_sync.rs (SyncError example)"
+    echo "See: crates/hkask-keystore/src/error.rs (KeychainError example)"
+    echo "     crates/hkask-memory/src/episodic.rs (EpisodicError example)"
     exit 1
 fi

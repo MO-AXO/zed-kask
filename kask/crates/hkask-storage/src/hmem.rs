@@ -4,6 +4,7 @@ pub mod archive;
 use crate::database::value::{DbRow, DbValue};
 use chrono::{DateTime, Utc};
 use hkask_types::HMemEntry;
+use hkask_types::HMemOntology;
 use hkask_types::id::{HMemId, WebID};
 use hkask_types::time::now_rfc3339;
 use hkask_types::visibility::AccessControl;
@@ -50,9 +51,12 @@ pub struct HMem {
     /// Last time this h_mem was recalled. Starts at creation time.
     /// Updated on each recall — resets the decay clock.
     pub recalled_at: DateTime<Utc>,
-    /// 5W1H dimension — which curator ontology category this h_mem belongs to.
-    /// Maps to `OntologyAnchor::Core` (universal ground). None = unclassified.
-    pub dimension: Option<Dimension>,
+    /// Dual-axis ontological anchoring (P5.4): DC+BIBO state axis + PKO process
+    /// axis + 5W1H universal ground + open-world domain tags. `None` =
+    /// unclassified (the pre-ontology default; legacy h_mems carry no
+    /// ontology). Queryable via `json_extract(ontology, ...)` so h_mems and
+    /// corpus `TaggedChunk`s share a common substrate for graph reasoning.
+    pub ontology: Option<HMemOntology>,
 }
 impl HMem {
     /// Create a new HMem with required fields.
@@ -73,7 +77,7 @@ impl HMem {
             confidence: Confidence::full(),
             access: AccessControl::new(owner_webid),
             recalled_at: now,
-            dimension: None,
+            ontology: None,
         }
     }
     /// Set confidence on a HMem.
@@ -103,31 +107,54 @@ impl HMem {
         self.access = self.access.with_visibility(v);
         self
     }
-    /// Set 5W1H dimension on a HMem.
+    /// Set the ontological anchoring on a HMem.
+    ///
+    /// expect: "The system provides durable storage for h_mem data"
+    /// \[P3\] Motivating: Generative Space — builder: set ontology
+    /// \[P8\] Constraining: Semantic Grounding — dual-axis anchoring (P5.4)
+    /// post: returns Self with ontology set (builder pattern)
+    pub fn with_ontology(mut self, ontology: HMemOntology) -> Self {
+        self.ontology = Some(ontology);
+        self
+    }
+
+    /// Set 5W1H dimension on a HMem. Convenience builder that initializes
+    /// the ontology blob if absent and adds the dimension to it.
     ///
     /// expect: "The system provides durable storage for h_mem data"
     /// \[P3\] Motivating: Generative Space — builder: set dimension
     /// \[P8\] Constraining: Semantic Grounding — anchors to 5W1H ontology tier
-    /// post: returns Self with dimension set (builder pattern)
+    /// post: returns Self with the dimension added to the ontology blob
     pub fn with_dimension(mut self, d: Dimension) -> Self {
-        self.dimension = Some(d);
+        let ont = self.ontology.take().unwrap_or_default();
+        self.ontology = Some(ont.with_dimension(d));
         self
     }
-    /// Check if this is an episodic h_mem (has perspective).
+    /// Check if this is an episodic h_mem (carries a PKO procedure in its
+    /// ontology blob). The episodic/semantic distinction is carried by the
+    /// `HMemOntology` blob (P5.4 dual-axis anchoring): an episodic experience
+    /// carries PKO anchoring (`pko_procedure`, `pko_step`); a semantic fact
+    /// carries DC+BIBO anchoring with no PKO procedure.
     ///
     /// expect: "The system provides durable storage for h_mem data"
     /// \[P8\] Motivating: Semantic Grounding — predicate for episodic
-    /// post: returns true iff perspective is Some
+    /// post: returns true iff the ontology blob has a PKO procedure
     pub fn is_episodic(&self) -> bool {
-        self.access.is_episodic()
+        self.ontology
+            .as_ref()
+            .is_some_and(|o| o.pko_procedure.is_some())
     }
-    /// Check if this is a semantic h_mem (public, no perspective).
+    /// Check if this is a semantic h_mem (no PKO procedure in its ontology
+    /// blob). See [`is_episodic`](Self::is_episodic) for the discriminator
+    /// rationale.
     ///
     /// expect: "The system provides durable storage for h_mem data"
     /// \[P8\] Motivating: Semantic Grounding — predicate for semantic
-    /// post: returns true iff visibility is Public and perspective is None
+    /// post: returns true iff the ontology blob has no PKO procedure
     pub fn is_semantic(&self) -> bool {
-        self.access.is_semantic()
+        self.ontology
+            .as_ref()
+            .is_some_and(|o| o.pko_procedure.is_none())
     }
 }
 /// HMem store — backed by a provider-agnostic DatabaseDriver.
@@ -140,36 +167,20 @@ pub struct HMemStore {
 impl HMemStore {
     /// Create from a DatabaseDriver — provider-agnostic constructor.
     ///
-    /// Schema init failure is propagated rather than swallowed — proceeding
-    /// with a missing `hmems` table would surface as confusing "no such table"
-    /// errors on every subsequent query.
+    /// The `hmems` table schema is owned by `core/sql/schema.sql`, which
+    /// `Database::sqlite_pool` runs on every pool creation (file and
+    /// in-memory). This constructor does NOT re-create the table — doing so
+    /// would duplicate the schema and drift (the prior `CREATE TABLE IF NOT
+    /// EXISTS` here declared `recalled_at TEXT` nullable while `schema.sql`
+    /// declared it `NOT NULL DEFAULT`, and the `IF NOT EXISTS` no-op meant
+    /// the live schema depended on which ran first).
     pub fn from_driver(
         driver: Arc<dyn crate::database::driver::DatabaseDriver>,
     ) -> Result<Self, InfrastructureError> {
-        let store = Self {
+        Ok(Self {
             driver,
             encryptor: None,
-        };
-        store.driver().execute_batch(
-            "CREATE TABLE IF NOT EXISTS hmems (
-                id TEXT PRIMARY KEY,
-                entity TEXT NOT NULL,
-                attribute TEXT NOT NULL,
-                value TEXT NOT NULL,
-                valid_from TEXT NOT NULL,
-                valid_to TEXT,
-                recalled_at TEXT,
-                confidence REAL NOT NULL DEFAULT 1.0,
-                perspective TEXT,
-                visibility TEXT NOT NULL DEFAULT 'private',
-                owner_webid TEXT NOT NULL,
-                dimension INTEGER
-            );
-            CREATE INDEX IF NOT EXISTS idx_hmems_entity ON hmems(entity);
-            CREATE INDEX IF NOT EXISTS idx_hmems_attribute ON hmems(attribute);
-            CREATE INDEX IF NOT EXISTS idx_hmems_entity_attribute ON hmems(entity, attribute);",
-        )?;
-        Ok(store)
+        })
     }
 
     /// Attach an encryptor for value encryption (passphrase-derived).
@@ -186,7 +197,24 @@ impl HMemStore {
     }
 }
 
-const HMEM_COLUMNS: &str = "id, entity, attribute, value, valid_from, valid_to, recalled_at, confidence, perspective, visibility, owner_webid, dimension";
+const HMEM_COLUMNS: &str = "id, entity, attribute, value, valid_from, valid_to, recalled_at, confidence, perspective, visibility, owner_webid, ontology";
+
+/// SQL predicate selecting semantic h_mems: those whose ontology blob carries no
+/// PKO procedure (`$.pko_procedure IS NULL`). This replaces the deprecated
+/// `perspective IS NULL` discriminator — the episodic/semantic distinction is
+/// now carried by the `HMemOntology` blob (P5.4 dual-axis anchoring), not by the
+/// `perspective` field. A semantic fact anchors to the state axis (DC+BIBO);
+/// an episodic experience anchors to the process axis (PKO). The predicate
+/// tolerates rows with no ontology blob (`json_valid(ontology)` is false) by
+/// treating them as unanchored — the same reading `row_to_h_mem` gives them.
+const SEMANTIC_PREDICATE: &str =
+    "(json_valid(ontology) AND json_extract(ontology, '$.pko_procedure') IS NULL)";
+
+/// SQL predicate selecting episodic h_mems: those whose ontology blob carries
+/// a PKO procedure (`$.pko_procedure IS NOT NULL`). See `SEMANTIC_PREDICATE` for
+/// the discriminator rationale.
+const EPISODIC_PREDICATE: &str =
+    "(json_valid(ontology) AND json_extract(ontology, '$.pko_procedure') IS NOT NULL)";
 
 impl HMemStore {
     fn exec(&self, sql: &str, params: &[DbValue]) -> Result<usize, HMemError> {
@@ -231,7 +259,7 @@ impl HMemStore {
                 attribute: row.get(2)?.as_text()?.to_string(),
                 value: value_text,
                 valid_from: row.get(4)?.as_text()?.to_string(),
-                recalled_at: row.get(6)?.as_text()?.to_string(),
+                recalled_at: row.get(6)?.as_text().ok().unwrap_or_default().to_string(),
                 confidence: Confidence::new(row.get(7)?.as_real()?),
                 perspective: row.get(8)?.as_text().ok().and_then(|s| s.parse().ok()),
                 visibility: match row.get(9)?.as_text().unwrap_or("private") {
@@ -242,7 +270,13 @@ impl HMemStore {
                 owner_webid: row.get(10)?.as_text()?.parse().map_err(|_| {
                     HMemError::Infra(InfrastructureError::database("invalid webid"))
                 })?,
-                dimension: row.get(11)?.as_text().ok().map(|s| s.to_string()),
+                ontology: row.get(11)?.as_text().ok().and_then(|s| {
+                    if s.is_empty() {
+                        None
+                    } else {
+                        HMemOntology::from_json_str(s).ok()
+                    }
+                }),
             };
         Self::row_to_triple(hrow)
     }
@@ -252,11 +286,22 @@ impl HMemStore {
             .driver
             .query(sql, params)
             .map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
-        Ok(rows
-            .first()
-            .and_then(|r| r.get(0).ok())
-            .and_then(|v| v.as_int().ok())
-            .unwrap_or(0) as usize)
+        // No rows → the legitimate "count is zero" case. A decode or column
+        // error on a present row is a real DB failure and must propagate so the
+        // consolidation regulation loop sees a stale signal instead of a
+        // fabricated Ok(0) that reads as "no deviation from set-point".
+        match rows.first() {
+            None => Ok(0),
+            Some(row) => {
+                let value = row
+                    .get(0)
+                    .map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
+                let count = value
+                    .as_int()
+                    .map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
+                Ok(count as usize)
+            }
+        }
     }
 }
 
@@ -273,6 +318,15 @@ impl HMemStore {
             enc.encrypt(&value_json)
         } else {
             value_json
+        };
+        // Serialize the ontology blob eagerly and propagate failure. A
+        // silent `unwrap_or_default()` here would write an empty string into
+        // a column the ontology queries feed to `json_extract`, and SQLite
+        // raises "malformed JSON" on `''` — which fails the WHOLE query, not
+        // just that row. One bad write would blind every ontology recall.
+        let ontology = match h_mem.ontology.as_ref() {
+            Some(ont) => DbValue::Text(ont.to_json_string()?),
+            None => DbValue::Null,
         };
         self.exec(
             &format!(
@@ -294,10 +348,7 @@ impl HMemStore {
                     .map_or(DbValue::Null, |p| DbValue::Text(p.to_string())),
                 DbValue::Text(h_mem.access.visibility.to_string()),
                 DbValue::Text(h_mem.access.owner_webid.to_string()),
-                h_mem
-                    .dimension
-                    .as_ref()
-                    .map_or(DbValue::Null, |d| DbValue::Text(d.as_str().to_string())),
+                ontology,
             ],
         )?;
         Ok(())
@@ -313,6 +364,43 @@ impl HMemStore {
         self.query_rows(
             &format!("SELECT {HMEM_COLUMNS} FROM hmems WHERE entity = ?1 AND valid_to IS NULL ORDER BY valid_from DESC"),
             &[DbValue::Text(entity.to_string())],
+        )
+    }
+    /// Query h_mems by entity prefix (LIKE 'prefix%'), bounded by `limit`.
+    ///
+    /// Used by recall paths that need to load h_mems for a family of
+    /// entities (e.g. all `chat:thread:*` entities for episodic keyword
+    /// search). The prefix must not contain SQL LIKE wildcards (`%` or `_`)
+    /// — they would be interpreted as wildcards.
+    ///
+    /// The `limit` caps the number of rows loaded — without it, a session
+    /// with thousands of past turns would load all of them into memory on
+    /// every recall call. The recall path only needs the most recent `limit`
+    /// h_mems (ordered by `valid_from DESC`), so the SQL LIMIT is the correct
+    /// place to bound this.
+    ///
+    /// expect: "The system provides durable storage for h_mem data"
+    /// \[P3\] Motivating: Generative Space — query by entity prefix
+    /// pre:  prefix is non-empty and contains no LIKE wildcards
+    /// pre:  limit > 0
+    /// post: returns up to `limit` h_mems whose entity starts with `prefix`,
+    ///       ordered by `valid_from DESC` (most recent first)
+    #[must_use = "result must be used"]
+    pub fn query_by_entity_prefix(
+        &self,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<HMem>, HMemError> {
+        self.query_rows(
+            &format!(
+                "SELECT {HMEM_COLUMNS} FROM hmems \
+                 WHERE entity LIKE ?1 AND valid_to IS NULL \
+                 ORDER BY valid_from DESC LIMIT ?2"
+            ),
+            &[
+                DbValue::Text(format!("{}%", prefix)),
+                DbValue::Integer(limit as i64),
+            ],
         )
     }
     /// Query h_mems by entity and attribute.
@@ -340,6 +428,25 @@ impl HMemStore {
     pub fn query_by_perspective(&self, perspective: &WebID) -> Result<Vec<HMem>, HMemError> {
         self.query_rows(
             &format!("SELECT {HMEM_COLUMNS} FROM hmems WHERE perspective = ?1 AND valid_to IS NULL ORDER BY valid_from DESC"),
+            &[DbValue::Text(perspective.to_string())],
+        )
+    }
+    /// Query episodic h_mems (ontology blob carries a PKO procedure) written by
+    /// a given perspective. This is the consolidation-candidate selector: the
+    /// episodic/semantic distinction is carried by the `HMemOntology` blob
+    /// (P5.4), not by `perspective` — `perspective` scopes by who wrote the
+    /// memory, while the ontology blob classifies it.
+    ///
+    /// expect: "The system provides durable storage for h_mem data"
+    /// \[P3\] Motivating: Generative Space — query episodic by perspective
+    /// pre:  perspective is valid
+    /// post: returns Vec of episodic h_mems for this perspective
+    pub fn query_episodic_by_perspective(
+        &self,
+        perspective: &WebID,
+    ) -> Result<Vec<HMem>, HMemError> {
+        self.query_rows(
+            &format!("SELECT {HMEM_COLUMNS} FROM hmems WHERE {EPISODIC_PREDICATE} AND perspective = ?1 AND valid_to IS NULL ORDER BY valid_from DESC"),
             &[DbValue::Text(perspective.to_string())],
         )
     }
@@ -373,59 +480,70 @@ impl HMemStore {
     ) -> Result<(), HMemError> {
         let new_confidence = new_confidence.into();
         let now = now_rfc3339();
-        self.driver
-            .execute_batch("BEGIN")
+        // Hold a single pooled connection for the entire transaction. The
+        // prior `execute_batch("BEGIN")` / `execute()` / `execute_batch("COMMIT")
+        // pattern acquired a different pool connection per call, so the
+        // writes ran outside any transaction (autocommit on conns B/C, COMMIT
+        // was a no-op on conn D). A crash between the UPDATE (close old
+        // version) and INSERT (new version) left the row closed with no
+        // replacement — silent data loss under `max_size > 1`.
+        let pool = self.driver.sqlite_pool().ok_or_else(|| {
+            HMemError::Infra(InfrastructureError::database(
+                "HMemStore::update requires a SqliteDriver",
+            ))
+        })?;
+        let mut conn = pool
+            .get()
             .map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
-        let result = (|| -> Result<(), HMemError> {
-            self.driver
-                .execute(
-                    "UPDATE hmems SET valid_to = ?1 WHERE id = ?2 AND valid_to IS NULL",
-                    &[DbValue::Text(now.clone()), DbValue::Text(id.to_string())],
-                )
-                .map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
-            let rows = self.driver.query(
-                "SELECT entity, attribute, perspective, visibility, owner_webid, dimension FROM hmems WHERE id = ?1",
-                &[DbValue::Text(id.to_string())],
-            ).map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
-            let row = rows.first().ok_or_else(|| {
-                HMemError::NotFound(NotFound {
-                    entity_type: "h_mem".to_string(),
-                    id: id.to_string(),
-                })
-            })?;
-            let entity = row.get(0)?.as_text()?.to_string();
-            let attribute = row.get(1)?.as_text()?.to_string();
-            let perspective: Option<String> = row.get(2)?.as_text().ok().map(|s| s.to_string());
-            let visibility = row.get(3)?.as_text()?.to_string();
-            let owner_webid = row.get(4)?.as_text()?.to_string();
-            let dimension: Option<String> = row.get(5)?.as_text().ok().map(|s| s.to_string());
-            let new_id = HMemId::new();
-            self.driver.execute(
-                &format!("INSERT INTO hmems ({HMEM_COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"),
-                &[
-                    DbValue::Text(new_id.to_string()), DbValue::Text(entity), DbValue::Text(attribute),
-                    DbValue::Text(serde_json::to_string(&new_value)?), DbValue::Text(now.clone()),
-                    DbValue::Null, DbValue::Text(now.clone()),
-                    DbValue::Real(new_confidence.value()),
-                    perspective.map_or(DbValue::Null, DbValue::Text),
-                    DbValue::Text(visibility), DbValue::Text(owner_webid),
-                    dimension.map_or(DbValue::Null, DbValue::Text),
-                ],
-            ).map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
-            Ok(())
-        })();
-        match result {
-            Ok(()) => {
-                self.driver
-                    .execute_batch("COMMIT")
-                    .map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = self.driver.execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
+        let tx = conn
+            .transaction()
+            .map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
+        // Close the old version (set valid_to).
+        tx.execute(
+            "UPDATE hmems SET valid_to = ?1 WHERE id = ?2 AND valid_to IS NULL",
+            rusqlite::params![now, id.to_string()],
+        )
+        .map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
+        // Read the old version's metadata to carry into the new version.
+        let row = tx.query_row(
+            "SELECT entity, attribute, perspective, visibility, owner_webid, ontology FROM hmems WHERE id = ?1",
+            rusqlite::params![id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        ).map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
+        let (entity, attribute, perspective, visibility, owner_webid, ontology) = row;
+        let new_id = HMemId::new();
+        tx.execute(
+            &format!(
+                "INSERT INTO hmems ({HMEM_COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)"
+            ),
+            rusqlite::params![
+                new_id.to_string(),
+                entity,
+                attribute,
+                serde_json::to_string(&new_value)?,
+                now,
+                Option::<String>::None,
+                now,
+                new_confidence.value(),
+                perspective,
+                visibility,
+                owner_webid,
+                ontology,
+            ],
+        )
+        .map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
+        tx.commit()
+            .map_err(|e| HMemError::Infra(InfrastructureError::database(e.to_string())))?;
+        Ok(())
     }
     /// Get a h_mem by ID.
     ///
@@ -467,7 +585,7 @@ impl HMemStore {
     /// post: returns up to limit h_mems ordered by confidence ascending
     pub fn query_semantic_lowest_confidence(&self, limit: usize) -> Result<Vec<HMem>, HMemError> {
         self.query_rows(
-            &format!("SELECT {HMEM_COLUMNS} FROM hmems WHERE perspective IS NULL AND valid_to IS NULL ORDER BY confidence ASC, valid_from ASC LIMIT ?1"),
+            &format!("SELECT {HMEM_COLUMNS} FROM hmems WHERE {SEMANTIC_PREDICATE} AND valid_to IS NULL ORDER BY confidence ASC, valid_from ASC LIMIT ?1"),
             &[DbValue::Integer(limit as i64)],
         )
     }
@@ -480,7 +598,7 @@ impl HMemStore {
     /// post: returns count of h_mems with confidence ≤ threshold
     pub fn count_semantic_below_confidence(&self, threshold: f64) -> Result<usize, HMemError> {
         self.count_rows(
-            "SELECT COUNT(*) FROM hmems WHERE perspective IS NULL AND valid_to IS NULL AND confidence <= ?1",
+            &format!("SELECT COUNT(*) FROM hmems WHERE {SEMANTIC_PREDICATE} AND valid_to IS NULL AND confidence <= ?1"),
             &[DbValue::Real(threshold)],
         )
     }
@@ -497,7 +615,7 @@ impl HMemStore {
         limit: usize,
     ) -> Result<Vec<HMem>, HMemError> {
         self.query_rows(
-            &format!("SELECT {HMEM_COLUMNS} FROM hmems WHERE perspective IS NULL AND valid_to IS NULL AND confidence <= ?1 ORDER BY confidence ASC, valid_from ASC LIMIT ?2"),
+            &format!("SELECT {HMEM_COLUMNS} FROM hmems WHERE {SEMANTIC_PREDICATE} AND valid_to IS NULL AND confidence <= ?1 ORDER BY confidence ASC, valid_from ASC LIMIT ?2"),
             &[DbValue::Real(threshold), DbValue::Integer(limit as i64)],
         )
     }
@@ -510,7 +628,7 @@ impl HMemStore {
     #[must_use = "result must be used"]
     pub fn count_semantic(&self) -> Result<usize, HMemError> {
         self.count_rows(
-            "SELECT COUNT(*) FROM hmems WHERE perspective IS NULL AND valid_to IS NULL",
+            &format!("SELECT COUNT(*) FROM hmems WHERE {SEMANTIC_PREDICATE} AND valid_to IS NULL"),
             &[],
         )
     }
@@ -523,7 +641,7 @@ impl HMemStore {
     /// post: returns count for entity
     pub fn count_semantic_by_entity(&self, entity: &str) -> Result<usize, HMemError> {
         self.count_rows(
-            "SELECT COUNT(*) FROM hmems WHERE entity = ?1 AND perspective IS NULL AND valid_to IS NULL",
+            &format!("SELECT COUNT(*) FROM hmems WHERE entity = ?1 AND {SEMANTIC_PREDICATE} AND valid_to IS NULL"),
             &[DbValue::Text(entity.to_string())],
         )
     }
@@ -560,8 +678,124 @@ impl HMemStore {
     ) -> Result<Vec<HMem>, HMemError> {
         let cutoff = (chrono::Utc::now() - chrono::Duration::days(days as i64)).to_rfc3339();
         self.query_rows(
-            &format!("SELECT {HMEM_COLUMNS} FROM hmems WHERE perspective IS NULL AND valid_to IS NULL AND valid_from < ?1 ORDER BY entity ASC, confidence DESC, valid_from DESC LIMIT ?2"),
+            &format!("SELECT {HMEM_COLUMNS} FROM hmems WHERE {SEMANTIC_PREDICATE} AND valid_to IS NULL AND valid_from < ?1 ORDER BY entity ASC, confidence DESC, valid_from DESC LIMIT ?2"),
             &[DbValue::Text(cutoff), DbValue::Integer(limit as i64)],
+        )
+    }
+
+    // ── Ontology query paths (P5.4 dual-axis anchoring) ──────────────────
+    //
+    // The `ontology` column is a JSON blob, so these queries reach into it
+    // with SQLite's `json_extract`. Every query is guarded by
+    // `ontology_is_json()`: SQLite raises "malformed JSON" on a bad blob,
+    // which would abort the whole query and blind every ontology recall
+    // rather than just excluding the bad row. The guard makes an unparseable
+    // blob mean "unanchored" — the same reading `row_to_h_mem` already gives
+    // it — instead of a hard failure.
+
+    /// A predicate that is true only when `ontology` holds parseable JSON.
+    /// Rows failing this are treated as unanchored.
+    fn ontology_is_json(&self) -> &'static str {
+        "json_valid(ontology)"
+    }
+
+    /// Scalar extraction of `$.<field>` from `ontology`.
+    fn ontology_scalar(&self, field: &str) -> String {
+        format!("json_extract(ontology, '$.{field}')")
+    }
+
+    /// Text rendering of the JSON sub-document at `$.<field>` (used for
+    /// substring matching over an array field).
+    fn ontology_json_text(&self, field: &str) -> String {
+        format!("json_extract(ontology, '$.{field}')")
+    }
+
+    /// Query h_mems whose Dublin Core type (`$.dc_type`) matches exactly.
+    ///
+    /// The state-axis type query: "give me every `bibo:Article` h_mem".
+    #[must_use = "result must be used"]
+    pub fn query_by_dc_type(&self, dc_type: &str) -> Result<Vec<HMem>, HMemError> {
+        let valid = self.ontology_is_json();
+        let extract = self.ontology_scalar("dc_type");
+        self.query_rows(
+            &format!(
+                "SELECT {HMEM_COLUMNS} FROM hmems \
+                 WHERE {valid} AND {extract} = ?1 AND valid_to IS NULL \
+                 ORDER BY valid_from DESC"
+            ),
+            &[DbValue::Text(dc_type.to_string())],
+        )
+    }
+
+    /// Query h_mems whose Dublin Core subject list (`$.dc_subject`) contains
+    /// the given term as a substring.
+    ///
+    /// `dc_subject` is an array, so the match runs against its JSON rendering
+    /// (`["a","b"]`). Two consequences the caller must know:
+    ///
+    /// - The subject must not contain SQL LIKE wildcards (`%`, `_`) — they
+    ///   would be interpreted as wildcards.
+    /// - JSON punctuation is part of the haystack, so a needle containing
+    ///   `"`, `[`, `]`, or `,` can match structure rather than content. A
+    ///   needle spanning two elements never matches (element boundaries are
+    ///   real separators), but `,` alone matches any multi-element row. Pass
+    ///   plain concept text.
+    #[must_use = "result must be used"]
+    pub fn query_by_dc_subject(&self, subject: &str) -> Result<Vec<HMem>, HMemError> {
+        let valid = self.ontology_is_json();
+        let extract = self.ontology_json_text("dc_subject");
+        self.query_rows(
+            &format!(
+                "SELECT {HMEM_COLUMNS} FROM hmems \
+                 WHERE {valid} AND {extract} LIKE ?1 AND valid_to IS NULL \
+                 ORDER BY valid_from DESC"
+            ),
+            &[DbValue::Text(format!("%{subject}%"))],
+        )
+    }
+
+    /// Query h_mems belonging to a PKO procedure (`$.pko_procedure`).
+    ///
+    /// The process-axis query: "give me every step of `diagnose-bug-123`".
+    #[must_use = "result must be used"]
+    pub fn query_by_pko_procedure(&self, procedure: &str) -> Result<Vec<HMem>, HMemError> {
+        let valid = self.ontology_is_json();
+        let extract = self.ontology_scalar("pko_procedure");
+        self.query_rows(
+            &format!(
+                "SELECT {HMEM_COLUMNS} FROM hmems \
+                 WHERE {valid} AND {extract} = ?1 AND valid_to IS NULL \
+                 ORDER BY valid_from DESC"
+            ),
+            &[DbValue::Text(procedure.to_string())],
+        )
+    }
+
+    /// Query h_mems carrying at least one tag from an open-world ontology
+    /// namespace (`$.ontology_tags.<namespace>`).
+    ///
+    /// This is what makes adding a domain ontology (FIBO, GOLEM, OMC, ESO)
+    /// a data change rather than a schema change: the namespace is a key in
+    /// the blob, and this query reaches it without a migration.
+    ///
+    /// The namespace is bound as a parameter — it is caller-supplied and
+    /// must not be interpolated into the SQL text. SQLite has no
+    /// parameterizable JSON path, so the path is built by concatenation
+    /// inside SQL (`'$.ontology_tags.' || ?1`) rather than by Rust string
+    /// interpolation — the namespace stays a bound parameter and cannot
+    /// inject SQL.
+    #[must_use = "result must be used"]
+    pub fn query_by_ontology_namespace(&self, namespace: &str) -> Result<Vec<HMem>, HMemError> {
+        let predicate = "json_extract(ontology, '$.ontology_tags.' || ?1) IS NOT NULL".to_string();
+        let params = vec![DbValue::Text(namespace.to_string())];
+        let valid = self.ontology_is_json();
+        self.query_rows(
+            &format!(
+                "SELECT {HMEM_COLUMNS} FROM hmems \
+                 WHERE {valid} AND {predicate} AND valid_to IS NULL \
+                 ORDER BY valid_from DESC"
+            ),
+            &params,
         )
     }
 
@@ -635,7 +869,7 @@ impl HMemStore {
                 owner_webid: row.owner_webid,
             },
             recalled_at,
-            dimension: row.dimension.and_then(|s| s.parse().ok()),
+            ontology: row.ontology,
         })
     }
 }
@@ -656,7 +890,14 @@ impl From<&HMem> for HMemEntry {
                 .map(|wid| wid.to_string())
                 .unwrap_or_default(),
             visibility: t.access.visibility.as_str().to_string(),
-            dimension: t.dimension.map(|d| d.as_str().to_string()),
+            dimension: t
+                .ontology
+                .as_ref()
+                .and_then(|ont| ont.dimensions.first().map(|s| s.clone())),
+            ontology: t
+                .ontology
+                .as_ref()
+                .and_then(|ont| ont.to_json_string().ok()),
         }
     }
 }
@@ -671,7 +912,7 @@ struct HMemRow {
     perspective: Option<WebID>,
     visibility: Visibility,
     owner_webid: WebID,
-    dimension: Option<String>,
+    ontology: Option<HMemOntology>,
 }
 #[cfg(test)]
 mod tests {
@@ -680,20 +921,7 @@ mod tests {
     use crate::database::value::DbValue;
     fn make_store() -> HMemStore {
         let driver = SqliteDriver::in_memory_driver();
-        let store = HMemStore::from_driver(driver).expect("hmem store init");
-        store
-            .driver()
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS hmems (
-                    id TEXT PRIMARY KEY, entity TEXT NOT NULL, attribute TEXT NOT NULL,
-                    value TEXT NOT NULL, valid_from TEXT NOT NULL, valid_to TEXT,
-                    recalled_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    confidence REAL NOT NULL, perspective TEXT, visibility TEXT NOT NULL,
-                    owner_webid TEXT NOT NULL, dimension TEXT
-                )",
-            )
-            .expect("create hmems table");
-        store
+        HMemStore::from_driver(driver).expect("hmem store init")
     }
     //
     // Before fix, a corrupt valid_from was silently replaced with Utc::now(),
@@ -749,5 +977,134 @@ mod tests {
         let missing = HMemId::new();
         let result = store.get_by_id(&missing).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn ontology_round_trips_through_store() {
+        // A h_mem with a dual-axis ontology blob should round-trip through
+        // the store — the ontology column preserves the JSON blob.
+        let store = make_store();
+        let webid = WebID::new();
+        let ont = hkask_types::HMemOntology::semantic(
+            "bibo:Article",
+            vec!["ROIC".to_string()],
+            "10-K 2025",
+        )
+        .with_ontology_tag("fibo", "competitive advantage");
+        let h_mem =
+            HMem::new("company:Apple", "roic", serde_json::json!(0.32), webid).with_ontology(ont);
+        store.insert(&h_mem).unwrap();
+
+        let results = store.query_by_entity("company:Apple").unwrap();
+        assert_eq!(results.len(), 1);
+        let loaded = &results[0];
+        assert!(loaded.ontology.is_some());
+        let loaded_ont = loaded.ontology.as_ref().unwrap();
+        assert_eq!(loaded_ont.dc_type, "bibo:Article");
+        assert_eq!(loaded_ont.dc_subject, vec!["ROIC".to_string()]);
+        assert_eq!(loaded_ont.dc_source, "10-K 2025");
+        assert!(loaded_ont.has_ontology("fibo"));
+        assert_eq!(
+            loaded_ont.ontology_concepts("fibo"),
+            &["competitive advantage"]
+        );
+    }
+
+    #[test]
+    fn h_mem_without_ontology_has_none() {
+        // A h_mem created without ontology should have None and round-trip
+        // as None (the legacy/default state).
+        let store = make_store();
+        let webid = WebID::new();
+        let h_mem = HMem::new("plain-entity", "attr", serde_json::json!("val"), webid);
+        assert!(h_mem.ontology.is_none());
+        store.insert(&h_mem).unwrap();
+
+        let results = store.query_by_entity("plain-entity").unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].ontology.is_none());
+    }
+
+    /// A malformed `ontology` blob must EXCLUDE only its own row, never fail
+    /// the query. SQLite aborts the whole statement on unparseable JSON
+    /// ("malformed JSON"), so without the `ontology_is_json()` guard a
+    /// single bad row — written by an older binary, a migration, or direct
+    /// SQL — would blind every ontology recall in the database, not just
+    /// its own.
+    #[test]
+    fn malformed_ontology_blob_does_not_poison_ontology_queries() {
+        let store = make_store();
+        let webid = WebID::new();
+
+        let anchored =
+            HMem::new("good:entity", "attr", serde_json::json!("v"), webid).with_ontology(
+                HMemOntology::semantic("bibo:Article", vec!["ROIC".to_string()], "10-K"),
+            );
+        store.insert(&anchored).expect("insert anchored");
+
+        // Simulate the poison row an older binary could have written: an
+        // empty-string ontology (what the former `unwrap_or_default()` in
+        // `insert` produced on a serialization failure).
+        let poison = HMem::new("poison:entity", "attr", serde_json::json!("v"), webid);
+        store.insert(&poison).expect("insert poison");
+        store
+            .driver()
+            .execute(
+                "UPDATE hmems SET ontology = '' WHERE entity = ?1",
+                &[DbValue::Text("poison:entity".to_string())],
+            )
+            .expect("force empty-string ontology");
+
+        // Every ontology query must still succeed and must exclude the
+        // poison row rather than erroring on it.
+        let by_type = store
+            .query_by_dc_type("bibo:Article")
+            .expect("dc_type query must not fail on a malformed sibling row");
+        assert_eq!(by_type.len(), 1);
+        assert_eq!(by_type[0].entity, "good:entity");
+
+        let by_subject = store
+            .query_by_dc_subject("ROIC")
+            .expect("dc_subject query must not fail on a malformed sibling row");
+        assert_eq!(by_subject.len(), 1);
+
+        let by_procedure = store
+            .query_by_pko_procedure("anything")
+            .expect("pko_procedure query must not fail on a malformed sibling row");
+        assert!(by_procedure.is_empty());
+
+        let by_namespace = store
+            .query_by_ontology_namespace("fibo")
+            .expect("namespace query must not fail on a malformed sibling row");
+        assert!(by_namespace.is_empty());
+    }
+
+    /// `insert` must propagate an ontology serialization failure rather than
+    /// silently writing an empty string. This pins the write half of the
+    /// malformed-blob fix: the read guard is defense-in-depth, but the write
+    /// path is where the bad data would originate.
+    #[test]
+    fn ontology_round_trips_through_insert_without_defaulting() {
+        let store = make_store();
+        let webid = WebID::new();
+        let h_mem = HMem::new("rt:entity", "attr", serde_json::json!("v"), webid)
+            .with_ontology(HMemOntology::episodic("proc", "step", "src"));
+        store.insert(&h_mem).expect("insert");
+
+        // The stored column must be parseable JSON, never an empty string.
+        let rows = store
+            .driver()
+            .query(
+                "SELECT ontology FROM hmems WHERE entity = ?1",
+                &[DbValue::Text("rt:entity".to_string())],
+            )
+            .expect("raw select");
+        let stored = rows
+            .first()
+            .and_then(|r| r.get(0).ok())
+            .and_then(|v| v.as_text().ok().map(|s| s.to_string()))
+            .expect("ontology column present");
+        assert!(!stored.is_empty(), "ontology must not be an empty string");
+        HMemOntology::from_json_str(&stored).expect("stored ontology must be valid JSON");
     }
 }

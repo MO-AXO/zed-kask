@@ -1,12 +1,6 @@
 {# goal: Platt discriminating-test design — tests that rule out at least one hypothesis, not one test per hypothesis. #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- design
-- discriminate
-- isolate
-- map
-- rank
 contract:
   input:
     hypotheses: array
@@ -17,7 +11,6 @@ contract:
     coverage_matrix: object
     irreducible_pairs: array
     user_review_requested: boolean
-energy_cap: 4096
 visibility: Public
 ---
 {# Template: falsifiability/falsifiability-discriminate.j2 #}

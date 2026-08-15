@@ -6,10 +6,11 @@
 //! This module provides a deserialization wrapper that flattens this structure
 //! into the canonical `BundleManifest` type.
 
+use crate::bundle::manifest::default_concurrency;
 use crate::bundle::{
     BundleAuditConfig, BundleComplementarity, BundleConflict, BundleGasConfig, BundleLedgerConfig,
     BundleManifest, BundleManifestStep, BundleSkill, ConvergenceConfig, ErrorHandlingConfig,
-    OcapConfig, RjouleConfig,
+    RjouleConfig,
 };
 use hkask_types::Visibility;
 use serde::Deserialize;
@@ -57,8 +58,6 @@ struct ManifestFile {
     #[serde(default)]
     error_handling: Option<ErrorHandlingConfig>,
     #[serde(default)]
-    ocap: Option<OcapConfig>,
-    #[serde(default)]
     ledger: Option<BundleLedgerConfig>,
     #[serde(default)]
     audit: Option<BundleAuditConfig>,
@@ -66,8 +65,6 @@ struct ManifestFile {
     inputs: Option<serde_json::Value>,
     #[serde(default)]
     principles: Option<serde_json::Value>,
-    #[serde(default)]
-    fusion: Option<hkask_types::fusion::FusionConfig>,
 }
 
 /// Inner header from the `manifest:` key in YAML files.
@@ -93,6 +90,13 @@ struct ManifestHeader {
     /// Defaults to `skill` for back-compat with pre-category manifests.
     #[serde(default)]
     category: Option<String>,
+    /// Opt-in to runtime validation of caller-supplied context against the
+    /// manifest's declared `inputs` (see `crate::inputs::validate_inputs`).
+    /// Defaults to `None` (no validation) for back-compat.
+    #[serde(default)]
+    enforce_inputs: Option<bool>,
+    #[serde(default = "default_concurrency")]
+    concurrency: u32,
 }
 
 /// Deserialize visibility in a case-insensitive manner.
@@ -139,7 +143,7 @@ pub fn load_manifest_from_yaml(yaml: &str) -> Result<BundleManifest, ManifestLoa
     let file: ManifestFile =
         serde_yaml_neo::from_str(yaml).map_err(|e| ManifestLoadError::Yaml { source: e })?;
 
-    let manifest = BundleManifest {
+    let mut manifest = BundleManifest {
         id: file.manifest.id,
         name: file.manifest.name,
         description: file.manifest.description,
@@ -154,15 +158,22 @@ pub fn load_manifest_from_yaml(yaml: &str) -> Result<BundleManifest, ManifestLoa
         gas: file.gas.unwrap_or_default(),
         rjoule: file.rjoule.unwrap_or_default(),
         error_handling: file.error_handling.unwrap_or_default(),
-        ocap: file.ocap.unwrap_or_default(),
         ledger: file.ledger.unwrap_or_default(),
         audit: file.audit.unwrap_or_default(),
         functional_role: file.manifest.functional_role,
         category: file.manifest.category,
         inputs: file.inputs,
+        enforce_inputs: file.manifest.enforce_inputs,
         principles: file.principles,
-        fusion: file.fusion,
+        concurrency: file.manifest.concurrency,
     };
+
+    // Sort steps by ordinal once at load time. The executor's `run_cascade`
+    // previously cloned + sorted on every cascade entry (including recursive
+    // flowdef sub-cascades); moving the sort here makes it a one-time cost.
+    // Manifests are authored in ordinal order, so this is almost always a
+    // no-op sort — but it guarantees the invariant for safety.
+    manifest.steps.sort_by_key(|s| s.ordinal);
 
     info!(
         target: "hkask.manifest_loader",
@@ -190,7 +201,6 @@ pub fn load_manifest_from_yaml(yaml: &str) -> Result<BundleManifest, ManifestLoa
 ///
 /// expect: "The system resolves and executes template manifest cascades"
 /// \[P3\] Motivating: Generative Space — resolves template manifest references
-/// \[P8\] Constraining: Semantic Grounding — manifest terms validated against lexicon
 /// pre:  reference is non-empty, registry is initialized
 /// post: returns Ok(BundleManifest) if found via registry or file path
 /// post: returns Err(ManifestResolveError) with typed failure mode

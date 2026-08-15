@@ -8,7 +8,7 @@
 //! Produces a structured gap report showing where consensus diverges from
 //! market pricing — the core of Mauboussin's Expectations Investing framework.
 use crate::{CompaniesServer, fibo, financial_model, research, types, validate_symbol};
-use hkask_mcp_server::server::execute_tool;
+use hkask_mcp_server::server::execute_tool_semantic;
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 
 #[tool_router(router = expectations_router, vis = "pub")]
@@ -20,99 +20,104 @@ impl CompaniesServer {
         &self,
         Parameters(req): Parameters<types::ExpectationsGapRequest>,
     ) -> String {
-        execute_tool(self, "expectations_gap", async {
-            validate_symbol(&req.symbol)?;
+        execute_tool_semantic(
+            self,
+            "expectations_gap",
+            Self::ontology_anchor("expectations_gap"),
+            async {
+                validate_symbol(&req.symbol)?;
 
-            // ── 1. Fetch financial data for reverse DCF ──────────────────
+                // ── 1. Fetch financial data for reverse DCF ──────────────────
 
-            let req_income = self
-                .fetch("income_statement", &req.symbol, &[("limit", "5")])
+                let req_income = self
+                    .fetch("income_statement", &req.symbol, &[("limit", "5")])
+                    .await;
+                let req_balance = self
+                    .fetch("balance_sheet", &req.symbol, &[("limit", "5")])
+                    .await;
+                let req_cf = self
+                    .fetch("cash_flow_statement", &req.symbol, &[("limit", "5")])
+                    .await;
+                let req_metrics = self
+                    .fetch("key_metrics", &req.symbol, &[("limit", "5")])
+                    .await;
+                let req_profile = self.fetch("company_profile", &req.symbol, &[]).await;
+
+                // ── 2. Compute market-implied growth via reverse DCF ──────────
+
+                let market_implied_growth = match (
+                    &req_income,
+                    &req_balance,
+                    &req_cf,
+                    &req_metrics,
+                    &req_profile,
+                ) {
+                    (Ok(inc), Ok(bal), Ok(cf), Ok(met), Ok(prof)) => {
+                        compute_implied_growth(inc, bal, cf, met, prof).unwrap_or(f64::NAN)
+                    }
+                    _ => f64::NAN,
+                };
+
+                // ── 3. Fetch research claims for management guidance ──────────
+
+                let company_name = match &req_profile {
+                    Ok(prof) => prof
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|p| p.get("companyName").and_then(|v| v.as_str()))
+                        .unwrap_or(&req.symbol)
+                        .to_string(),
+                    _ => req.symbol.clone(),
+                };
+
+                let research = research::search_fundamental(
+                    &self.client,
+                    &req.symbol,
+                    &company_name,
+                    "revenue guidance forecast growth outlook",
+                    self.exa_api_key.as_deref(),
+                    self.tavily_api_key.as_deref(),
+                    self.brave_api_key.as_deref(),
+                )
                 .await;
-            let req_balance = self
-                .fetch("balance_sheet", &req.symbol, &[("limit", "5")])
-                .await;
-            let req_cf = self
-                .fetch("cash_flow_statement", &req.symbol, &[("limit", "5")])
-                .await;
-            let req_metrics = self
-                .fetch("key_metrics", &req.symbol, &[("limit", "5")])
-                .await;
-            let req_profile = self.fetch("company_profile", &req.symbol, &[]).await;
 
-            // ── 2. Compute market-implied growth via reverse DCF ──────────
+                let claims = research::ResearchClaimClassifier::classify_all(&research);
 
-            let market_implied_growth = match (
-                &req_income,
-                &req_balance,
-                &req_cf,
-                &req_metrics,
-                &req_profile,
-            ) {
-                (Ok(inc), Ok(bal), Ok(cf), Ok(met), Ok(prof)) => {
-                    compute_implied_growth(inc, bal, cf, met, prof).unwrap_or(f64::NAN)
-                }
-                _ => f64::NAN,
-            };
+                // Extract growth numbers from revenue/earnings guidance claims
+                let management_growth = extract_management_growth(&claims.claims);
+                let management_narrative: Vec<String> = claims
+                    .claims
+                    .iter()
+                    .filter(|c| {
+                        matches!(
+                            c.category,
+                            research::ClaimCategory::RevenueGuidance
+                                | research::ClaimCategory::EarningsGuidance
+                        )
+                    })
+                    .map(|c| c.text.clone())
+                    .collect();
 
-            // ── 3. Fetch research claims for management guidance ──────────
+                // ── 4. User estimate ─────────────────────────────────────────
 
-            let company_name = match &req_profile {
-                Ok(prof) => prof
-                    .as_array()
-                    .and_then(|a| a.first())
-                    .and_then(|p| p.get("companyName").and_then(|v| v.as_str()))
-                    .unwrap_or(&req.symbol)
-                    .to_string(),
-                _ => req.symbol.clone(),
-            };
+                let user_growth = req.growth_estimate.unwrap_or(0.05);
 
-            let research = research::search_fundamental(
-                &self.client,
-                &req.symbol,
-                &company_name,
-                "revenue guidance forecast growth outlook",
-                self.exa_api_key.as_deref(),
-                self.tavily_api_key.as_deref(),
-                self.brave_api_key.as_deref(),
-            )
-            .await;
+                // ── 5. Build gap analysis ────────────────────────────────────
 
-            let claims = research::ResearchClaimClassifier::classify_all(&research);
+                let analysis = build_gap_analysis(
+                    &req.symbol,
+                    market_implied_growth,
+                    &management_growth,
+                    user_growth,
+                    &management_narrative,
+                    claims.claims.len(),
+                );
 
-            // Extract growth numbers from revenue/earnings guidance claims
-            let management_growth = extract_management_growth(&claims.claims);
-            let management_narrative: Vec<String> = claims
-                .claims
-                .iter()
-                .filter(|c| {
-                    matches!(
-                        c.category,
-                        research::ClaimCategory::RevenueGuidance
-                            | research::ClaimCategory::EarningsGuidance
-                    )
-                })
-                .map(|c| c.text.clone())
-                .collect();
+                let output = serde_json::json!(analysis);
 
-            // ── 4. User estimate ─────────────────────────────────────────
-
-            let user_growth = req.growth_estimate.unwrap_or(0.05);
-
-            // ── 5. Build gap analysis ────────────────────────────────────
-
-            let analysis = build_gap_analysis(
-                &req.symbol,
-                market_implied_growth,
-                &management_growth,
-                user_growth,
-                &management_narrative,
-                claims.claims.len(),
-            );
-
-            let output = serde_json::json!(analysis);
-
-            Ok(output)
-        })
+                Ok(fibo::enrich_with_ontology(output, "expectations_gap"))
+            },
+        )
         .await
     }
 }
@@ -155,50 +160,10 @@ fn compute_implied_growth(
 
     let assumptions = financial_model::ProjectionAssumptions::from_history(&hist);
 
-    // Verify price bounds
-    let lo_check = financial_model::project_model(
-        &hist,
-        &financial_model::ProjectionAssumptions {
-            revenue_growth: -0.50,
-            ..assumptions.clone()
-        },
-        current_price,
-    );
-    let hi_check = financial_model::project_model(
-        &hist,
-        &financial_model::ProjectionAssumptions {
-            revenue_growth: 1.00,
-            ..assumptions.clone()
-        },
-        current_price,
-    );
-
-    if lo_check.intrinsic_per_share > current_price || hi_check.intrinsic_per_share < current_price
-    {
-        return None;
-    }
-
-    // Binary search for implied growth
-    let mut lo = -0.50_f64;
-    let mut hi = 1.00_f64;
-    let mut implied = 0.0_f64;
-
-    for _ in 0..50 {
-        let mid = (lo + hi) / 2.0;
-        let mut a = assumptions.clone();
-        a.revenue_growth = mid;
-        let model = financial_model::project_model(&hist, &a, current_price);
-        if (model.intrinsic_per_share - current_price).abs() < 0.0001 {
-            implied = mid;
-            break;
-        }
-        if model.intrinsic_per_share > current_price {
-            hi = mid; // intrinsic too high → growth too high → shrink from top
-        } else {
-            lo = mid; // intrinsic too low → growth too low → shrink from bottom
-        }
-        implied = mid;
-    }
+    // Shared bisection — the single source of truth for the search direction,
+    // shared with `reverse_dcf`. Returns `None` when the price is not bracketed
+    // by the growth bounds.
+    let implied = financial_model::implied_growth(&hist, &assumptions, current_price)?;
 
     // Check if implied is near bounds (low-confidence signal)
     if implied <= -0.49 || implied >= 0.99 {

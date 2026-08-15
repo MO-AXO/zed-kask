@@ -1,16 +1,12 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- monitor
-- assess
-- detect
 contract:
   input:
+    triage_phase: string
     board_name: string
     tasks: array
   output:
     board_summary: object
-energy_cap: 4096
 visibility: Public
 ---
 {# Template: kanban-task-management/monitor-board.j2 #}
@@ -24,7 +20,26 @@ work_effort = "medium"
 verbosity = "concise"
 max_tokens = 2048
 
+{% if triage_phase and triage_phase != 'operate' %}
+This step is not active for the current phase ({{ triage_phase }}). Return:
+```json
+{"skipped": true, "phase": "{{ triage_phase }}"}
+```
+{% else %}
 You are a kanban board monitor. Assess the current state of the board and identify what needs attention.
+
+## Pre-Cascade Data Fetch (Agent Action)
+
+Before invoking this skill, the agent should fetch the current board state so it can be passed as skill inputs. These are agent-level MCP tool calls, not cascade steps:
+
+1. Call `kanban_board_list` to get all boards. Identify the target board by name.
+2. Call `kanban_task_list` with `{"board_id": "..."}` to get all tasks on the board.
+3. For each task, call `kanban_task_comments_since` with `{"task_id": "...", "since_index": 0}` to get the comment thread (for detecting stuck tasks).
+4. Pass the fetched `board_name` and `tasks` as skill inputs when invoking this skill.
+
+The `kanban_task_list` response includes: task_id, title, status, assignee, gas_remaining, swarm_id, and activity (latest comment). Use the `activity` field to detect tasks with no recent updates.
+
+All tools are on the `hkask-mcp-kata-kanban` server.
 
 ## Board: {{ board_name }}
 
@@ -50,3 +65,4 @@ Answer these questions:
 5. **Gaps** — Are there tasks with no assignee that should be delegated?
 
 Return a JSON object with your assessment. Be concise — this is for the board operator to act on.
+{% endif %}

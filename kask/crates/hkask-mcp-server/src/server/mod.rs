@@ -32,14 +32,13 @@ mod validation;
 pub use context::{CapabilityTier, CredentialRequirement, ServerContext};
 pub use credentials::{load_dotenv, resolve_credential};
 pub use error::{McpError, McpToolError};
-pub use http_helpers::{api_get, api_put, classify_http_error};
-pub use tool_span::{
-    ExperienceCallback, ToolContext, ToolSpanGuard, execute_tool, execute_tool_semantic,
-    tool_internal_error,
-};
+pub use http_helpers::classify_http_error;
+pub use tool_span::{ToolContext, ToolSpanGuard, execute_tool, execute_tool_semantic};
 pub use transport::{run_stdio_server, run_stdio_server_with_preloaded};
+pub use validation::{MAX_READ_BYTES, contain_for_read, contain_for_write, read_capped};
 pub use validation::{
-    validate_identifier, validate_path, validate_tool_url, validate_tool_url_permissive,
+    map_infra_error, map_io_error, map_join_error, map_memory_store_error, validate_identifier,
+    validate_path, validate_tool_url_permissive, validate_tool_url_with_dns,
 };
 
 #[cfg(test)]
@@ -286,15 +285,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_tool_url_accepts_valid_urls() {
-        assert!(validate_tool_url("http://localhost:8080").is_ok());
-        assert!(validate_tool_url("https://api.example.com/v1").is_ok());
+    fn validate_url_accepts_valid_urls() {
+        let config = crate::security::UrlValidationConfig::default();
+        assert!(crate::security::validate_url("http://localhost:8080", &config).is_ok());
+        assert!(crate::security::validate_url("https://api.example.com/v1", &config).is_ok());
     }
 
     #[test]
-    fn validate_tool_url_rejects_invalid_urls() {
-        assert!(validate_tool_url("not-a-url").is_err());
-        assert!(validate_tool_url("").is_err());
+    fn validate_url_rejects_invalid_urls() {
+        let config = crate::security::UrlValidationConfig::default();
+        assert!(crate::security::validate_url("not-a-url", &config).is_err());
+        assert!(crate::security::validate_url("", &config).is_err());
     }
 
     // ── Ontology Concept Contract Tests (P8.1) ───────────────────────────
@@ -327,9 +328,9 @@ mod tests {
         let domain_concepts: &[&str] = &[
             "fibo:Corporation",
             "golem:Character",
-            "cogat:episodic_memory",
             "mls:Model",
             "omc:Image",
+            "sumo:Entity",
         ];
 
         let mut guard = ToolSpanGuard::new("test_tool", &hkask_types::WebID::new());

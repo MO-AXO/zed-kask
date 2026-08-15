@@ -12,11 +12,11 @@ pub struct FirecrawlProvider {
 }
 
 impl FirecrawlProvider {
-    pub fn new(api_key: Option<String>) -> Self {
-        Self {
-            client: super::provider_http_client(),
+    pub fn new(api_key: Option<String>) -> Result<Self, WebError> {
+        Ok(Self {
+            client: super::provider_http_client()?,
             api_key,
-        }
+        })
     }
 
     fn auth_header(&self) -> Result<String, WebError> {
@@ -109,6 +109,7 @@ impl WebExtractProvider for FirecrawlProvider {
         url: &str,
         opts: &ExtractOptions,
     ) -> Result<ExtractedContent, WebError> {
+        // SSRF validation is at the pool boundary (extract_with_fallback).
         let auth = self.auth_header()?;
         let mut payload = serde_json::json!({ "url": url });
         match opts.format.as_str() {
@@ -144,7 +145,7 @@ impl WebExtractProvider for FirecrawlProvider {
         if !status.is_success() {
             return Err(WebError::ProviderError(format!(
                 "Firecrawl extract error {status}: {}",
-                body.chars().take(200).collect::<String>()
+                hkask_inference::openai_compat::sanitize_error_body(&body)
             )));
         }
 
@@ -191,6 +192,7 @@ impl WebBrowseProvider for FirecrawlProvider {
         instruction: &str,
         timeout: Duration,
     ) -> Result<BrowseResult, WebError> {
+        // SSRF validation is at the pool boundary (browse_with_fallback).
         let auth = self.auth_header()?;
         let payload = serde_json::json!({
             "url": url, "formats": ["markdown"],

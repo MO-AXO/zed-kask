@@ -699,6 +699,13 @@
       "ctrl-shift-b": "outline_panel::ToggleFocus",
       "ctrl-shift-g": "git_panel::ToggleFocus",
       "ctrl-shift-d": "debug_panel::ToggleFocus",
+      // zed-kask: kask center-pane items live in the ctrl-shift-alt-<mnemonic> tier.
+      // The ctrl-shift-<letter> workspace tier is saturated by upstream Zed panels
+      // (e/d/b/g/m) and the kask mnemonics (e/s) collide there. The ctrl-shift-alt
+      // tier is kask-owned: no editor-context shadowing (all fire regardless
+      // of focus) and zero collision risk with future upstream keymap changes.
+      "ctrl-shift-alt-e": "kask_extensions_ui::Toggle",
+      "ctrl-shift-alt-s": "swarm_panel::Toggle",
       "ctrl-?": "agent::ToggleFocus",
       "alt-save": "workspace::SaveAll",
       "ctrl-alt-s": "workspace::SaveAll",
@@ -1024,6 +1031,10 @@
       "ctrl-alt-y": "git::ToggleStaged",
       "space": "git::ToggleStaged",
       "shift-space": "git::StageRange",
+      "alt-copy": "workspace::CopyPath",
+      "ctrl-alt-c": "workspace::CopyPath",
+      "alt-shift-copy": "workspace::CopyRelativePath",
+      "alt-ctrl-shift-c": "workspace::CopyRelativePath",
       "tab": "git_panel::FocusEditor",
       "shift-tab": "git_panel::FocusEditor",
       "escape": "git_panel::ToggleFocus",
@@ -1511,6 +1522,8 @@
     "context": "NotebookEditor && notebook_mode == command",
     "bindings": {
       "enter": "notebook::EnterEditMode",
+      "d d": "notebook::DeleteCell",
+      "backspace": "notebook::DeleteCell",
       "down": "menu::SelectNext",
       "up": "menu::SelectPrevious",
     },

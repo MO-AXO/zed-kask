@@ -10,19 +10,21 @@ description = "Context condensation domain logic — compression algorithms, cla
 path = "src/hkask_condenser.rs"
 
 [dependencies]
-hkask-bridge-dublincore = { path = "../hkask-bridge-dublincore" }
+hkask-bridge-ontology.workspace = true
+hkask-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
 tracing.workspace = true
 
+[lints]
+workspace = true
+
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
 
-[[test]]
-name = "condenser_fuzz"
-path = "tests/condenser_fuzz.rs"
+
 
 [[bench]]
 name = "compression_bench"

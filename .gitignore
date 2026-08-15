@@ -1,7 +1,9 @@
 **/*.db
+**/*.salt
 **/*.proptest-regressions
 **/cargo-target
 **/target
+kask/traces/
 .webrtc-sys/
 **/venv
 **/.direnv
@@ -60,3 +62,11 @@ crates/docs_preprocessor/actions.json
 .nixos-test-history
 
 .local*
+
+# Local build error logs (stale artifacts, not source)
+build-err.txt
+
+# Corpus pipeline — all intermediate and raw artifacts ignored.
+# Final outputs will be explicitly committed after the pipeline completes
+# and all gates pass verification.
+corpus/

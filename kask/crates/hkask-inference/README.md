@@ -1,30 +1,22 @@
 # hkask-inference
 
-Multi-provider inference router for hKask — DeepInfra, Together AI, fal.ai, OpenRouter, KiloCode, Ollama, Cline, RunPod.
+Multi-provider inference router for hKask — DeepInfra, AtlasCloud, OpenRouter, Ollama, RunPod.
 
 ## Features
 
 - **Provider dispatch** — route inference requests to the best available provider
-- **Model selection** — fuzzy search, prefix-based routing (`DI/`, `FA/`, `TG/`, `OR/`, `KC/`, `OM/`, `CL/`, `RP/`)
+- **Model selection** — fuzzy search, prefix-based routing (`DI/`, `FA/`, `TG/`, `OR/`, `OM/`, `CL/`, `RP/`)
 - **Provider ID parsing** — `ProviderId` with model name resolution
 - **Prompt validation** — never-panics input validation
-- **Multi-model fusion** — provider-agnostic panel+judge deliberation (algo/LLM judge)
 
 ## Configuration
 
 | Variable | Description |
 |----------|-------------|
 | `DEEPINFRA_API_KEY` | DeepInfra API key |
-| `FALAI_API_KEY` | Fal.ai API key |
-| `TOGETHERAI_API_KEY` | Together AI API key |
+| `ATLASCLOUD_API_KEY` | AtlasCloud API key (media generation) |
 | `OPENROUTER_API_KEY` | OpenRouter API key |
-| `KILOCODE_API_KEY` | KiloCode API key |
-| `CLINE_API_KEY` | Cline cloud gateway API key |
 | `RUNPOD_API_KEY` | RunPod API key (vision/OCR only) |
 | `RUNPOD_TEMPLATE_ID` | RunPod serverless template ID (alternative to `RUNPOD_BASE_URL`) |
-| `HKASK_DEFAULT_MODEL` | Default model (e.g., `KC/z-ai/glm-5.2`) |
-| `HKASK_DEFAULT_PROVIDER` | Default provider code (DI, FA, TG, OR, KC, OM, CL; default: DI) |
-| `HKASK_FUSION_JUDGE_MODEL` | Fusion judge model (or `algo` for no-LLM merge) |
-| `HKASK_FUSION_PANEL_MODELS` | Comma-separated fusion panel models |
-| `HKASK_FUSION_MODE` | Fusion mode: synthesis, best-of-n, critique, deliberation, pi |
-| `HKASK_FUSION_DISABLED` | Set to `1` to disable fusion |
+| `HKASK_DEFAULT_MODEL` | Default model (e.g., `OR/z-ai/glm-5.2`) |
+| `HKASK_DEFAULT_PROVIDER` | Default provider code (DI, OR, OM; default: DI) |

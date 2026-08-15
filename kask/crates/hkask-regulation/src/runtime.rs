@@ -12,19 +12,19 @@
 //! # Cybernetic role (TASK 1)
 //! - Sensor: VarietyMonitor.counters() — count distinct agent states
 //! - Comparator: AlgedonicManager.check() — compares deficit to threshold
-//! - Effector: emit_critical_depletion() — broadcasts DepletionSignal to observers
+//! - Effector: algedonic alerts are forwarded to the `MetacognitionLoop`
+//!   via the alert channel; durable span persistence goes through the
+//!   `RegulationSink` wired at the composition root (`RegulationArchive`
+//!   on the curator's curator.db in zed-kask).
 
 use crate::algedonic::{
     AlgedonicManager, DEFAULT_EXPECTED_VARIETY, RuntimeAlert, reg_health_check,
 };
-use crate::energy::{AgentGasStatus, GasBudget, GasCost};
 use crate::set_points::DEFAULT_VARIETY_MAX_DEFICIT;
 use crate::tool_stats::ToolStats;
 
-use hkask_types::WebID;
 use hkask_types::event::{RegulationRecord, RegulationSink, SpanNamespace};
 use hkask_types::regulation::{LedgerHealth, RegulationHealth};
-use hkask_types::{BackpressureSignal, DepletionSignal, LedgerObserver};
 use parking_lot::RwLock as ParkingRwLock;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -37,9 +37,6 @@ const MAX_SKILL_SPAN_HISTORY: usize = 50;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing;
-
-/// Error healing callback: (error_string, operation_name).
-type HealCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 // ── Skill feedback span storage ───────────────────────────────────────────
 // Stores individual reg.skill.<id>.outcome and reg.skill.<id>.operator_feedback
@@ -301,8 +298,27 @@ impl VarietyMonitor {
     /// \[P8\] Constraining: Semantic Grounding — pure measurement, no transformation
     /// pre:  domain is non-empty
     /// post: returns variety count, 0 if domain not tracked
+    ///
+    /// Degradation: an untracked domain is indistinguishable from a tracked
+    /// domain with zero variety to the caller (both yield 0). To keep the two
+    /// cases distinguishable to an operator reading logs, an untracked domain
+    /// emits a `tracing::warn!` naming the stale signal before returning 0.
+    /// A regulation loop that reads 0 here cannot tell whether the domain
+    /// genuinely has no variety or was never registered; the warn is the only
+    /// effector that surfaces the difference.
     pub fn variety_for_domain(&self, domain: &str) -> u64 {
-        self.counters.get(domain).map(|c| c.variety()).unwrap_or(0)
+        match self.counters.get(domain) {
+            Some(counter) => counter.variety(),
+            None => {
+                tracing::warn!(
+                    target: "hkask.regulation",
+                    domain = %domain,
+                    "variety_for_domain: domain is not tracked; returning 0 (stale signal — \
+                     indistinguishable from a tracked domain with zero variety)",
+                );
+                0
+            }
+        }
     }
 
     /// List all tracked domains.
@@ -363,7 +379,6 @@ struct RegState {
     algedonic: Arc<ParkingRwLock<AlgedonicManager>>,
     tracker: VarietyMonitor,
     outcome: HashMap<String, OutcomeTracker>,
-    gas_budgets: Arc<tokio::sync::RwLock<HashMap<WebID, GasBudget>>>,
     regulation_health: RegulationHealth,
     regulation_history: VecDeque<RegulationCycleEntry>,
     tool_stats: Arc<ToolStats>,
@@ -378,7 +393,6 @@ impl RegState {
         )));
         let tracker = VarietyMonitor::new();
         let outcome = HashMap::new();
-        let gas_budgets = Arc::new(tokio::sync::RwLock::new(HashMap::new()));
         let regulation_health = RegulationHealth::default();
         let regulation_history = VecDeque::with_capacity(MAX_REGULATION_HISTORY);
         let tool_stats = Arc::new(ToolStats::new());
@@ -387,7 +401,6 @@ impl RegState {
             algedonic,
             tracker,
             outcome,
-            gas_budgets,
             regulation_health,
             regulation_history,
             tool_stats,
@@ -398,15 +411,12 @@ impl RegState {
 
 /// Regulation runtime — single entry point for observability and regulation
 ///
-/// Cheaply clonable: both fields are `Arc`-wrapped, so cloning only bumps
-/// reference counts. All clones share the same inner state (variety tracker,
-/// algedonic manager, subscribers).
+/// Cheaply clonable: the state is `Arc`-wrapped, so cloning only bumps the
+/// reference count. All clones share the same inner state (variety tracker,
+/// algedonic manager).
 #[derive(Clone)]
 pub struct RegulationLedger {
     state: Arc<RwLock<RegState>>,
-    subscribers: Arc<RwLock<Vec<Arc<dyn LedgerObserver>>>>,
-    /// Optional heal callback: (error_string, operation_name).
-    heal_error_cb: Option<HealCallback>,
 }
 
 impl RegulationLedger {
@@ -420,21 +430,7 @@ impl RegulationLedger {
     pub fn with_threshold(threshold: u64) -> Self {
         Self {
             state: Arc::new(RwLock::new(RegState::new(threshold))),
-            subscribers: Arc::new(RwLock::new(Vec::new())),
-            heal_error_cb: None,
         }
-    }
-
-    /// Attach a self-healing callback for automatic error recovery on depletion.
-    ///
-    /// expect: "The system provides configurable error recovery for homeostatic self-regulation"
-    /// \[P9\] Motivating: Homeostatic Self-Regulation — heal callback closes the recovery loop
-    /// \[P4\] Constraining: Clear Boundaries — callback is user-owned, Regulation does not self-modify
-    /// pre:  cb is valid
-    /// post: RegulationLedger with heal callback configured
-    pub fn with_heal_cb(mut self, cb: HealCallback) -> Self {
-        self.heal_error_cb = Some(cb);
-        self
     }
 
     /// Override the outcome quality thresholds from YAML configurable SetPoints.
@@ -746,19 +742,9 @@ impl RegulationLedger {
             return None;
         }
 
-        let alert = {
-            let state = self.state.write().await;
-            let mut mgr = state.algedonic.write();
-            mgr.check_outcome(domain, success_rate, total_ops).cloned()
-        };
-
-        if let Some(ref a) = alert
-            && a.severity == crate::algedonic::AlertSeverity::Critical
-        {
-            emit_critical_depletion(self, a).await;
-        }
-
-        alert
+        let state = self.state.write().await;
+        let mut mgr = state.algedonic.write();
+        mgr.check_outcome(domain, success_rate, total_ops).cloned()
     }
 
     /// Get outcome success rate for a domain.
@@ -774,9 +760,6 @@ impl RegulationLedger {
         state.outcome.get(domain).map(|t| t.success_rate())
     }
 
-    /// Increment variety and check thresholds — the loop closes here.
-    /// After persisting variety, notifies subscribers whose interest mask
-    /// includes the relevant span namespace.
     /// Increment variety counter for a domain.
     ///
     /// expect: "The system increments variety counters to drive loop closure"
@@ -789,33 +772,7 @@ impl RegulationLedger {
             let mut state = self.state.write().await;
             state.tracker.counter(domain).increment(state_name);
         }
-        let alert = self.check_variety(domain).await;
-
-        // Notify subscribers interested in this domain's span namespace.
-        // Uses SpanNamespace::parse directly (not RegulationSpan::from_str) so that
-        // regulatory domains (reg.algedonic, reg.cybernetics, etc.) are included.
-        if let Some(span_ns) = hkask_types::event::SpanNamespace::parse(domain) {
-            let event = hkask_types::event::RegulationRecord::new(
-                WebID::default(),
-                hkask_types::event::Span::new(span_ns.clone(), "variety_incremented"),
-                hkask_types::event::CyclePhase::Act,
-                serde_json::json!({"domain": domain, "state": state_name}),
-                0,
-            );
-            let subscribers = self.subscribers.read().await;
-            for observer in subscribers.iter() {
-                if observer.interest_mask().iter().any(|ns| ns == &span_ns) {
-                    observer.on_event(&event).await;
-                }
-            }
-            drop(subscribers);
-
-            if let Some(ref a) = alert
-                && a.severity == crate::algedonic::AlertSeverity::Critical
-            {
-                emit_critical_depletion(self, a).await;
-            }
-        }
+        self.check_variety(domain).await;
     }
 
     /// Check variety health for a domain.
@@ -836,22 +793,9 @@ impl RegulationLedger {
                 .unwrap_or_else(VarietyTracker::new)
         };
 
-        let alert = {
-            let state = self.state.write().await;
-            let mut mgr = state.algedonic.write();
-            mgr.check(&counter, domain).cloned()
-        };
-
-        // Depletion signals are now emitted from increment_variety after
-        // it receives the alert from check_variety. Kept here for direct
-        // callers that don't go through increment_variety.
-        if let Some(ref alert) = alert
-            && alert.severity == crate::algedonic::AlertSeverity::Critical
-        {
-            emit_critical_depletion(self, alert).await;
-        }
-
-        alert
+        let state = self.state.write().await;
+        let mut mgr = state.algedonic.write();
+        mgr.check(&counter, domain).cloned()
     }
 
     /// Calibrate the variety threshold for a domain.
@@ -891,149 +835,6 @@ impl RegulationLedger {
             .write()
             .set_expected_variety(domain, new_threshold);
     }
-
-    // ── Bot Observation (Regulation Observer) ──
-
-    /// Register a LedgerObserver to receive events matching its interest mask.
-    ///
-    /// Observers are notified asynchronously when:
-    /// - A variety increment matches their interest mask (on_event)
-    /// - A depletion signal fires for their agent (on_depletion)
-    /// - A backpressure signal fires (on_backpressure)
-    ///
-    /// Use `subscribe_async` when calling from an async context.
-    /// Subscribe an observer to Regulation events.
-    ///
-    /// expect: "I can explicitly subscribe an observer to receive Regulation events"
-    /// \[P12\] Motivating: Affirmative Consent — observer registration requires explicit subscription
-    /// \[P2\] Constraining: User Sovereignty — subscriber identity is user-owned (WebID-tagged)
-    /// pre:  observer is valid
-    /// post: observer added to subscribers
-    pub fn subscribe(&self, observer: Arc<dyn LedgerObserver>) {
-        let mut subscribers = self.subscribers.blocking_write();
-        subscribers.push(observer);
-    }
-
-    /// Register a LedgerObserver to receive events matching its interest mask.
-    ///
-    /// This is the async version of subscribe, preferred when called from
-    /// an async context (e.g., during bootstrap or from the API).
-    /// Subscribe an observer (async).
-    ///
-    /// expect: "I can explicitly subscribe an async observer to receive Regulation events"
-    /// \[P12\] Motivating: Affirmative Consent — observer registration requires explicit subscription
-    /// \[P2\] Constraining: User Sovereignty — subscriber identity is user-owned (WebID-tagged)
-    /// pre:  observer is valid
-    /// post: observer added to subscribers
-    pub async fn subscribe_async(&self, observer: Arc<dyn LedgerObserver>) {
-        let mut subscribers = self.subscribers.write().await;
-        subscribers.push(observer);
-    }
-
-    /// Broadcast a Regulation event to all subscribers whose interest mask
-    /// covers the event's span namespace.
-    ///
-    /// This is the entry point that turns a `RegulationSink::persist` call
-    /// into live observability: external emitters (MCP runtime, cybernetics
-    /// loop, memory ports) forward their spans here, and registered
-    /// `LedgerObserver`s (e.g. the Curator status surface) receive them.
-    /// Fire-and-forget — callers must not rely on broadcast completion for
-    /// correctness, matching the best-effort semantics of every existing
-    /// emitter.
-    ///
-    /// pre:  event has a valid span namespace
-    /// post: every subscriber whose `interest_mask` contains `event.span.namespace`
-    ///       has had `on_event` scheduled; unmatched subscribers are skipped
-    pub async fn publish_event(&self, event: RegulationRecord) {
-        let span_ns = event.span.namespace.clone();
-        let subscribers = self.subscribers.read().await;
-        for observer in subscribers.iter() {
-            if observer.interest_mask().iter().any(|ns| ns == &span_ns) {
-                observer.on_event(&event).await;
-            }
-        }
-    }
-
-    /// Emit a backpressure signal to all subscribers.
-    ///
-    /// Called by the Cybernetics Loop when energy budget depletion
-    /// reaches critical levels, signaling downstream loops to throttle.
-    /// Emit a backpressure signal.
-    ///
-    /// expect: "The system emits backpressure signals to close the regulation loop"
-    /// \[P9\] Motivating: Homeostatic Self-Regulation — backpressure signal closes the regulation loop
-    /// \[P4\] Constraining: Clear Boundaries — signal emission gates downstream throttling
-    /// pre:  signal is valid
-    /// post: backpressure signal emitted to subscribers
-    pub async fn emit_backpressure(&self, signal: BackpressureSignal) {
-        let subscribers = self.subscribers.read().await;
-        for observer in subscribers.iter() {
-            observer.on_backpressure(&signal).await;
-        }
-    }
-
-    /// Register a energy budget for an agent.
-    ///
-    /// Called during agent pod creation so the Regulation can track and replenish budgets.
-    /// Register an energy budget for an agent.
-    ///
-    /// expect: "I can register an energy budget for an agent to enable tracking"
-    /// \[P9\] Motivating: Homeostatic Self-Regulation — budget registration enables energy tracking
-    /// \[P4\] Constraining: Clear Boundaries — budget cap enforces resource boundary
-    /// pre:  agent is valid, budget is valid
-    /// post: budget registered for agent
-    pub async fn register_gas_budget(&self, agent: WebID, budget: GasBudget) {
-        let state = self.state.read().await;
-        let mut budgets = state.gas_budgets.write().await;
-        budgets.insert(agent, budget);
-    }
-
-    /// Replenish a specific agent's energy budget by a specific amount.
-    ///
-    /// Returns the new remaining gas after replenishment, or 0 if the agent
-    /// has no registered budget.
-    /// Replenish an agent's energy budget.
-    ///
-    /// expect: "The system replenishes agent budgets on the regulation cycle"
-    /// \[P9\] Motivating: Homeostatic Self-Regulation — budget replenishment drives energy loop
-    /// \[P4\] Constraining: Clear Boundaries — cap enforcement prevents over-replenishment
-    /// pre:  agent is registered, amount > 0
-    /// post: budget replenished, returns actual amount added
-    pub async fn replenish_agent_budget(&self, agent: &WebID, amount: GasCost) -> GasCost {
-        let state = self.state.read().await;
-        let mut budgets = state.gas_budgets.write().await;
-        if let Some(budget) = budgets.get_mut(agent) {
-            budget.replenish_by(amount);
-            let remaining = budget.remaining();
-            tracing::info!(
-                target: "hkask.runtime",
-                agent = %agent,
-                amount = amount.0,
-                remaining = remaining.0,
-                "Replenished agent energy budget via Regulation runtime"
-            );
-            remaining
-        } else {
-            GasCost::ZERO
-        }
-    }
-
-    /// Get a read-only snapshot of an agent's energy budget status.
-    ///
-    /// Returns `None` if the agent has no registered budget.
-    /// Used by the Regulation service.
-    /// Get agent energy status.
-    ///
-    /// expect: "I can query an agent's gas status for energy loop feedback"
-    /// \[P9\] Motivating: Homeostatic Self-Regulation — gas status query drives energy loop decisions
-    /// \[P8\] Constraining: Semantic Grounding — pure observation, no transformation
-    /// pre:  agent is valid
-    /// post: returns Some(status) if budget exists, None otherwise
-    pub async fn agent_gas_status(&self, agent: &WebID) -> Option<AgentGasStatus> {
-        let state = self.state.read().await;
-        let budgets = state.gas_budgets.read().await;
-        budgets.get(agent).map(AgentGasStatus::from)
-    }
 }
 
 impl Default for RegulationLedger {
@@ -1049,81 +850,6 @@ pub struct NoopEventSink;
 impl RegulationSink for NoopEventSink {
     fn persist(&self, _event: &RegulationRecord) -> Result<(), hkask_types::InfrastructureError> {
         Ok(())
-    }
-}
-
-/// `RegulationSink` that forwards events into a `RegulationLedger`'s
-/// subscriber bus via `publish_event`.
-///
-/// Use this at composition roots that already hold a `RegulationLedger` and
-/// want emitted spans to reach registered `LedgerObserver`s (e.g. the Curator
-/// status surface) without standing up a durable `RegulationArchive`. The
-/// broadcast is spawned onto the captured tokio handle so the sync
-/// `RegulationSink::persist` contract is honoured without blocking the
-/// caller's async context.
-///
-/// Failures to spawn (e.g. runtime shut down) are logged and swallowed —
-/// observability is best-effort, never a correctness path.
-pub struct LedgerSink {
-    ledger: Arc<RwLock<RegulationLedger>>,
-    handle: tokio::runtime::Handle,
-}
-
-impl LedgerSink {
-    /// Capture the ledger and an explicit tokio handle to spawn broadcasts on.
-    ///
-    /// The handle must outlive the sink (typically the app-global tokio
-    /// runtime). Passing the handle explicitly — rather than calling
-    /// `Handle::current()` — lets callers on threads without a tokio
-    /// reactor context (e.g. the GPUI foreground thread) construct the
-    /// sink without panicking.
-    ///
-    /// pre:  `handle` belongs to a running tokio runtime
-    /// post: returns a sink that spawns `publish_event` on `handle` for each persist
-    pub fn new(ledger: Arc<RwLock<RegulationLedger>>, handle: tokio::runtime::Handle) -> Self {
-        Self { ledger, handle }
-    }
-}
-
-impl RegulationSink for LedgerSink {
-    fn persist(&self, event: &RegulationRecord) -> Result<(), hkask_types::InfrastructureError> {
-        let ledger = self.ledger.clone();
-        let event = event.clone();
-        self.handle.spawn(async move {
-            ledger.read().await.publish_event(event).await;
-        });
-        Ok(())
-    }
-}
-
-/// Build and broadcast a `DepletionSignal` for a critical algedonic alert.
-async fn emit_critical_depletion(
-    runtime: &RegulationLedger,
-    alert: &crate::algedonic::RuntimeAlert,
-) {
-    let signal = DepletionSignal {
-        agent: WebID::default(),
-        remaining: alert.threshold.saturating_sub(alert.deficit),
-        cap: alert.threshold,
-        usage_ratio: if alert.threshold > 0 {
-            alert.deficit as f64 / alert.threshold as f64
-        } else {
-            1.0
-        },
-    };
-
-    // Attempt self-healing before broadcasting to observers
-    if let Some(ref cb) = runtime.heal_error_cb {
-        let msg = format!(
-            "Regulation variety depletion: deficit={} threshold={} usage_ratio={:.2}",
-            alert.deficit, alert.threshold, signal.usage_ratio
-        );
-        cb(&msg, "reg.depletion");
-    }
-
-    let subscribers = runtime.subscribers.read().await;
-    for observer in subscribers.iter() {
-        observer.on_depletion(&signal).await;
     }
 }
 
@@ -1324,124 +1050,6 @@ mod tests {
         assert_eq!(
             feedback[0].payload["disposition"],
             serde_json::json!("accepted")
-        );
-    }
-
-    // ── LedgerSink / publish_event ──────────────────────────────────────
-    //
-    // The composition root wires emitters (MCP runtime, CyberneticsLoop) to a
-    // RegulationSink. Replacing NoopEventSink with LedgerSink is what makes
-    // emitted spans observable. These tests pin the contract: a persisted
-    // record reaches subscribers whose interest mask matches, and does not
-    // reach subscribers whose mask does not.
-
-    /// A minimal `LedgerObserver` that records every event it receives, for
-    /// asserting on the broadcast behaviour of `publish_event` / `LedgerSink`.
-    struct CapturingObserver {
-        interest: Vec<SpanNamespace>,
-        seen: std::sync::Mutex<Vec<RegulationRecord>>,
-    }
-
-    impl CapturingObserver {
-        fn new(interest: Vec<SpanNamespace>) -> Self {
-            Self {
-                interest,
-                seen: std::sync::Mutex::new(Vec::new()),
-            }
-        }
-
-        fn seen_count(&self) -> usize {
-            self.seen.lock().unwrap().len()
-        }
-    }
-
-    use hkask_types::event::{CyclePhase, Span};
-
-    #[async_trait::async_trait]
-    impl LedgerObserver for CapturingObserver {
-        fn interest_mask(&self) -> Vec<SpanNamespace> {
-            self.interest.clone()
-        }
-
-        async fn on_event(&self, event: &RegulationRecord) {
-            self.seen.lock().unwrap().push(event.clone());
-        }
-
-        async fn on_depletion(&self, _signal: &DepletionSignal) {}
-        async fn on_backpressure(&self, _signal: &BackpressureSignal) {}
-    }
-
-    #[tokio::test]
-    async fn publish_event_broadcasts_to_matching_subscribers_only() {
-        let ledger = RegulationLedger::default();
-        let tool_ns = SpanNamespace::new("reg.tool").unwrap();
-        let memory_ns = SpanNamespace::new("reg.memory").unwrap();
-
-        let tool_observer = Arc::new(CapturingObserver::new(vec![tool_ns.clone()]));
-        let memory_observer = Arc::new(CapturingObserver::new(vec![memory_ns.clone()]));
-        ledger
-            .subscribe_async(Arc::clone(&tool_observer) as Arc<dyn LedgerObserver>)
-            .await;
-        ledger
-            .subscribe_async(Arc::clone(&memory_observer) as Arc<dyn LedgerObserver>)
-            .await;
-
-        // A reg.tool event must reach the tool observer and not the memory observer.
-        let tool_event = RegulationRecord::new(
-            WebID::from_persona(b"test"),
-            Span::new(tool_ns.clone(), "invoked"),
-            CyclePhase::Act,
-            serde_json::json!({"tool": "search"}),
-            0,
-        );
-        ledger.publish_event(tool_event).await;
-        assert_eq!(
-            tool_observer.seen_count(),
-            1,
-            "tool observer should receive its matched event"
-        );
-        assert_eq!(
-            memory_observer.seen_count(),
-            0,
-            "memory observer should not receive unmatched events"
-        );
-    }
-
-    #[tokio::test]
-    async fn ledger_sink_forwards_persisted_events_to_subscribers() {
-        // LedgerSink::persist spawns the broadcast on the current tokio handle,
-        // so this test must run inside a multi-thread runtime (the default for
-        // #[tokio::test]).
-        let ledger = Arc::new(RwLock::new(RegulationLedger::default()));
-        let tool_ns = SpanNamespace::new("reg.tool").unwrap();
-        let observer = Arc::new(CapturingObserver::new(vec![tool_ns.clone()]));
-        ledger
-            .read()
-            .await
-            .subscribe_async(Arc::clone(&observer) as Arc<dyn LedgerObserver>)
-            .await;
-
-        let sink = LedgerSink::new(ledger.clone(), tokio::runtime::Handle::current());
-        let event = RegulationRecord::new(
-            WebID::from_persona(b"test"),
-            Span::new(tool_ns, "invoked"),
-            CyclePhase::Act,
-            serde_json::json!({"tool": "search"}),
-            0,
-        );
-        sink.persist(&event).expect("persist should be infallible");
-
-        // The broadcast is spawned fire-and-forget; yield to let it run.
-        for _ in 0..50 {
-            if observer.seen_count() > 0 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert_eq!(
-            observer.seen_count(),
-            1,
-            "LedgerSink must forward persisted events to subscribers"
         );
     }
 }

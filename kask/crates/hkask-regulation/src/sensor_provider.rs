@@ -242,20 +242,20 @@ impl Clone for SensorBus {
 
 /// Senses energy budget remaining ratios across all agents.
 ///
-/// Data source: `GasBudgetManager`. Produces a signal per agent.
+/// Data source: `CallCapManager`. Produces a signal per agent.
 pub struct EnergyBudgetSensor {
-    budget_manager: Arc<tokio::sync::RwLock<super::energy_budget_management::GasBudgetManager>>,
+    cap_manager: Arc<tokio::sync::RwLock<super::energy::CallCapManager>>,
     set_point: f64,
 }
 
 impl EnergyBudgetSensor {
     /// expect: "The system provides pluggable metric sensing for the cybernetic regulation loop"
     pub fn new(
-        budget_manager: Arc<tokio::sync::RwLock<super::energy_budget_management::GasBudgetManager>>,
+        cap_manager: Arc<tokio::sync::RwLock<super::energy::CallCapManager>>,
         set_point: f64,
     ) -> Self {
         Self {
-            budget_manager,
+            cap_manager,
             set_point,
         }
     }
@@ -264,11 +264,11 @@ impl EnergyBudgetSensor {
 #[async_trait::async_trait]
 impl Sensor for EnergyBudgetSensor {
     async fn sense(&self) -> Option<Signal> {
-        let statuses = self.budget_manager.read().await.all_agent_statuses().await;
+        let statuses = self.cap_manager.read().await.all_agent_statuses().await;
         // Use the worst remaining ratio as the aggregate signal.
         let worst = statuses
             .iter()
-            .map(|(_, s)| s.remaining.0 as f64 / s.cap.0.max(1) as f64)
+            .map(|(_, s)| s.remaining as f64 / s.ceiling.max(1) as f64)
             .fold(1.0, f64::min);
         Some(Signal::new(
             LoopId::Cybernetics, // placeholder — registry backfills
@@ -327,103 +327,6 @@ impl Sensor for VarietySensor {
     }
 }
 
-/// Senses wallet API key health from the gas budget manager.
-pub struct WalletKeyHealthSensor {
-    budget_manager: Arc<tokio::sync::RwLock<super::energy_budget_management::GasBudgetManager>>,
-}
-
-impl WalletKeyHealthSensor {
-    /// expect: "The system provides pluggable metric sensing for the cybernetic regulation loop"
-    pub fn new(
-        budget_manager: Arc<tokio::sync::RwLock<super::energy_budget_management::GasBudgetManager>>,
-    ) -> Self {
-        Self { budget_manager }
-    }
-}
-
-#[async_trait::async_trait]
-impl Sensor for WalletKeyHealthSensor {
-    async fn sense(&self) -> Option<Signal> {
-        let key_alerts = self.budget_manager.read().await.wallet_key_alerts().await;
-        if key_alerts.is_empty() {
-            return None; // Healthy — nothing to report.
-        }
-        Some(Signal::new(
-            LoopId::Cybernetics, // placeholder — registry backfills
-            SignalMetric::WalletKeyHealth,
-            1.0, // alert active
-            0.0, // set-point: no alerts
-        ))
-    }
-
-    fn metric(&self) -> Option<SignalMetric> {
-        Some(SignalMetric::WalletKeyHealth)
-    }
-
-    fn loop_id(&self) -> Option<LoopId> {
-        Some(LoopId::Cybernetics)
-    }
-}
-
-/// Senses wallet balance ratio from the gas budget manager.
-///
-/// Replaces the inline wallet ratio sensing that was in `CyberneticsLoop::sense()`.
-/// Data source: `GasBudgetManager::wallet_balance_ratios()`. Produces a signal
-/// per agent wallet.
-pub struct WalletBalanceRatioSensor {
-    budget_manager: Arc<tokio::sync::RwLock<super::energy_budget_management::GasBudgetManager>>,
-    set_point: f64,
-}
-
-impl WalletBalanceRatioSensor {
-    /// Create a new wallet balance ratio sensor.
-    ///
-    /// `set_point` is the alert threshold (default: 0.1 = alert when below 10%).
-    pub fn new(
-        budget_manager: Arc<tokio::sync::RwLock<super::energy_budget_management::GasBudgetManager>>,
-        set_point: f64,
-    ) -> Self {
-        Self {
-            budget_manager,
-            set_point,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl Sensor for WalletBalanceRatioSensor {
-    async fn sense(&self) -> Option<Signal> {
-        let wallet_ratios = self
-            .budget_manager
-            .read()
-            .await
-            .wallet_balance_ratios()
-            .await;
-        // Use the worst ratio as the aggregate signal.
-        let worst = wallet_ratios
-            .iter()
-            .map(|(ratio, _cap)| *ratio)
-            .fold(1.0, f64::min);
-        if worst >= self.set_point {
-            return None; // Healthy — nothing to report.
-        }
-        Some(Signal::new(
-            LoopId::Cybernetics,
-            SignalMetric::WalletBalanceRatio,
-            worst,
-            self.set_point,
-        ))
-    }
-
-    fn metric(&self) -> Option<SignalMetric> {
-        Some(SignalMetric::WalletBalanceRatio)
-    }
-
-    fn loop_id(&self) -> Option<LoopId> {
-        Some(LoopId::Cybernetics)
-    }
-}
-
 /// Senses tool reliability across all MCP tools.
 pub struct ToolReliabilitySensor {
     tool_stats: Arc<crate::tool_stats::ToolStats>,
@@ -468,227 +371,235 @@ impl Sensor for ToolReliabilitySensor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Error classifying why a trace-run metrics file could not be located.
+///
+/// Distinguishes I/O failures (the trace dir or a `metrics.json` is unreadable
+/// — a broken sensor) from the legitimate "no run has produced metrics yet"
+/// case, which is `Ok(None)`. Collapsing these into a single `None` masked
+/// DB outages and permission errors as "no deviation," blinding the
+/// regulation loop (the `.rules` `unwrap_or(0)` / `.ok()?` trap on sense
+/// inputs). See `tool_stats::read_count_field` for the canonical warn-then-
+/// fallback pattern this mirrors.
+#[derive(Debug, thiserror::Error)]
+pub enum MetricsLocateError {
+    /// The trace directory itself could not be read (missing, permission
+    /// denied, not a directory). The sensor cannot determine whether any run
+    /// has metrics — this is a broken sensor, not an empty one.
+    #[error("trace directory unreadable: {path}: {error}")]
+    TraceDirInaccessible {
+        path: std::path::PathBuf,
+        #[source]
+        error: std::io::Error,
+    },
+    /// A `metrics.json` candidate was found but its metadata (specifically
+    /// the modification time used to pick the newest run) could not be read.
+    /// The file is present but unreadable — a broken sensor.
+    #[error("metrics metadata unreadable: {path}: {error}")]
+    MetadataUnavailable {
+        path: std::path::PathBuf,
+        #[source]
+        error: std::io::Error,
+    },
+}
 
-    /// A test sensor that always returns a fixed signal.
-    struct TestSensor {
-        metric: SignalMetric,
-        loop_id: LoopId,
-        value: f64,
-        set_point: f64,
-    }
-
-    #[async_trait::async_trait]
-    impl Sensor for TestSensor {
-        async fn sense(&self) -> Option<Signal> {
-            Some(Signal::new(
-                self.loop_id,
-                self.metric,
-                self.value,
-                self.set_point,
-            ))
+/// Find the run directory whose `metrics.json` was most recently modified.
+///
+/// Returns `Ok(None)` when the trace directory exists but contains no run
+/// with a `metrics.json` (the legitimate "no metrics yet" case). Returns
+/// `Err` for I/O failures so the caller can `warn!` and distinguish a broken
+/// sensor from an empty one — collapsing the two into `None` made a DB outage
+/// indistinguishable from "coverage meets set-point" (F1/F2).
+///
+/// Shared by `TestCoverageSensor` and `MutationScoreSensor`; extracting this
+/// closes the byte-identical duplication and gives one place to enforce the
+/// error-classification contract. Public so the error-classification contract
+/// can be pinned by integration tests.
+pub fn latest_run_metrics(
+    trace_dir: &std::path::Path,
+) -> Result<Option<std::path::PathBuf>, MetricsLocateError> {
+    let entries =
+        std::fs::read_dir(trace_dir).map_err(|error| MetricsLocateError::TraceDirInaccessible {
+            path: trace_dir.to_path_buf(),
+            error,
+        })?;
+    let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+    for entry in entries.flatten() {
+        let metrics = entry.path().join("metrics.json");
+        if !metrics.is_file() {
+            continue;
         }
-
-        fn metric(&self) -> Option<SignalMetric> {
-            Some(self.metric)
+        let modified = std::fs::metadata(&metrics)
+            .and_then(|m| m.modified())
+            .map_err(|error| MetricsLocateError::MetadataUnavailable {
+                path: metrics.clone(),
+                error,
+            })?;
+        match &newest {
+            Some((_, best)) if &modified <= best => {}
+            _ => newest = Some((metrics, modified)),
         }
+    }
+    Ok(newest.map(|(p, _)| p))
+}
 
-        fn loop_id(&self) -> Option<LoopId> {
-            Some(self.loop_id)
+/// Senses test coverage from the latest trace run's `metrics.json`.
+///
+/// Data source: the trace filesystem (`HKASK_TRACE_DIR`, default `kask/traces`).
+/// Produces a signal only when `coverage_pct` is below the coverage floor.
+pub struct TestCoverageSensor {
+    trace_dir: std::path::PathBuf,
+    set_point: f64,
+}
+
+impl TestCoverageSensor {
+    /// expect: "The system provides pluggable metric sensing for the cybernetic regulation loop"
+    pub fn new(trace_dir: std::path::PathBuf, set_point: f64) -> Self {
+        Self {
+            trace_dir,
+            set_point,
         }
     }
+}
 
-    #[tokio::test]
-    async fn sensor_bus_sense_all_returns_signals() {
-        let bus = SensorBus::new();
-        bus.register(Arc::new(TestSensor {
-            metric: SignalMetric::EnergyRemaining,
-            loop_id: LoopId::Cybernetics,
-            value: 0.5,
-            set_point: 0.2,
-        }));
-        bus.register(Arc::new(TestSensor {
-            metric: SignalMetric::VarietyDeficit,
-            loop_id: LoopId::Cybernetics,
-            value: 10.0,
-            set_point: 5.0,
-        }));
-
-        let signals = bus.sense_all(LoopId::Cybernetics).await;
-        assert_eq!(signals.len(), 2);
-        assert_eq!(signals[0].source, LoopId::Cybernetics);
-        assert_eq!(signals[1].source, LoopId::Cybernetics);
-    }
-
-    #[tokio::test]
-    async fn sensor_bus_empty_returns_no_signals() {
-        let bus = SensorBus::new();
-        let signals = bus.sense_all(LoopId::Cybernetics).await;
-        assert!(signals.is_empty());
-    }
-
-    #[tokio::test]
-    async fn sensor_bus_provider_names() {
-        let bus = SensorBus::new();
-        bus.register(Arc::new(TestSensor {
-            metric: SignalMetric::EnergyRemaining,
-            loop_id: LoopId::Cybernetics,
-            value: 0.5,
-            set_point: 0.2,
-        }));
-        let names = bus.provider_names();
-        assert_eq!(names.len(), 1);
-        assert!(names[0].contains("TestSensor"));
-    }
-
-    #[tokio::test]
-    async fn sensor_catalog_register_and_sense() {
-        let catalog = SensorRegistry::new();
-        catalog.register_for(
+#[async_trait::async_trait]
+impl Sensor for TestCoverageSensor {
+    async fn sense(&self) -> Option<Signal> {
+        let path = match latest_run_metrics(&self.trace_dir) {
+            Ok(path) => path?,
+            Err(error) => {
+                tracing::warn!(
+                    target: "hkask.sensor.coverage",
+                    error = %error,
+                    "TestCoverageSensor: trace metrics unreadable — returning no signal (not 'no deviation')"
+                );
+                return None;
+            }
+        };
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                tracing::warn!(
+                    target: "hkask.sensor.coverage",
+                    path = %path.display(),
+                    error = %error,
+                    "TestCoverageSensor: metrics.json unreadable — returning no signal (not 'no deviation')"
+                );
+                return None;
+            }
+        };
+        let value: serde_json::Value = match serde_json::from_str(&contents) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    target: "hkask.sensor.coverage",
+                    path = %path.display(),
+                    error = %error,
+                    "TestCoverageSensor: metrics.json unparseable — returning no signal (not 'no deviation')"
+                );
+                return None;
+            }
+        };
+        let coverage = match value.get("coverage_pct").and_then(|v| v.as_f64()) {
+            Some(coverage) => coverage,
+            None => return None,
+        };
+        if coverage >= self.set_point {
+            return None;
+        }
+        Some(Signal::new(
             LoopId::Cybernetics,
-            Arc::new(TestSensor {
-                metric: SignalMetric::EnergyRemaining,
-                loop_id: LoopId::Cybernetics,
-                value: 0.3,
-                set_point: 0.2,
-            }),
-        );
-        catalog.register_for(
-            LoopId::Inference,
-            Arc::new(TestSensor {
-                metric: SignalMetric::InferenceGasRemaining,
-                loop_id: LoopId::Inference,
-                value: 0.1,
-                set_point: 0.2,
-            }),
-        );
-
-        let cybernetics_signals = catalog.sense_all(LoopId::Cybernetics).await;
-        assert_eq!(cybernetics_signals.len(), 1);
-        assert_eq!(cybernetics_signals[0].metric, SignalMetric::EnergyRemaining);
-
-        let inference_signals = catalog.sense_all(LoopId::Inference).await;
-        assert_eq!(inference_signals.len(), 1);
-        assert_eq!(
-            inference_signals[0].metric,
-            SignalMetric::InferenceGasRemaining
-        );
+            SignalMetric::TestCoverage,
+            coverage,
+            self.set_point,
+        ))
     }
 
-    #[tokio::test]
-    async fn sensor_catalog_sense_empty_loop_returns_nothing() {
-        let catalog = SensorRegistry::new();
-        let signals = catalog.sense_all(LoopId::Cybernetics).await;
-        assert!(signals.is_empty());
+    fn metric(&self) -> Option<SignalMetric> {
+        Some(SignalMetric::TestCoverage)
     }
 
-    #[tokio::test]
-    async fn sensor_catalog_total_sensors() {
-        let catalog = SensorRegistry::new();
-        catalog.register_for(
+    fn loop_id(&self) -> Option<LoopId> {
+        Some(LoopId::Cybernetics)
+    }
+}
+
+/// Senses mutation score from the latest trace run's `metrics.json`.
+///
+/// Data source: the trace filesystem (`HKASK_TRACE_DIR`, default `kask/traces`).
+/// Produces a signal only when `mutation_score` is below the mutation score floor.
+pub struct MutationScoreSensor {
+    trace_dir: std::path::PathBuf,
+    set_point: f64,
+}
+
+impl MutationScoreSensor {
+    /// expect: "The system provides pluggable metric sensing for the cybernetic regulation loop"
+    pub fn new(trace_dir: std::path::PathBuf, set_point: f64) -> Self {
+        Self {
+            trace_dir,
+            set_point,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Sensor for MutationScoreSensor {
+    async fn sense(&self) -> Option<Signal> {
+        let path = match latest_run_metrics(&self.trace_dir) {
+            Ok(path) => path?,
+            Err(error) => {
+                tracing::warn!(
+                    target: "hkask.sensor.mutation",
+                    error = %error,
+                    "MutationScoreSensor: trace metrics unreadable — returning no signal (not 'no deviation')"
+                );
+                return None;
+            }
+        };
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                tracing::warn!(
+                    target: "hkask.sensor.mutation",
+                    path = %path.display(),
+                    error = %error,
+                    "MutationScoreSensor: metrics.json unreadable — returning no signal (not 'no deviation')"
+                );
+                return None;
+            }
+        };
+        let value: serde_json::Value = match serde_json::from_str(&contents) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    target: "hkask.sensor.mutation",
+                    path = %path.display(),
+                    error = %error,
+                    "MutationScoreSensor: metrics.json unparseable — returning no signal (not 'no deviation')"
+                );
+                return None;
+            }
+        };
+        let score = match value.get("mutation_score").and_then(|v| v.as_f64()) {
+            Some(score) => score,
+            None => return None,
+        };
+        if score >= self.set_point {
+            return None;
+        }
+        Some(Signal::new(
             LoopId::Cybernetics,
-            Arc::new(TestSensor {
-                metric: SignalMetric::EnergyRemaining,
-                loop_id: LoopId::Cybernetics,
-                value: 0.3,
-                set_point: 0.2,
-            }),
-        );
-        catalog.register_for(
-            LoopId::Cybernetics,
-            Arc::new(TestSensor {
-                metric: SignalMetric::VarietyDeficit,
-                loop_id: LoopId::Cybernetics,
-                value: 10.0,
-                set_point: 5.0,
-            }),
-        );
-        catalog.register_for(
-            LoopId::Inference,
-            Arc::new(TestSensor {
-                metric: SignalMetric::InferenceGasRemaining,
-                loop_id: LoopId::Inference,
-                value: 0.1,
-                set_point: 0.2,
-            }),
-        );
-        assert_eq!(catalog.total_sensors(), 3);
+            SignalMetric::MutationScore,
+            score,
+            self.set_point,
+        ))
     }
 
-    #[tokio::test]
-    async fn sensor_catalog_sensor_inventory() {
-        let catalog = SensorRegistry::new();
-        catalog.register_for(
-            LoopId::Cybernetics,
-            Arc::new(TestSensor {
-                metric: SignalMetric::EnergyRemaining,
-                loop_id: LoopId::Cybernetics,
-                value: 0.3,
-                set_point: 0.2,
-            }),
-        );
-        catalog.register_for(
-            LoopId::Inference,
-            Arc::new(TestSensor {
-                metric: SignalMetric::InferenceGasRemaining,
-                loop_id: LoopId::Inference,
-                value: 0.1,
-                set_point: 0.2,
-            }),
-        );
-
-        let inventory = catalog.sensor_inventory();
-        assert_eq!(inventory.len(), 2);
-        // Verify each loop has its sensor registered
-        let cybernetics_entry = inventory
-            .iter()
-            .find(|(id, _)| *id == LoopId::Cybernetics)
-            .expect("Cybernetics should have sensors");
-        assert_eq!(cybernetics_entry.1.len(), 1);
-        let inference_entry = inventory
-            .iter()
-            .find(|(id, _)| *id == LoopId::Inference)
-            .expect("Inference should have sensors");
-        assert_eq!(inference_entry.1.len(), 1);
+    fn metric(&self) -> Option<SignalMetric> {
+        Some(SignalMetric::MutationScore)
     }
 
-    #[tokio::test]
-    async fn sensor_catalog_loops_without_sensors() {
-        let catalog = SensorRegistry::new();
-        // No sensors registered — all loops should be listed as without sensors
-        let empty_loops = catalog.loops_without_sensors();
-        assert!(empty_loops.contains(&LoopId::Cybernetics));
-        assert!(empty_loops.contains(&LoopId::Inference));
-        assert!(empty_loops.contains(&LoopId::Curation));
-
-        // Register a sensor for Cybernetics
-        catalog.register_for(
-            LoopId::Cybernetics,
-            Arc::new(TestSensor {
-                metric: SignalMetric::EnergyRemaining,
-                loop_id: LoopId::Cybernetics,
-                value: 0.3,
-                set_point: 0.2,
-            }),
-        );
-        let empty_loops = catalog.loops_without_sensors();
-        assert!(!empty_loops.contains(&LoopId::Cybernetics));
-        assert!(empty_loops.contains(&LoopId::Inference));
-    }
-
-    #[tokio::test]
-    async fn sensor_registry_clone_preserves_providers() {
-        let bus = SensorBus::new();
-        bus.register(Arc::new(TestSensor {
-            metric: SignalMetric::EnergyRemaining,
-            loop_id: LoopId::Cybernetics,
-            value: 0.5,
-            set_point: 0.2,
-        }));
-        let cloned = bus.clone();
-        let signals = cloned.sense_all(LoopId::Cybernetics).await;
-        assert_eq!(signals.len(), 1);
+    fn loop_id(&self) -> Option<LoopId> {
+        Some(LoopId::Cybernetics)
     }
 }

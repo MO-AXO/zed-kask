@@ -725,6 +725,7 @@ fn convert_usage(usage: &Usage) -> TokenUsage {
         output_tokens: usage.output_tokens.unwrap_or(0),
         cache_creation_input_tokens: usage.cache_creation_input_tokens.unwrap_or(0),
         cache_read_input_tokens: usage.cache_read_input_tokens.unwrap_or(0),
+        cost: None,
     }
 }
 
@@ -774,6 +775,7 @@ mod tests {
             thinking_effort: None,
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let anthropic_request = into_anthropic(
@@ -882,6 +884,7 @@ mod tests {
             thinking_effort: None,
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let anthropic_request = into_anthropic(
@@ -942,6 +945,7 @@ mod tests {
             thinking_effort: Some("xhigh".into()),
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let anthropic_request = into_anthropic(
@@ -993,6 +997,7 @@ mod tests {
                 thinking_effort: None,
                 speed: None,
                 compact_at_tokens: None,
+                max_tokens: None,
             };
 
             let anthropic_request = into_anthropic(
@@ -1059,6 +1064,7 @@ mod tests {
             thinking_effort: None,
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let anthropic_request = into_anthropic(
@@ -1099,6 +1105,7 @@ mod tests {
             thinking_allowed: true,
             speed: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
         request.messages.push(LanguageModelRequestMessage {
             role: Role::Assistant,

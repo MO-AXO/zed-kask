@@ -1,5 +1,5 @@
 # Improvement Kata Process Manifest
-# ℏKask v0.31.0 — Improvement cycle as convergent PDCA
+# ℏKask v0.34.0 — Improvement cycle as convergent PDCA
 #
 # Two modes:
 #   improvement (default) — 4-step PDCA: direction → current → target → experiment
@@ -17,17 +17,18 @@ manifest:
     kata-starter): foundational drills for habit-building — Five Questions,
     PDCA Cycle, and Observation Drill. Agents graduate when automaticity > 0.5.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
 
 convergence:
-  threshold: 0.15
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
+  target_artifacts_field: "current_artifacts"
 
 gas:
   cap: 100000
@@ -77,7 +78,7 @@ steps:
     renderer: minijinja
     template_ref: kata-improvement/beginner-selector
     gas_cap: 2500
-    timeout_seconds: 30
+    timeout_seconds: 120
     input_mapping:
       learner_profile: "{{ learner_profile | default({}) }}"
       practice_goal: "{{ practice_goal | default('foundational scientific thinking') }}"
@@ -91,7 +92,7 @@ steps:
     renderer: minijinja
     template_ref: kata-improvement/beginner-five-questions
     gas_cap: 3000
-    timeout_seconds: 45
+    timeout_seconds: 120
     input_mapping:
       learner_profile: "{{ learner_profile | default({}) }}"
       selector_result: "{{ step_1_result }}"
@@ -105,7 +106,7 @@ steps:
     renderer: minijinja
     template_ref: kata-improvement/beginner-pdca-cycle
     gas_cap: 3000
-    timeout_seconds: 45
+    timeout_seconds: 120
     input_mapping:
       learner_profile: "{{ learner_profile | default({}) }}"
       selector_result: "{{ step_1_result }}"
@@ -119,26 +120,31 @@ steps:
     renderer: minijinja
     template_ref: kata-improvement/beginner-observation-drill
     gas_cap: 3000
-    timeout_seconds: 45
+    timeout_seconds: 120
     input_mapping:
       learner_profile: "{{ learner_profile | default({}) }}"
       selector_result: "{{ step_1_result }}"
 
   - ordinal: 5
-    action: select
+    action: compute
     condition: "{{ mode | default('improvement') == 'beginner' }}"
+    compute_ref: lisp.eval
     description: >
-      BEGINNER CONVERGENCE: Compute convergence metric for beginner drill
-      cycle. Measures habit signal quality and automaticity.
-    renderer: minijinja
-    template_ref: kata-improvement/beginner-convergence-check
-    gas_cap: 2000
-    timeout_seconds: 30
+      Compute structural-validity score from the beginner drill's actual
+      output. Only one of steps 2/3/4 runs (selected by step 1); the others
+      are null. The convergence signal is the graduation criterion:
+      1.0 - automaticity_self_assess from the five-questions drill (step 2).
+      If the five-questions drill did not run (step_2_result is null) or
+      automaticity_self_assess is absent, the form returns 1.0 (not yet
+      graduated — pdca-cycle and observation-drill do not measure
+      automaticity directly). Lower = more converged.
+    gas_cap: 100
+    timeout_seconds: 10
     input_mapping:
-      selector_result: "{{ step_1_result }}"
-      drill_result: "{{ step_2_result | default(step_3_result | default(step_4_result | default({}))) }}"
+      form: "(if (is_null step_2_result) 1.0 (let ((a (assoc \"automaticity_self_assess\" step_2_result))) (if (is_null a) 1.0 (- 1.0 a))))"
+      env:
+        step_2_result: "{{ step_2_result }}"
 
-  # === IMPROVEMENT MODE (default) ===
   - ordinal: 6
     action: select
     condition: "{{ mode | default('improvement') == 'improvement' }}"
@@ -146,7 +152,7 @@ steps:
     renderer: minijinja
     template_ref: kata-improvement/improvement-step1-direction.j2
     gas_cap: 3000
-    timeout_seconds: 45
+    timeout_seconds: 120
     input_mapping:
       challenge: "{{ challenge }}"
 
@@ -157,7 +163,7 @@ steps:
     renderer: minijinja
     template_ref: kata-improvement/improvement-step2-current.j2
     gas_cap: 3500
-    timeout_seconds: 45
+    timeout_seconds: 120
     input_mapping:
       challenge: "{{ challenge }}"
       current_metrics: "{{ current_metrics | default({}) }}"
@@ -170,7 +176,7 @@ steps:
     renderer: minijinja
     template_ref: kata-improvement/improvement-step3-target.j2
     gas_cap: 3500
-    timeout_seconds: 45
+    timeout_seconds: 120
     input_mapping:
       challenge: "{{ challenge }}"
       current_condition: "{{ step_7_result }}"
@@ -182,24 +188,31 @@ steps:
     renderer: minijinja
     template_ref: kata-improvement/improvement-step4-experiment.j2
     gas_cap: 4000
-    timeout_seconds: 60
+    timeout_seconds: 120
     input_mapping:
       challenge: "{{ challenge }}"
       current_condition: "{{ step_7_result }}"
       target_condition: "{{ step_8_result }}"
 
   - ordinal: 10
-    action: select
+    action: compute
     condition: "{{ mode | default('improvement') == 'improvement' }}"
-    description: Compute normalized convergence metric for improvement cycle.
-    renderer: minijinja
-    template_ref: kata-improvement/kata-improvement-convergence-check.j2
-    gas_cap: 2000
-    timeout_seconds: 30
+    compute_ref: lisp.eval
+    description: >
+      Compute structural-validity score from step 10's actual experiment
+      output. The convergence signal is the count of missing core experiment
+      fields (obstacle, next_experiment, prediction, measurement_method,
+      success_criterion, learning_commitment, when_to_check): 7 minus the
+      number present. Lower = more converged (zero missing = well-defined
+      experiment). If step_9_result is null or a core field is absent, the
+      form counts it as missing (no silent default that masks a broken
+      experiment step).
+    gas_cap: 100
+    timeout_seconds: 10
     input_mapping:
-      step2_result: "{{ step_7_result }}"
-      step3_result: "{{ step_8_result }}"
-      step4_result: "{{ step_9_result }}"
+      form: "(- 7 (+ (if (is_null (assoc \"obstacle\" step_9_result)) 0 1) (if (is_null (assoc \"next_experiment\" step_9_result)) 0 1) (if (is_null (assoc \"prediction\" step_9_result)) 0 1) (if (is_null (assoc \"measurement_method\" step_9_result)) 0 1) (if (is_null (assoc \"success_criterion\" step_9_result)) 0 1) (if (is_null (assoc \"learning_commitment\" step_9_result)) 0 1) (if (is_null (assoc \"when_to_check\" step_9_result)) 0 1)))"
+      env:
+        step_9_result: "{{ step_9_result }}"
 
   - ordinal: 11
     action: loop
@@ -209,7 +222,9 @@ steps:
     timeout_seconds: 30
     input_mapping:
       loop_target: "{{ 1 }}"
-      convergence_metric: "{{ step_5_result.convergence_metric | default(1.0) }}"
+      # Push the drill quality signal into convergence_signal so the Cauchy
+      # criterion can detect when the iterates have stopped moving.
+      convergence_signal: "{{ step_5_result }}"
 
   - ordinal: 12
     action: loop
@@ -219,7 +234,9 @@ steps:
     timeout_seconds: 30
     input_mapping:
       loop_target: "{{ 7 }}"
-      convergence_metric: "{{ step_10_result.convergence_metric | default(1.0) }}"
+      # Push the experiment quality signal into convergence_signal so the Cauchy
+      # criterion can detect when the iterates have stopped moving.
+      convergence_signal: "{{ step_11_result }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -227,59 +244,6 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    # Beginner mode templates
-    - resource: template
-      action: render
-      template_id: kata-improvement/beginner-selector
-      gas_budget: 2500
-    - resource: template
-      action: render
-      template_id: kata-improvement/beginner-five-questions
-      gas_budget: 3000
-    - resource: template
-      action: render
-      template_id: kata-improvement/beginner-pdca-cycle
-      gas_budget: 3000
-    - resource: template
-      action: render
-      template_id: kata-improvement/beginner-observation-drill
-      gas_budget: 3000
-    - resource: template
-      action: render
-      template_id: kata-improvement/beginner-convergence-check
-      gas_budget: 2000
-    # Improvement mode templates
-    - resource: template
-      action: render
-      template_id: kata-improvement/improvement-step1-direction
-      gas_budget: 3000
-    - resource: template
-      action: render
-      template_id: kata-improvement/improvement-step2-current
-      gas_budget: 3500
-    - resource: template
-      action: render
-      template_id: kata-improvement/improvement-step3-target
-      gas_budget: 3500
-    - resource: template
-      action: render
-      template_id: kata-improvement/improvement-step4-experiment
-      gas_budget: 4000
-    - resource: template
-      action: render
-      template_id: kata-improvement/kata-improvement-convergence-check
-      gas_budget: 2000
-    - resource: manifest
-      action: execute
-      template_id: kata-improvement
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true
 
 # Recommends: improv skill for self-directed coaching posture during Step 4.
 # - Plan (design experiment) → Yes But

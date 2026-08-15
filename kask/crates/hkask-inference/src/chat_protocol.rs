@@ -1,7 +1,8 @@
 //! Shared OpenAI-compatible chat completion protocol types and helpers.
 //!
-//! All seven chat backends (DeepInfra, Together AI, fal.ai, OpenRouter,
-//! KiloCode, Ollama, Cline) speak the same `/v1/chat/completions` wire format.
+//! All four chat backends (DeepInfra, OpenRouter, Ollama,
+//! AtlasCloud) speak the same `/v1/chat/completions` wire format. Media
+//! backends (image/video/audio/ASR) do not use this protocol.
 //! This module provides the shared request/response types and helper functions
 //! used by all backends.
 //!
@@ -15,7 +16,6 @@ use hkask_types::{
     InferenceUsage, StructuredToolCall, TokenProb, TokenProbability,
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
 
 #[allow(dead_code)] // referenced as serde default via string
 fn default_enable_thinking() -> bool {
@@ -119,93 +119,7 @@ pub fn build_chat_request_messages(
     }
 }
 
-/// Build an OpenAI-standard multimodal vision request.
-///
-/// Uses the content-array format (standard across OpenAI, llama.cpp, RunPod):
-/// ```json
-/// {"messages": [{"role": "user", "content": [
-///   {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
-///   {"type": "text", "text": "Extract all text..."}
-/// ]}]}
-/// ```
-#[must_use]
-pub fn build_vision_request(
-    model: &str,
-    prompt: &str,
-    images: &[String],
-    params: &LLMParameters,
-) -> serde_json::Value {
-    let mut content: Vec<serde_json::Value> = images
-        .iter()
-        .map(|b64| {
-            serde_json::json!({
-                "type": "image_url",
-                "image_url": {"url": format!("data:image/jpeg;base64,{}", b64)}
-            })
-        })
-        .collect();
-    content.push(serde_json::json!({"type": "text", "text": prompt}));
-
-    serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": content}],
-        "temperature": params.temperature,
-        "top_p": params.top_p,
-        "max_tokens": params.max_tokens,
-    })
-}
-
-/// Shared vision inference — sends OpenAI multimodal request and parses response.
-/// Used by DeepInfra, Together, OpenRouter, and KiloCode backends.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn vision_infer(
-    client: &reqwest::Client,
-    base_url: &str,
-    api_key: &str,
-    label: &str,
-    model: &str,
-    prompt: &str,
-    images: &[String],
-    params: &LLMParameters,
-) -> Result<InferenceResult, InferenceError> {
-    validate_prompt(prompt)?;
-    if images.is_empty() {
-        return Err(InferenceError::Generation("No images provided".into()));
-    }
-    let request = build_vision_request(model, prompt, images, params);
-    let response = client
-        .post(format!("{}/v1/chat/completions", base_url))
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| InferenceError::Connection(format!("{} vision: {}", label, e)))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        return Err(InferenceError::Connection(format!(
-            "{} vision {}: {}",
-            label, status, body
-        )));
-    }
-    let body = response
-        .text()
-        .await
-        .map_err(|e| InferenceError::Connection(format!("{} body read: {}", label, e)))?;
-    let chat_response: ChatResponse = serde_json::from_str(&body).map_err(|e| {
-        let preview = if body.len() > 500 {
-            format!("{}...", &body[..500])
-        } else {
-            body.clone()
-        };
-        InferenceError::Json(format!("{} JSON: {} | body: {}", label, e, preview))
-    })?;
-    let result = chat_response_to_result(chat_response)?;
-    info!(target: "reg.inference", provider = label, model = %result.model, tokens = result.usage.total_tokens, "{} vision inference completed", label);
-    Ok(result)
-}
-
-// ── Response types ───────────────────────────────────────────────────────────
+// ── Response types ──────────────────────────────────────────────────────────
 
 /// OpenAI-compatible chat completion response.
 ///
@@ -262,6 +176,23 @@ pub struct ChatUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub total_tokens: u32,
+    /// Observed USD cost of this inference call (provider-reported, not
+    /// operator-configured). `None` when the provider doesn't report cost
+    /// (e.g. Ollama, local, $0). OpenRouter uses this field name.
+    #[serde(default)]
+    pub cost: Option<f64>,
+    /// DeepInfra's cost field (same meaning as `cost`, different key).
+    #[serde(default)]
+    pub estimated_cost: Option<f64>,
+    /// Market compute value (BYOK). The real energy cost of the
+    /// inference regardless of BYOK discounts. When present, preferred over
+    /// `cost` for rJoule (energy spend) tracking.
+    #[serde(default)]
+    pub market_cost: Option<f64>,
+    /// Cache discount details (OpenRouter: `prompt_tokens_details.cached_tokens`).
+    /// Opaque JSON; the executor only reads the resolved `cost`/`market_cost`.
+    #[serde(default)]
+    pub prompt_tokens_details: Option<serde_json::Value>,
 }
 
 // ── Token probability types ─────────────────────────────────────────────────
@@ -356,7 +287,7 @@ pub fn map_tool_calls(calls: &[RawToolCall]) -> Vec<StructuredToolCall> {
                 server,
                 tool,
                 args: tc.function.arguments.clone(),
-                call_id: Some(tc.id.clone().unwrap_or_default()),
+                call_id: tc.id.clone(),
             }
         })
         .collect()
@@ -434,21 +365,28 @@ pub fn chat_response_to_result(response: ChatResponse) -> Result<InferenceResult
     };
 
     let usage = response.usage.unwrap_or_default();
+    let inference_usage = InferenceUsage {
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens,
+    };
+    // Observed per-call cost from the provider's response. rJoule = USD.
+    // Prefer `market_cost` (real compute energy, reflects discounts/cache
+    // regardless of BYOK) over `cost`/`estimated_cost` (what you pay, may
+    // be 0 with BYOK). `None` when the provider reports no cost (Ollama, $0).
+    let cost_usd = usage.market_cost.or(usage.cost).or(usage.estimated_cost);
 
     Ok(InferenceResult {
         text,
         model: response.model,
         reasoning,
-        usage: InferenceUsage {
-            prompt_tokens: usage.prompt_tokens,
-            completion_tokens: usage.completion_tokens,
-            total_tokens: usage.total_tokens,
-        },
+        usage: inference_usage,
         finish_reason: choice
             .finish_reason
             .unwrap_or_else(|| "unknown".to_string()),
         token_probabilities,
         tool_calls,
+        cost_usd,
     })
 }
 
@@ -465,15 +403,31 @@ pub fn parse_sse_stream(
     model_id: &str,
 ) -> Vec<Result<InferenceStreamChunk, InferenceError>> {
     let mut chunks: Vec<Result<InferenceStreamChunk, InferenceError>> = Vec::new();
+    // Track parse failures so a stream where *every* non-trivial line is
+    // unparseable (provider changed schema, returned an HTML error page, etc.)
+    // is not silently masked as a clean empty-then-stop. The per-line `continue`
+    // is correct for SSE (malformed lines are expected), but a 100% failure rate
+    // means the consumer would see a synthesized "stop" chunk with no signal that
+    // the stream was entirely unparseable (F10 — loop not closed).
+    let mut lines_seen: usize = 0;
+    let mut parse_failures: usize = 0;
+    let mut first_offending_line: Option<&str> = None;
     for line in body.lines() {
         let line = line.trim();
         if line.is_empty() || line == "data: [DONE]" {
             continue;
         }
+        lines_seen += 1;
         let json_str = line.strip_prefix("data: ").unwrap_or(line);
         let chunk: StreamChunk = match serde_json::from_str(json_str) {
             Ok(c) => c,
-            Err(_) => continue,
+            Err(_) => {
+                parse_failures += 1;
+                if first_offending_line.is_none() {
+                    first_offending_line = Some(line);
+                }
+                continue;
+            }
         };
         let choice = match chunk.choices.first() {
             Some(c) => c,
@@ -511,10 +465,25 @@ pub fn parse_sse_stream(
             } else {
                 vec![]
             },
+            cost_usd: None,
         }));
     }
 
     if chunks.is_empty() {
+        // If every non-trivial line failed to parse, the stream was entirely
+        // unparseable — warn so an operator can distinguish "provider returned
+        // an empty stream" from "provider changed schema / returned an error page."
+        // The synthesized stop chunk below is still emitted (the consumer contract
+        // expects at least one chunk), but the warn closes the observability loop.
+        if lines_seen > 0 && parse_failures == lines_seen {
+            tracing::warn!(
+                target: "hkask.inference.sse",
+                model = %model_id,
+                lines_seen,
+                first_offending_line = first_offending_line.unwrap_or(""),
+                "SSE stream: every non-trivial line failed to parse — provider may have changed schema or returned an error page"
+            );
+        }
         chunks.push(Ok(InferenceStreamChunk {
             text_delta: String::new(),
             reasoning_delta: String::new(),
@@ -522,6 +491,7 @@ pub fn parse_sse_stream(
             finish_reason: Some("stop".to_string()),
             usage: None,
             tool_calls: vec![],
+            cost_usd: None,
         }));
     }
 
@@ -788,8 +758,6 @@ data: [DONE]
             seed: None,
             disable_thinking: false,
             adapter: None,
-            bypass_fusion: false,
-            fusion_config: None,
             system_prompt: None,
         };
         let messages = vec![ChatMessage::user("Write a sentence.")];
@@ -831,8 +799,6 @@ data: [DONE]
             seed: None,
             disable_thinking: true,
             adapter: None,
-            bypass_fusion: false,
-            fusion_config: None,
             system_prompt: None,
         };
         let messages = vec![ChatMessage::user("Summarize.")];
@@ -864,8 +830,6 @@ data: [DONE]
             seed: None,
             disable_thinking: false,
             adapter: None,
-            bypass_fusion: false,
-            fusion_config: None,
             system_prompt: None,
         };
         let messages = vec![ChatMessage::user("Hello.")];
@@ -898,5 +862,142 @@ data: [DONE]
 
         // Overlong → error
         assert!(validate_prompt(&"x".repeat(1_000_001)).is_err());
+    }
+
+    // Observed per-call cost: the provider's `usage.cost` is carried onto
+    // `InferenceResult.cost_usd` so the manifest executor can charge rJoule
+    // (1 rJoule = $1 USD) from the provider-reported value, not an
+    // operator-configured price table.
+    #[test]
+    fn chat_result_carries_observed_usage_cost() {
+        let raw = r#"{
+            "model": "OpenRouter/z-ai/glm-5.2",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+                "cost": 0.001
+            }
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(raw).expect("deserialize");
+        let result = chat_response_to_result(resp).expect("result");
+        assert_eq!(result.cost_usd, Some(0.001));
+    }
+
+    // DeepInfra reports cost under `estimated_cost` (different key, same meaning).
+    #[test]
+    fn chat_result_carries_deepinfra_estimated_cost() {
+        let raw = r#"{
+            "model": "DeepInfra/meta-llama/Llama-3.3-70B-Instruct",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+                "estimated_cost": 0.002
+            }
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(raw).expect("deserialize");
+        let result = chat_response_to_result(resp).expect("result");
+        assert_eq!(result.cost_usd, Some(0.002));
+    }
+
+    // `market_cost` (real compute energy) wins over `cost` (what you pay), so
+    // BYOK calls where `cost == 0` still charge rJoule for the energy spent.
+    #[test]
+    fn chat_result_prefers_market_cost_over_cost() {
+        let raw = r#"{
+            "model": "OpenRouter/qwen/qwen3-235b",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+                "cost": 0.0,
+                "market_cost": 0.003
+            }
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(raw).expect("deserialize");
+        let result = chat_response_to_result(resp).expect("result");
+        assert_eq!(result.cost_usd, Some(0.003));
+    }
+
+    // Providers that report no cost (Ollama, local, $0) → `None` (free, not charged).
+    #[test]
+    fn chat_result_no_cost_when_usage_omits_cost_fields() {
+        let raw = r#"{
+            "model": "ollama/qwen3:8b",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(raw).expect("deserialize");
+        let result = chat_response_to_result(resp).expect("result");
+        assert_eq!(result.cost_usd, None);
+    }
+
+    // F10 — a stream where every non-trivial line fails to parse (provider
+    // changed schema, returned an HTML error page, etc.) must still produce a
+    // synthesized stop chunk (the consumer contract expects at least one), but
+    // the parse-failure tracking must be observable so the warn fires. This test
+    // pins the behavioral contract: the synthesized chunk is emitted, and the
+    // function does not panic. The warn itself is verified by the parse-failure
+    // counter logic (if `lines_seen > 0 && parse_failures == lines_seen`, the
+    // warn fires — this test exercises that path with a fully-unparseable body).
+    #[test]
+    fn parse_sse_stream_synthesizes_stop_when_all_lines_unparseable() {
+        // An HTML error page — every line fails to parse as SSE JSON.
+        let body = "<html><body>503 Service Unavailable</body></html>";
+        let chunks = parse_sse_stream(body, "test-model");
+        // Must produce exactly one synthesized stop chunk (consumer contract).
+        assert_eq!(
+            chunks.len(),
+            1,
+            "must synthesize one stop chunk for an unparseable stream"
+        );
+        let chunk = chunks[0].as_ref().expect("synthesized chunk is Ok");
+        assert_eq!(chunk.model, "test-model");
+        assert_eq!(chunk.finish_reason.as_deref(), Some("stop"));
+        assert!(
+            chunk.text_delta.is_empty(),
+            "synthesized chunk has empty text"
+        );
+    }
+
+    // F10 — a stream with a mix of parseable and unparseable lines must not
+    // warn (partial failure is normal for SSE). Only a 100% failure rate fires
+    // the warn. This test pins that a single good chunk suppresses the warn.
+    #[test]
+    fn parse_sse_stream_does_not_synthesize_when_some_lines_parse() {
+        let body = "data: not-json\ndata: {\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n";
+        let chunks = parse_sse_stream(body, "m");
+        // One good chunk → no synthesized stop (chunks is non-empty).
+        assert_eq!(
+            chunks.len(),
+            1,
+            "must produce the one good chunk, not synthesize"
+        );
+        let chunk = chunks[0].as_ref().expect("chunk is Ok");
+        assert_eq!(chunk.text_delta, "hi");
     }
 }

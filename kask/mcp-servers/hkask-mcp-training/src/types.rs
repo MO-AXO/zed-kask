@@ -2,13 +2,14 @@
 //!
 //! Eight tools: ingest_qa, ingest_dataset, assemble_dataset, submit (handles
 //! retrain via optional feedback_path), status, cancel, evaluate,
-//! validate_config. Deployment tools removed in favor of `AdapterPort`;
-//! register/list/delete adapters removed in favor of `AdapterStore` /
-//! `AdapterPort` direct calls; preflight_check replaced by validate_config
-//! (runs the actual lora-training skill gates).
+//! validate_config. Deployment tools were removed (the `AdapterPort`/
+//! `AdapterRouter` that replaced them was dead code and has also been removed);
+//! register/list/delete adapters removed in favor of `AdapterStore` direct
+//! calls; preflight_check replaced by validate_config (runs the actual
+//! lora-training skill gates).
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::providers::TrainingParams;
 
@@ -69,6 +70,15 @@ pub struct TrainSubmitRequest {
     /// Defaults to an auto-generated path in the cache dir.
     #[serde(default)]
     pub merged_output_path: Option<String>,
+    /// Operator confirmation that this GPU spend is authorized.
+    /// Required for all training submissions — `training_submit` rejects
+    /// calls where this is absent or false. This is a human-in-the-loop
+    /// gate: the agent must present the estimated cost to the operator
+    /// and receive explicit approval before setting this to `true`.
+    /// This enforces the P2 consent gate that the historical pipeline
+    /// runner enforced but was lost when the runner was removed.
+    #[serde(default)]
+    pub confirmed: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -149,13 +159,4 @@ pub struct TrainValidateConfigRequest {
     /// Optional base model — if provided, runs G-Q5 (paged optimizer heuristic).
     #[serde(default)]
     pub base_model: Option<String>,
-}
-
-// ── Supporting types ─────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AbBaseline {
-    pub previous_version: u32,
-    pub previous_loss: f32,
-    pub previous_perplexity: f32,
 }

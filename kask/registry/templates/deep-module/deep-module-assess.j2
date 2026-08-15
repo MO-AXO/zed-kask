@@ -1,11 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- assess
-- classify
-- evaluate
-- detect
-- infer
 contract:
   input:
     module_path: string
@@ -19,8 +13,7 @@ contract:
     classification: string
     red_flags: array
     recommendations: array
-  energy_cap: 6144
-  visibility: Public
+visibility: Public
 ---
 {# Template: deep-module/deep-module-assess.j2 #}
 {# Functional Role: KnowAct — Assess module depth: enumerate public interface, evaluate behavior, compute depth score #}

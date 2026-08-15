@@ -10,7 +10,7 @@ crate:
     exfiltration, tool misuse) at configurable persistence levels (single-shot,
     iterative multi-turn, or persistent adaptive attacks), and evaluate resistance
     rates against generated adversarial inputs. Evolved: now probes hKask's actual
-    deployed defenses (8-layer defense-in-depth stack) and reports which layers
+    deployed defenses (5-layer defense-in-depth stack) and reports which layers
     were bypassed by each attack.
 
 templates:
@@ -18,8 +18,6 @@ templates:
     name: "Generate adversarial inputs targeting a specific output across…"
     path: generate-adversarial.j2
     type: KnowAct
-    lexicon_terms:
-      [assess, detect, analyze, synthesize, probe, classify, sequence, escalate]
     description: >
       Generate adversarial inputs targeting a specific output across multiple
       vulnerability categories and injection vectors. Supports three persistence
@@ -31,7 +29,6 @@ templates:
     name: "Select the best adversarial target and map its vulnerability surface"
     path: select-target.j2
     type: KnowAct
-    lexicon_terms: [classify, discriminate, calibrate, assess, orient]
     description: >
       Select the best adversarial target and map its vulnerability surface against
       hKask's deployed defense layers. Evaluates target domain against adversarial
@@ -42,18 +39,10 @@ templates:
     name: "Test a target output against generated adversarial inputs"
     path: test-against-target.j2
     type: KnowAct
-    lexicon_terms: [evaluate, verify, audit, score, detect, classify]
     description: >
       Test a target output against generated adversarial inputs. Evaluate
       resistance rate, identify critical failures, and report which defense
-      layers were bypassed by each attack. Includes canary token leakage and
-      capability token forgery detection.
+      layers were bypassed by each attack. Includes capability token forgery
+      detection.
 
-  - id: adversarial-red-team/adversarial-convergence-check
-    name: "Compute normalized convergence metric for adversarial-red-team PDCA…"
-    path: adversarial-convergence-check.j2
-    type: KnowAct
-    lexicon_terms: [evaluate, converge, classify, verify, calibrate]
-    description: >
-      Compute normalized convergence metric for adversarial-red-team PDCA cycles.
-      Returns convergence_metric plus rationale and blockers.
+

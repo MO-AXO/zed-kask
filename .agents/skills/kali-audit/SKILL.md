@@ -1,8 +1,8 @@
 ---
 name: kali-audit
+core: true
 visibility: public
-description: "Security review skill for hKask. Audits Rust code, Jinja2 templates, YAML manifests, supply chain, MCP surfaces, and LLM I/O boundaries for security vulnerabilities. Anchored to OWASP LLM Top 10 (2025), MITRE ATLAS v5.1, NIST SSDF SP 800-218A. Forward-adaptable: consumes the security regression library at runtime, checks defense-layer coverage (8 layers), and discovers surfaces dynamically. Single skill with a surface parameter — not a bundle.
-"
+description: "Security review skill for hKask. Audits Rust code, Jinja2 templates, YAML manifests, supply chain, MCP surfaces, and LLM I/O boundaries for vulnerabilities. Forward-adaptable: consumes the security regression library at runtime."
 ---
 
 # Kali Audit
@@ -42,13 +42,6 @@ Security review skill for hKask. Audits Rust code, Jinja2 templates, YAML manife
 4. Produce proposed regression entries in YAML format with OWASP 2025 numbering and source citations.
 5. Identify defense-layer gaps and top 3 highest-priority fixes.
 
-### kali-audit/convergence-check
-
-1. Compute the convergence metric on [0, 1] where 0 = converged.
-2. Score five dimensions: critical/high findings (0.40), medium findings (0.15), defense-layer coverage (0.25), CWE coverage (0.10), regression library growth (0.10).
-3. Converged when metric ≤ 0.10 with minimum 5% relative improvement from previous cycle.
-4. Identify specific blockers (missing defense layers, unfixed findings).
-
 ## Registry Templates
 
 | Template | Type | Purpose |
@@ -56,7 +49,6 @@ Security review skill for hKask. Audits Rust code, Jinja2 templates, YAML manife
 | `select-surface.j2` | KnowAct | Select target surface, discover defense layers, read regression library. Forward-adaptable: surfaces discovered dynamically, layers are parameters. |
 | `audit.j2` | KnowAct | Run security checks consuming the regression library at runtime. Checks for evidence-backed patterns (OWASP, ANSSI, RustSec, Microsoft Research). |
 | `report.j2` | KnowAct | Synthesize findings with OWASP 2025 numbering, ATLAS tactics, NIST SSDF practices, and source citations. Proposes regression entries. |
-| `convergence-check.j2` | KnowAct | Convergence metric including defense-layer coverage (8 layers), CWE coverage, and regression library growth. |
 | `taxonomy-map.j2` | KnowAct | Map supply-chain findings to OSC&R attack taxonomy (folded from attack-taxonomy-mapper). Only runs for surface == 'supply-chain'. Emits reg.taxonomy.map spans. |
 
 ## Defense-in-Depth Layer Catalog
@@ -89,7 +81,6 @@ The `security/regressions/` directory is the **deep artifact** — it compounds 
 - `select-surface.j2`: Public.
 - `audit.j2`: Public.
 - `report.j2`: Public.
-- `convergence-check.j2`: Public.
 - `taxonomy-map.j2`: Public. Only runs for surface == 'supply-chain'. Every mapping requires concrete evidence: finding reference, CWE category, OSC&R tactic + technique.
 - Do NOT fabricate findings — only report what was actually discovered through tool usage.
 - Every finding must include concrete evidence (file path, line number, code snippet) and a source citation.

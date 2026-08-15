@@ -1,0 +1,52 @@
+{# RenderAct — format and surface the finalized Sankey as the cascade's final output.
+[inference]
+max_tokens = 2048
+   This is a pure Jinja2 template (no frontmatter) executed by the `render` action.
+   It wraps the adapt step's mermaid source in a titled, annotated document with:
+   - A title derived from domain + subject
+   - A description paragraph (domain, weight unit, conservation mode, ontology)
+   - The Mermaid sankey-beta diagram in a fenced code block
+   - A flow annotation table (source → target, weight, provenance)
+   - A conservation check line
+   - A notes section (abbreviations, placeholders, structural deviations)
+   - An output path for file save
+
+   Deterministic — no LLM call. All formatting is Jinja2 template logic. #}
+
+{# ── Title ── #}
+{%- set domain_title = domain | replace("-", " ") | title -%}
+{%- set subject_title = subject | replace("-", " ") | title -%}
+
+# {{ domain_title }}: {{ subject_title }}
+
+{# ── Description ── #}
+
+This diagram visualizes a {{ domain | replace("-", " ") }} flow with {{ node_count }} nodes and {{ edge_count }} edges. Weights are in {{ weight_unit }}. Conservation mode: **{{ conservation_mode }}**{% if conservation_mode == "mandatory" %} — inflow equals outflow at every internal node.{% elif conservation_mode == "asserted" %} — conservation may or may not hold; discrepancies are flagged.{% elif conservation_mode == "none" %} — flows are not conserved; asymmetry is intentional and not balanced with fabricated loss branches.{% endif %}
+
+{# ── Mermaid diagram ── #}
+
+```mermaid
+{{ mermaid_source }}
+```
+
+{# ── Flow annotations ── #}
+
+| Source | Target | Weight | Notes |
+|--------|--------|--------|-------|
+{%- for edge in edges %}
+| {{ edge.source }} | {{ edge.target }} | {{ edge.weight }} | {{ edge.weight_source | default("(not specified)") }} |
+{%- endfor %}
+
+{# ── Conservation check ── #}
+
+**Conservation:** {{ conservation_check }}
+
+{# ── Notes ── #}
+{% if adapt_notes %}
+
+**Notes:** {{ adapt_notes }}
+{% endif %}
+
+---
+
+Output path: {{ output_path | default("(not specified)") }}

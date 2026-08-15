@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::research::types::*;
-use hkask_mcp_server::server::validate_tool_url;
+use hkask_mcp_server::server::validate_tool_url_with_dns;
 
 mod arxiv;
 mod brave;
@@ -30,12 +30,15 @@ pub use tavily::TavilyProvider;
 ///
 /// Applies a consistent user-agent and request timeout, eliminating the repeated
 /// `reqwest::Client::builder()...build().expect(...)` boilerplate across providers.
-pub(super) fn provider_http_client() -> reqwest::Client {
+///
+/// Returns `Err` if the TLS backend fails to initialize rather than panicking,
+/// so callers can propagate the failure through their `Result` return type.
+pub(super) fn provider_http_client() -> Result<reqwest::Client, WebError> {
     reqwest::Client::builder()
         .user_agent(format!("hkask-mcp-web/{SERVER_VERSION}"))
         .timeout(Duration::from_secs(DEFAULT_REQUEST_TIMEOUT_SECS))
         .build()
-        .expect("reqwest client builder is infallible with these settings")
+        .map_err(|e| WebError::ProviderError(format!("failed to build HTTP client: {e}")))
 }
 
 #[derive(Default)]
@@ -57,10 +60,15 @@ pub(crate) trait WebSearchProvider: Send + Sync {
 
 /// Validate a URL for SSRF safety before making outbound requests.
 ///
-/// Wraps the shared `validate_tool_url` from `hkask-mcp` and converts the error
-/// to `WebError`. Used by `RawFetchProvider` for defense-in-depth URL validation.
-pub fn validate_provider_url(url: &str) -> Result<(), WebError> {
-    validate_tool_url(url).map_err(|e| WebError::BadArgs(e.message))
+/// Wraps the shared `validate_tool_url_with_dns` from `hkask-mcp` and converts
+/// the error to `WebError`. Used by `RawFetchProvider` for defense-in-depth URL
+/// validation. This is async because it resolves the hostname via DNS to
+/// defeat hostname-based SSRF bypasses (CWE-918/441) — a non-literal hostname
+/// resolving to a private/loopback IP is rejected here.
+pub async fn validate_provider_url(url: &str) -> Result<(), WebError> {
+    validate_tool_url_with_dns(url)
+        .await
+        .map_err(|e| WebError::BadArgs(e.message))
 }
 
 /// Validate a URL with permissive SSRF config (allows private IPs and loopback).
@@ -187,19 +195,6 @@ impl ProviderPool {
 }
 
 impl ProviderPool {
-    pub async fn search_with_fallback(
-        &self,
-        query: &SearchQuery,
-        primary: &str,
-    ) -> Result<Vec<SearchResult>, WebError> {
-        let mut ordered: Vec<&dyn WebSearchProvider> =
-            self.search_providers.iter().map(|p| p.as_ref()).collect();
-        if let Some(idx) = ordered.iter().position(|p| p.kind() == primary) {
-            ordered.swap(0, idx);
-        }
-        Self::search_fallback(&ordered, query).await
-    }
-
     pub async fn search_by_capability(
         &self,
         query: &SearchQuery,
@@ -271,7 +266,7 @@ impl ProviderPool {
         let results = futures_util::future::join_all(futures).await;
 
         let mut succeeded: Vec<String> = Vec::new();
-        let mut failed: Vec<ProviderError> = Vec::new();
+        let mut failed: Vec<ProviderFailureRecord> = Vec::new();
         let mut all_results: Vec<(String, usize, SearchResult)> = Vec::new();
         let mut merged_answer_box: Option<AnswerBox> = None;
         let mut merged_related_questions: Vec<String> = Vec::new();
@@ -294,7 +289,7 @@ impl ProviderPool {
                 }
                 Err(e) => {
                     tracing::warn!(provider = %kind, error = %e, "Compound search provider failed");
-                    failed.push(ProviderError {
+                    failed.push(ProviderFailureRecord {
                         kind: kind.clone(),
                         error: e.to_string(),
                     });
@@ -412,6 +407,11 @@ impl ProviderPool {
         url: &str,
         opts: &ExtractOptions,
     ) -> Result<ExtractedContent, WebError> {
+        // SSRF defense-in-depth: validate once at the pool boundary so each
+        // provider in the fallback chain doesn't re-resolve DNS. The tool
+        // layer (validate_tool_url_with_dns) is the outer gate; this is the
+        // inner gate before any provider fetches the URL.
+        validate_provider_url(url).await?;
         try_fallback!(&self.extract_providers, extract, url, opts)
     }
 
@@ -421,6 +421,8 @@ impl ProviderPool {
         instruction: &str,
         timeout: Duration,
     ) -> Result<BrowseResult, WebError> {
+        // SSRF defense-in-depth: validate once at the pool boundary.
+        validate_provider_url(url).await?;
         try_fallback!(&self.browse_providers, browse, url, instruction, timeout)
     }
 
@@ -486,7 +488,6 @@ fn health_entry(kind: String, result: Result<(), WebError>) -> ProviderHealthEnt
     }
 }
 
-// WebSearchPort implementation - ProviderPool as the adapter
 // WebSearchPort implementation - ProviderPool as the adapter
 
 #[async_trait]
@@ -640,10 +641,7 @@ impl WebSearchPort for ProviderPool {
         url: &str,
         num_results: u32,
     ) -> Result<ProviderSearchOutput, WebError> {
-        match self.exa {
-            Some(ref exa) => exa.find_similar(url, num_results).await,
-            None => Err(WebError::NoProvider),
-        }
+        self.find_similar(url, num_results).await
     }
 
     async fn extract(

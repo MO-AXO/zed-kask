@@ -9,11 +9,11 @@ pub struct BrowserbaseProvider {
 }
 
 impl BrowserbaseProvider {
-    pub fn new(api_key: String) -> Self {
-        Self {
-            client: super::provider_http_client(),
+    pub fn new(api_key: String) -> Result<Self, WebError> {
+        Ok(Self {
+            client: super::provider_http_client()?,
             api_key,
-        }
+        })
     }
 }
 #[async_trait]
@@ -28,6 +28,7 @@ impl WebBrowseProvider for BrowserbaseProvider {
         instruction: &str,
         timeout: Duration,
     ) -> Result<BrowseResult, WebError> {
+        // SSRF validation is at the pool boundary (browse_with_fallback).
         let payload = serde_json::json!({
             "url": url,
             "actions": [{ "type": "wait", "milliseconds": 2000u64 }],
@@ -51,7 +52,7 @@ impl WebBrowseProvider for BrowserbaseProvider {
         if !status.is_success() {
             return Err(WebError::ProviderError(format!(
                 "Browserbase error {status}: {}",
-                body.chars().take(200).collect::<String>()
+                hkask_inference::openai_compat::sanitize_error_body(&body)
             )));
         }
 

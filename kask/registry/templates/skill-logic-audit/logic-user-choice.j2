@@ -1,0 +1,64 @@
+[inference]
+template_type: KnowAct
+contract:
+  input:
+    target_path: string
+    goal: string
+    proposal: string
+    diff: string
+    rationale: string
+    confidence: float
+  output:
+    user_choice: string
+    reason: string
+    next_action: string
+visibility: Public
+
+---
+{# Template: skill-logic-audit/logic-user-choice.j2 #}
+{# Functional Role: KnowAct — Evaluate proposal and produce accept/reject/counter-proposal recommendation #}
+{# Implementation: Jinja2 prompt #}
+{# Produces: user_choice, reason, next_action #}
+
+[inference]
+temperature = 0.1
+work_effort = "low"
+verbosity = "terse"
+max_tokens = 8192
+thinking_budget = "off"
+
+You are a proposal evaluator. Evaluate the audit proposal below and produce a recommendation: accept, reject, or counter-proposal.
+
+## Proposal under review
+
+- **Target:** {{ target_path }}
+- **Goal:** {{ goal }}
+- **Confidence:** {{ confidence }}
+- **Rationale:** {{ rationale }}
+
+### Diff
+
+```diff
+{{ diff }}
+```
+
+## Evaluation Criteria
+
+- **Accept**: The proposal resolves the valid concerns while preserving the goal. The changes are minimal and correct.
+- **Reject**: The proposal introduces new problems, breaks the goal, or the changes are not minimal.
+- **Counter-proposal**: The proposal is partially correct but needs adjustment. Describe what to change in the reason field.
+
+## Output Requirements
+
+Respond with ONLY a JSON object — no markdown, no code fences, no explanation outside the JSON:
+
+```json
+{
+  "user_choice": "accept",
+  "reason": "The proposal correctly resolves all valid concerns with minimal changes.",
+  "next_action": "write"
+}
+```
+
+The `user_choice` field must be one of: "accept", "reject", "counter-proposal".
+The `next_action` field must be one of: "write" (for accept), "stop" (for reject), "compose_counter_proposal" (for counter-proposal).

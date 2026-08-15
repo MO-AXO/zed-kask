@@ -1,7 +1,8 @@
 ---
 name: refactor-architecture
+core: true
 visibility: public
-description: "End-to-end architecture refactoring: discover friction, rank deepening candidates, walk the design tree, audit duplication, plan strangler-fig migration, and verify integrity. Merged from improve-codebase-architecture (discover phase) and refactor-service-layer (execution phase). Includes the migration-strategy phase (folded from the standalone strangler-fig skill). Composes tdd, coding-guidelines, pragmatic-semantics, graph-audit (code mode, context-expansion), deep-module, essentialist, and pragmatic-cybernetics."
+description: "End-to-end architecture refactoring: discover friction, rank deepening candidates, walk the design tree, audit duplication, plan strangler-fig migration, and verify integrity. Composes tdd, coding-guidelines, graph-audit, deep-module, essentialist."
 ---
 
 # Refactor Architecture
@@ -105,12 +106,6 @@ Includes the migration-strategy phase (folded from the standalone `strangler-fig
 | `ra-audit.j2` | KnowAct | Audit and classify all duplicated operations across CLI, API, and MCP surfaces. Apply the deletion test to each candidate. Produce RDF triples, classification table, and mermaid entity-relationship diagram of the duplication landscape. |
 | `ra-strangle.j2` | KnowAct | Plan the strangler-fig migration for a selected domain: define the new service operation, design CLI/API adapters, identify duplication to delete, and list verification steps. Enforces one-domain-per-commit discipline, dependency direction checks, and surgical change scope. |
 | `ra-verify.j2` | KnowAct | Verify surgical completeness after a domain migration or full extraction: dependency direction, depth test, P6/P7/P8 compliance, clippy, test suite, deletion test on service modules. Produces a structured pass/fail report. |
-
-## Fusion Mode
-
-This skill supports **fusion mode** via the `fusion:` block in its flow manifest. When enabled, all analysis steps route through a multi-model panel. This skill uses **pi mode** (Plan-Implement) — Phase 1 synthesizes strategy (explore, candidates, deepen), Phase 2 synthesizes execution plan (audit, strangle, verify).
-
-The convergence check step has `fusion: false` to ensure deterministic rubric evaluation uses single-model inference.
 
 ## Constraints
 

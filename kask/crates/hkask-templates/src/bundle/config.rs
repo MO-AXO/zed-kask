@@ -11,42 +11,171 @@ pub const RJOULE_TO_GAS: u64 = 250_000;
 
 /// Convergence configuration for PDCA loop exit conditions.
 ///
-/// Supports two exit rails: absolute quality threshold AND/OR improvement from baseline.
-/// The improvement kata measures progress from the starting condition toward the target.
+/// The Improvement Kata model: the agent has a **target condition** (a
+/// measurable state it's trying to reach) and a **current condition** (its
+/// measured state right now). Convergence is the gap between them closing.
+///
+/// The gap lives in two orthogonal spaces, forming a right triangle:
+///
+/// ```text
+///         target
+///        /|
+///       / |
+///      /  | process_gap (PKO — procedure progress)
+///     /   |
+///    /____|
+///  current  object_gap (Dublin Core — artifact completeness)
+/// ```
+///
+/// The hypotenuse `sqrt(object_gap² + process_gap²)` is the total distance
+/// to the target. Convergence requires both legs to close — you can't reach
+/// the target by producing complete artifacts without testing them, or by
+/// running experiments without synthesizing them into artifacts.
+///
+/// Each PDCA cycle produces a **prediction** ("the hypotenuse will decrease
+/// by Δ") with a **confidence**. After the experiment, the actual decrease is
+/// measured. The **Brier score** `(confidence − actual_outcome)²` tracks
+/// whether the agent's predictions are calibrated — whether it's learning to
+/// predict the effects of its own interventions. Brier decreasing → the
+/// agent's model of itself is improving. Brier stable and low → confidence
+/// convergence (the agent is calibrated, even if the gap hasn't fully closed).
+///
+/// This replaces the old self-grade model where an LLM graded its own plan
+/// quality on a [0,1] scale. That was a category error: it measured plan
+/// quality (a snapshot) instead of gap closure (a trajectory), and it used
+/// the LLM for the deterministic convergence decision (causing the 30s
+/// timeouts). The Kata model uses the LLM only for the four Kata steps
+/// (grasp current, establish target, predict, experiment); the executor
+/// computes the gap and Brier score deterministically.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ConvergenceConfig {
-    /// Absolute quality threshold. If quality_at_exit <= threshold, the condition is met.
-    pub threshold: f64,
-    /// Minimum proportional improvement from baseline. E.g., 0.25 means
-    /// (baseline - current) / baseline >= 0.25. Set to 0.0 to disable.
+    // ── Kata target-condition fields ──
+    /// Context field holding the target artifact spec (Dublin Core object
+    /// space). The target condition for artifact completeness — which fields
+    /// should be populated, which should be grounded. Produced by an early
+    /// `select` step or provided as a manifest input.
     #[serde(default)]
-    pub improvement_ratio: f64,
-    /// How the threshold and improvement conditions combine:
-    /// - "threshold_only" (default): only check quality <= threshold.
-    /// - "both": must satisfy quality <= threshold AND improvement >= improvement_ratio.
-    /// - "either": must satisfy quality <= threshold OR improvement >= improvement_ratio.
-    #[serde(default = "default_improvement_gate")]
-    pub improvement_gate: String,
+    pub target_artifacts_field: Option<String>,
+    /// Context field holding the measured current artifact state (Dublin Core
+    /// object space). Re-measured after each PDCA cycle because the experiment
+    /// changed the system.
+    #[serde(default)]
+    pub current_artifacts_field: Option<String>,
+    /// Context field holding the target procedure spec (PKO process space).
+    /// The target condition for procedure progress — which steps must be
+    /// complete.
+    #[serde(default)]
+    pub target_procedure_field: Option<String>,
+    /// Context field holding the measured current procedure state (PKO process
+    /// space). Re-measured after each PDCA cycle.
+    #[serde(default)]
+    pub current_procedure_field: Option<String>,
+    /// Context field holding the prediction: `{ expected_delta, confidence }`.
+    /// The agent predicts the hypotenuse will decrease by `expected_delta`,
+    /// with `confidence` in [0,1].
+    #[serde(default)]
+    pub prediction_field: Option<String>,
+    /// Context field holding the actual result after the experiment:
+    /// `{ actual_delta }` or `{ occurred: bool }`.
+    #[serde(default)]
+    pub result_field: Option<String>,
+
+    // ── Convergence thresholds ──
+    /// Convergence signal below this → **gap convergence** (the agent reached
+    /// the target condition). This is the limit-of-a-sequence criterion:
+    /// `‖xₙ − L‖ < ε` where L is the target and xₙ is the current condition.
+    /// Only meaningful when the signal is a real gap distance (e.g., the
+    /// `kata.hypotenuse` output for Kata-gap skills like `sequential-inquiry`
+    /// and `metacognition`). For custom-signal skills (violation count, etc.),
+    /// use the Cauchy path instead.
+    #[serde(default = "default_gap_epsilon")]
+    pub gap_epsilon: f64,
+
+    /// Epsilon for the **Cauchy convergence** (stall) criterion: the iterates
+    /// have stopped moving. A sequence is Cauchy if for all m, n > N,
+    /// `‖xₘ − xₙ‖ < ε`. In practice, we check that the maximum pairwise
+    /// distance between signal readings in the last `cauchy_window`
+    /// cycles is below this epsilon. This means *all* recent readings are
+    /// clustered together — the iterates have genuinely stabilized, not just
+    /// locally plateaued.
+    ///
+    /// This is the canonical mathematical definition of "the process has
+    /// stopped producing new information" (learning exhausted, current methods
+    /// at their ceiling). It catches oscillation (0.3 → 0.5 → 0.3 → 0.5 has
+    /// large pairwise distances → not Cauchy) and plateau (0.3 → 0.31 → 0.3
+    /// has small pairwise distances → Cauchy). Works on any scalar signal —
+    /// the signal need not be a gap distance.
+    #[serde(default = "default_cauchy_epsilon")]
+    pub cauchy_epsilon: f64,
+    /// Window size (number of PDCA cycles) for the Cauchy convergence check.
+    /// The maximum pairwise distance between signal readings in the last
+    /// `cauchy_window` cycles must be below `cauchy_epsilon`.
+    #[serde(default = "default_cauchy_window")]
+    pub cauchy_window: u32,
+
+    /// Number of PDCA cycles to compute the rolling Brier average over for
+    /// **calibration convergence**: the agent's predictions are calibrated —
+    /// it knows what will happen when it acts.
+    #[serde(default = "default_brier_window")]
+    pub brier_window: u32,
+    /// Rolling Brier average below this → calibration converged.
+    #[serde(default = "default_brier_threshold")]
+    pub brier_threshold: f64,
+
+    /// Convergence mode — selects which stop conditions are active. Any active
+    /// condition that fires triggers convergence.
+    ///
+    /// - `"gap"`: gap convergence only (signal < gap_epsilon).
+    /// - `"cauchy"`: Cauchy convergence only (iterates stabilized).
+    /// - `"calibration"`: calibration convergence only (Brier calibrated).
+    /// - `"gap_or_cauchy"`: gap or Cauchy (no Brier).
+    /// - `"gap_or_cauchy_or_calibration"` (default): any of the three.
+    ///
+    /// The three signals are orthogonal: gap measures distance to target,
+    /// Cauchy measures stability of iterates, Brier measures prediction
+    /// quality. They can be combined with OR. The default is all three because
+    /// the Kata literature recognizes all three as valid stop conditions.
+    #[serde(default = "default_convergence_mode")]
+    pub convergence_mode: String,
+
+    // ── Loop control (retained from the old model) ──
     /// Maximum PDCA iterations before forced exit.
     pub max_iterations: u32,
-    /// Minimum iterations before exit is allowed. Prevents premature convergence
-    /// before the improvement kata has had time to work. Default 0 (no minimum).
-    #[serde(default)]
+    /// Minimum iterations before exit is allowed. Prevents premature
+    /// convergence before the Kata has had time to run at least one full
+    /// experiment cycle. Default 2 (need at least 2 readings for Brier).
+    #[serde(default = "default_min_iterations")]
     pub min_iterations: u32,
-    /// Context field to read for quality measurement (e.g., "composite").
-    pub convergence_field: String,
     /// Action when convergence not reached after max_iterations: "abort" | "escalate".
     pub on_not_reached: String,
+
+    // ── Legacy fields (retained for manifests not yet migrated to the Kata model) ──
+    //
+    // These support the old self-grade convergence model. New skills should use
+    // the Kata fields above instead. The executor supports both; if
+    // `convergence_mode` is set, the Kata model is used. If not, the legacy
+    // model is used (threshold + improvement_gate).
+    /// Legacy: absolute quality threshold for self-grade convergence.
+    pub threshold: f64,
+    /// Legacy: context field to read for self-grade quality measurement.
+    pub convergence_field: String,
+    /// Legacy: minimum proportional improvement from baseline.
+    #[serde(default)]
+    pub improvement_ratio: f64,
+    /// Legacy: how the threshold and improvement conditions combine.
+    #[serde(default = "default_improvement_gate")]
+    pub improvement_gate: String,
+
+    // ── Compound aggregation (retained — used by flowdef composition) ──
     /// Aggregation method for compound skills (nested PDCA loops).
-    /// - "none" (default): single-field check against convergence_field.
+    /// - "none" (default): single-field check.
     /// - "min": the worst (highest) quality score across sources.
     /// - "weighted_avg": weighted average of source quality scores.
     /// - "all_converged": every source step must have _convergence.status == "converged".
     #[serde(default = "default_aggregation")]
     pub aggregation: String,
-    /// Sources for compound aggregation. Each source specifies a step ordinal and
-    /// a dot-path field within that step's result (e.g. "_convergence.quality_at_exit").
+    /// Sources for compound aggregation.
     #[serde(default)]
     pub aggregation_sources: Vec<AggregationSource>,
 }
@@ -54,13 +183,26 @@ pub struct ConvergenceConfig {
 impl Default for ConvergenceConfig {
     fn default() -> Self {
         Self {
+            target_artifacts_field: None,
+            current_artifacts_field: None,
+            target_procedure_field: None,
+            current_procedure_field: None,
+            prediction_field: None,
+            result_field: None,
+            gap_epsilon: 0.05,
+            cauchy_epsilon: 0.03,
+            cauchy_window: 3,
+            brier_window: 3,
+            brier_threshold: 0.15,
+            convergence_mode: "gap_or_cauchy_or_calibration".to_string(),
+            max_iterations: 10,
+            min_iterations: 2,
+            on_not_reached: "abort".to_string(),
+            // Legacy defaults — used when convergence_mode is empty/unset
             threshold: 0.1,
+            convergence_field: "composite".to_string(),
             improvement_ratio: 0.0,
             improvement_gate: "threshold_only".to_string(),
-            max_iterations: 3,
-            min_iterations: 0,
-            convergence_field: "composite".to_string(),
-            on_not_reached: "abort".to_string(),
             aggregation: "none".to_string(),
             aggregation_sources: vec![],
         }
@@ -73,6 +215,34 @@ fn default_aggregation() -> String {
 
 fn default_improvement_gate() -> String {
     "threshold_only".to_string()
+}
+
+fn default_gap_epsilon() -> f64 {
+    0.05
+}
+
+fn default_cauchy_epsilon() -> f64 {
+    0.03
+}
+
+fn default_cauchy_window() -> u32 {
+    3
+}
+
+fn default_brier_window() -> u32 {
+    3
+}
+
+fn default_brier_threshold() -> f64 {
+    0.15
+}
+
+fn default_convergence_mode() -> String {
+    "gap_or_cauchy_or_calibration".to_string()
+}
+
+fn default_min_iterations() -> u32 {
+    2
 }
 
 /// A source for compound quality aggregation — specifies which inner skill's
@@ -118,7 +288,24 @@ impl Default for BundleGasConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RjouleConfig {
-    /// Total rJoule budget for inference in this cascade.
+    /// Total rJoule budget for inference in this cascade — a **USD budget**
+    /// (`1 rJoule = $1 USD`).
+    ///
+    /// Enforced: `ManifestExecutor::execute_select` charges each inference
+    /// call's observed USD cost (the provider's `usage.cost` / `market_cost` /
+    /// `estimated_cost`, carried on `InferenceResult.cost_usd`) to this budget
+    /// via `BudgetTracker::charge_rjoule`. When cumulative spend exceeds `cap`
+    /// and `hard_limit` is true, `check_exhausted` trips the
+    /// `reg.skill.budget.rjoule_exhausted` span and exits the cascade `MaxedOut`.
+    /// A threshold-crossing `reg.skill.budget.rjoule_alert` fires once at
+    /// `alert_threshold`. Calls that report no cost (local Ollama, the zed IPC
+    /// bridge path which surfaces only token counts) have `cost_usd = None`
+    /// and are free (not charged).
+    ///
+    /// Scope: only LLM inference (`select` steps) is charged here. MCP `execute`
+    /// steps that hit paid external APIs are NOT yet charged rJoule through the
+    /// executor — `hkask-mcp-media` self-gates its own rJoule budget per call
+    /// (`MediaBudget`); other paid MCP servers will follow that pattern. TODO.
     pub cap: u32,
     pub alert_threshold: f64,
     pub hard_limit: bool,
@@ -133,15 +320,56 @@ impl Default for RjouleConfig {
     }
 }
 
-/// Error handling configuration. Loaded from manifest YAML, future wiring target.
+/// Error handling configuration. Loaded from manifest YAML.
+///
+/// **Timeout retry is enforced** (`on_timeout`, `max_retries`,
+/// `retry_backoff_seconds`): `StepMachine::dispatch_with_retry` reads these
+/// to retry a `TemplateError::Timeout` up to `max_retries` times with
+/// `retry_backoff_seconds` between attempts. Only timeouts are retried —
+/// other errors (validation, not-found, render) propagate immediately.
+///
+/// **Gas and validation policies are not yet enforced** (`on_gas_exceeded`,
+/// `on_validation_failure`): a step that exceeds its `gas_cap` or fails
+/// `validate_inputs` aborts the cascade immediately regardless of these
+/// fields. They are retained for schema stability.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ErrorHandlingConfig {
+    /// **Accepted but ignored.** No code reads this field. A step that exceeds
+    /// its `gas_cap` aborts the cascade immediately.
     pub on_gas_exceeded: String,
+    /// Policy for step timeouts: `"retry"` (retry up to `max_retries` times) or
+    /// `"abort"` (propagate immediately). Read by
+    /// `StepMachine::dispatch_with_retry`. Only `TemplateError::Timeout` is
+    /// retried; other transient errors (`Inference`, `Mcp`) propagate without
+    /// consulting this field (they surface from the action handler directly).
     pub on_timeout: String,
+    /// Maximum retry attempts when `on_timeout == "retry"`. Read by
+    /// `StepMachine::dispatch_with_retry`. 0 disables retry.
     pub max_retries: u32,
+    /// Seconds to wait between retry attempts. Read by
+    /// `StepMachine::dispatch_with_retry`.
     pub retry_backoff_seconds: u32,
+    /// **Accepted but ignored.** No code reads this field. A `validate_inputs`
+    /// failure aborts the cascade immediately (the error returns from
+    /// `BridgeManifestExecutor::execute_skill`).
     pub on_validation_failure: String,
+    /// **Accepted but ignored.** No code reads this field.
+    ///
+    /// It described a policy for `ToolPortError::CapabilityDenied`, which no
+    /// longer exists: the per-call capability gate it reacted to was removed
+    /// because every production mint site derived the token's `resource_id` from
+    /// the tool name it then invoked, so the check compared a value against
+    /// itself and could not deny. Even before that removal this field had no
+    /// reader — the "wired into the executor" claim it previously carried was
+    /// never true.
+    ///
+    /// Retained only so manifests already seeded to disk keep parsing under
+    /// `deny_unknown_fields`. It is stripped from the shipped manifests and must
+    /// not be reintroduced or given behavior; authority belongs at the allowlist
+    /// boundaries, not in per-skill config.
+    #[serde(default)]
+    pub on_capability_denied: String,
 }
 impl Default for ErrorHandlingConfig {
     fn default() -> Self {
@@ -151,26 +379,9 @@ impl Default for ErrorHandlingConfig {
             max_retries: 2,
             retry_backoff_seconds: 1,
             on_validation_failure: "abort".into(),
-        }
-    }
-}
-
-/// OCAP configuration. Loaded from manifest YAML, future wiring target.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct OcapConfig {
-    pub delegation_chain_required: bool,
-    pub signature_algorithm: String,
-    pub capability_expiry_seconds: u32,
-    pub template_scoped: bool,
-}
-impl Default for OcapConfig {
-    fn default() -> Self {
-        Self {
-            delegation_chain_required: true,
-            signature_algorithm: "ed25519".into(),
-            capability_expiry_seconds: 3600,
-            template_scoped: true,
+            // Ignored (see the field docs); default to empty rather than
+            // implying an active "escalate" policy.
+            on_capability_denied: String::new(),
         }
     }
 }
@@ -203,9 +414,9 @@ impl Default for BundleLedgerConfig {
     }
 }
 
-/// Audit trail configuration. Loaded from manifest YAML, future wiring target.
+/// Audit trail configuration. Loaded from manifest YAML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BundleAuditConfig {
     pub enabled: bool,
     pub log_level: String,

@@ -10,19 +10,22 @@ description = "OS keychain integration and AES-256-GCM encryption for hKask"
 path = "src/hkask_keystore.rs"
 
 [dependencies]
-hkask-types = { path = "../hkask-types" }
+hkask-types.workspace = true
 keyring.workspace = true
 aes-gcm.workspace = true
 argon2.workspace = true
 hmac.workspace = true
 sha2.workspace = true
-ed25519-dalek.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
 hex.workspace = true
 dirs = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["zeroize"] }
+
+[lints]
+workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

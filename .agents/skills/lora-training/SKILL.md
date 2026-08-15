@@ -1,20 +1,7 @@
 ---
 name: lora-training
 visibility: public
-description: >
-  LoRA/QLoRA training configuration and contract enforcement skill for hKask
-  (v0.32.0). Produces an advisory, composable PEFT recommendation through a
-  deterministic 8-gate refinement (adapter purpose → dataset analysis →
-  memory → task distance → quality/cost → knowledge preservation → harness
-  capability); the operator accepts, overrides, or rejects it, and the runtime
-  enforces established hard contracts against concrete accepted configuration.
-  Training approach selection (G0-G5) precedes harness selection (G6). Audits
-  math, quantization, data/evaluation, forgetting, runtime alert, persistence
-  preflight, and harness-method compatibility gates. Runtime metrics (loss,
-  grad_norm, alerts) are sourced from the completion manifest and evaluated by
-  G-R1 during training_status. PDCA iteration loop is mechanically closed by
-  the process manifest. Emits reg.lora.* spans plus outcome and
-  operator_feedback spans that close the self-improvement feedback loop.
+description: "LoRA/QLoRA training configuration and contract enforcement for hKask. Produces an advisory PEFT recommendation through a deterministic 8-gate refinement; the operator accepts, overrides, or rejects it, and the runtime enforces hard contracts."
 ---
 
 # LoRA Training
@@ -240,35 +227,6 @@ Do not create alternate finding shapes. A recommendation never overwrites
 7. Preserve claim-appropriate citations and emit `reg.lora.report` with exact
    phase, state, severity, and evidence-kind counts.
 
-### `lora-training/convergence-check`
-
-1. Accept `current_phase` (`preflight | runtime | post_training`) and current
-   evidence only. Reject unknown gate states as blockers.
-2. Compute risk over currently applicable dimensions: critical/high findings
-   (0.40, graded), math gates (0.25), QLoRA gates when applicable (0.15),
-   data/eval gates (0.10), and forgetting gates when applicable (0.10). Exclude
-   non-applicable gates and empty families, then normalize the remaining weights.
-3. Grade the critical/high dimension (v0.31.0): 0 findings → 0.0; 1 → 0.6;
-   2-3 → 0.8; 4+ → 1.0. This replaces the binary (1 if any, 0 if none) so the
-   metric distinguishes "one thing to fix" from "everything is on fire."
-4. Map gate risk as `pass=0`, `warn=0.5`, `fail/refuse/deferred/planned=1.0`,
-   and `not_evaluated=0.5` (v0.31.0: was 1.0, now 0.5 — distinguishes the
-   coverage gap "we don't know if this applies" from the known risk "we know
-   this applies and it's unmet", which remains `deferred=1.0`). Future- and
-   past-phase gates do not enter the current metric denominator.
-5. Handle the all-gates-not-applicable edge case (v0.31.0): if no gates are
-   applicable in the current phase, set `convergence_metric = 0.0` and
-   `converged = true` with rationale `"no applicable gates in current phase"`.
-   This prevents division-by-zero and honestly reports nothing-to-evaluate.
-6. Set `converged=true` only when the normalized metric is `≤ 0.10` and no hard
-   blocker exists. A stable metric below threshold remains converged; a 5%
-   improvement is diagnostic only, not required.
-7. Return phase-aware outputs: `preflight_ready`,
-   `runtime_contracts_pending`, and `post_training_verified`, plus blockers and
-   a reproducible gate-results summary. These do not replace the current-phase
-   `converged` verdict.
-8. Emit `reg.lora.convergence` unconditionally.
-
 ## Registry Templates
 
 | Template | Type | Purpose |
@@ -277,17 +235,6 @@ Do not create alternate finding shapes. A recommendation never overwrites
 | `select-method.j2` | `KnowAct` | Produce an advisory composable recommendation via eight-gate refinement (G0 adapter purpose, G-D0 dataset analysis → G1-G5 method → G6 harness), with deep capability reasoning over the full harness×trainer×host×cost space when `provider_capabilities` is supplied, Good Regulator refinement from `prior_training_history`, mechanical PDCA loop closure via `prior_iteration`, and self-improvement signals from `prior_outcome` and `prior_operator_feedback`. |
 | `audit-config.j2` | `KnowAct` | Audit declared artifacts with phase-aware gates, states, evidence kinds, normalized findings, separate readiness, algedonic `refuse_escalation` for safety-boundary violations, mechanical no-fiction enforcement rejecting findings with null `config_path`/`line`, and G-R1 runtime alert assessment from `runtime_metrics` when supplied. |
 | `report.j2` | `KnowAct` | Preserve findings losslessly; report readiness and contract gaps; propose only evidence-backed pending regressions with `surface: training`. |
-| `convergence-check.j2` | `KnowAct` | Compute normalized current-phase convergence with graded critical/high dimension, `not_evaluated=0.5` vs `deferred=1.0` distinction, all-gates-not-applicable edge case handling, G-R1 runtime alert family when `runtime_metrics` is supplied, and preflight/runtime/post-training posture from supplied evidence. |
-
-## Fusion Mode
-
-The process manifest declares `fusion: false` on the convergence-check step
-(ordinal 4). No other step declares a fusion block. The skill is a linear
-PDCA flow — preflight-dataset → select-method → audit-config → report →
-convergence-check → loop — not a fused multi-template synthesis. The loop
-step (ordinal 5) routes `convergence_metric`, `blockers`,
-`gate_results_summary`, and `converged` back to select-method as
-`prior_iteration`, closing the feedback loop mechanically.
 
 ## Constraints
 

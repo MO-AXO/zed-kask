@@ -1,6 +1,6 @@
 //! Core Regulation (Cybernetic Nervous System) types for hKask
 //!
-//! Core spans: reg.tool.*, reg.inference.*, reg.fusion.*, reg.agent_pod.*,
+//! Core spans: reg.tool.*, reg.inference.*, reg.agent_pod.*,
 //! reg.gas.*, reg.curation.*, reg.heal.*, reg.memory.encode.*
 //!
 //! Domain-specific spans have moved to their respective domain crates.
@@ -42,20 +42,6 @@ impl QueueDepth {
     pub fn as_raw(self) -> f64 {
         self.0
     }
-}
-
-// Circuit Breaker — States
-
-/// Circuit breaker states
-///
-/// Defined here (not in hkask-regulation) so the `CircuitBreakerPort` trait can
-/// reference it without creating an upward dependency.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum CircuitState {
-    Closed,
-    Open,
-    HalfOpen,
 }
 
 // Regulation Health — Observability data struct
@@ -124,10 +110,6 @@ pub enum RegulationSpan {
     Tool { subsystem: ToolSubsystem },
     /// LLM inference request/response.
     Inference,
-    /// Multi-model fusion deliberation (panel dispatch + judge orchestration).
-    /// Distinct from `Inference` so fusion rounds, convergence, and panel/judge
-    /// cost are independently observable (PRINCIPLES.md §9.1).
-    Fusion,
     /// Agent pod lifecycle events.
     AgentPod,
     /// Gas (energy) consumption tracking.
@@ -160,6 +142,9 @@ pub enum ToolSubsystem {
     Companies,
     Filesystem,
     Curator,
+    Codegraph,
+    Scenarios,
+    Swarm,
     /// Catch-all for unknown or future MCP servers.
     Other,
 }
@@ -180,11 +165,14 @@ impl ToolSubsystem {
             "research" => ToolSubsystem::Research,
             "companies" => ToolSubsystem::Companies,
             "communication" => ToolSubsystem::Communication,
-            "fal" | "media" => ToolSubsystem::Media,
+            "media" => ToolSubsystem::Media,
             "corpus" => ToolSubsystem::Corpus,
             "training" => ToolSubsystem::Training,
             "kanban" => ToolSubsystem::Kanban,
             "curator" => ToolSubsystem::Curator,
+            "codegraph" => ToolSubsystem::Codegraph,
+            "scenarios" => ToolSubsystem::Scenarios,
+            "swarm" => ToolSubsystem::Swarm,
             _ => ToolSubsystem::Other,
         }
     }
@@ -206,6 +194,9 @@ impl ToolSubsystem {
             ToolSubsystem::Companies => "companies",
             ToolSubsystem::Filesystem => "filesystem",
             ToolSubsystem::Curator => "curator",
+            ToolSubsystem::Codegraph => "codegraph",
+            ToolSubsystem::Scenarios => "scenarios",
+            ToolSubsystem::Swarm => "swarm",
             ToolSubsystem::Other => "other",
         }
     }
@@ -263,10 +254,12 @@ impl RegulationSpan {
                 ToolSubsystem::Companies => "reg.tool.companies",
                 ToolSubsystem::Filesystem => "reg.tool.filesystem",
                 ToolSubsystem::Curator => "reg.tool.curator",
+                ToolSubsystem::Codegraph => "reg.tool.codegraph",
+                ToolSubsystem::Scenarios => "reg.tool.scenarios",
+                ToolSubsystem::Swarm => "reg.tool.swarm",
                 ToolSubsystem::Other => "reg.tool",
             },
             RegulationSpan::Inference => "reg.inference",
-            RegulationSpan::Fusion => "reg.fusion",
             RegulationSpan::AgentPod => "reg.pod",
             RegulationSpan::Gas => "reg.gas",
             RegulationSpan::Curation => "reg.curation",
@@ -348,8 +341,16 @@ impl std::str::FromStr for RegulationSpan {
             "reg.tool.curator" => Ok(RegulationSpan::Tool {
                 subsystem: ToolSubsystem::Curator,
             }),
+            "reg.tool.codegraph" => Ok(RegulationSpan::Tool {
+                subsystem: ToolSubsystem::Codegraph,
+            }),
+            "reg.tool.scenarios" => Ok(RegulationSpan::Tool {
+                subsystem: ToolSubsystem::Scenarios,
+            }),
+            "reg.tool.swarm" => Ok(RegulationSpan::Tool {
+                subsystem: ToolSubsystem::Swarm,
+            }),
             "reg.inference" => Ok(RegulationSpan::Inference),
-            "reg.fusion" => Ok(RegulationSpan::Fusion),
             "reg.pod" => Ok(RegulationSpan::AgentPod),
             "reg.gas" => Ok(RegulationSpan::Gas),
             "reg.curation" => Ok(RegulationSpan::Curation),
@@ -411,6 +412,9 @@ mod reg_span_tests {
             "reg.tool.companies",
             "reg.tool.filesystem",
             "reg.tool.curator",
+            "reg.tool.codegraph",
+            "reg.tool.scenarios",
+            "reg.tool.swarm",
             "reg.inference",
             "reg.pod",
             "reg.gas",
@@ -490,8 +494,16 @@ mod reg_span_tests {
             RegulationSpan::Tool {
                 subsystem: ToolSubsystem::Curator,
             },
+            RegulationSpan::Tool {
+                subsystem: ToolSubsystem::Codegraph,
+            },
+            RegulationSpan::Tool {
+                subsystem: ToolSubsystem::Scenarios,
+            },
+            RegulationSpan::Tool {
+                subsystem: ToolSubsystem::Swarm,
+            },
             RegulationSpan::Inference,
-            RegulationSpan::Fusion,
             RegulationSpan::AgentPod,
             RegulationSpan::Gas,
             RegulationSpan::Curation,
@@ -520,11 +532,11 @@ mod reg_span_tests {
                 variant, s, parsed
             );
         }
-        // Assert count matches enum variant count (8 core + 14 specific ToolSubsystem = 22).
+        // Assert count matches enum variant count (6 core + 18 specific ToolSubsystem = 24).
         // If this fails, a new RegulationSpan variant was added without updating this test.
         assert!(
-            all_variants.len() == 22,
-            "Regulation span exhaustive test should cover all RegulationSpan variants, found {} (expected 22)",
+            all_variants.len() == 24,
+            "Regulation span exhaustive test should cover all RegulationSpan variants, found {} (expected 24)",
             all_variants.len()
         );
     }

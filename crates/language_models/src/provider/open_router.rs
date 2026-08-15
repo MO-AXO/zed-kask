@@ -225,6 +225,7 @@ impl LanguageModelProvider for OpenRouterLanguageModelProvider {
                 name: model.name.clone(),
                 display_name: model.display_name.clone(),
                 max_tokens: model.max_tokens,
+                max_output_tokens: model.max_output_tokens,
                 supports_tools: model.supports_tools,
                 supports_images: model.supports_images,
                 mode: model.mode.unwrap_or_default(),
@@ -366,6 +367,23 @@ impl LanguageModel for OpenRouterLanguageModel {
         format!("openrouter/{}", self.model.id())
     }
 
+    // zed-kask: D24 — expose `api_url()` and `api_key()` so the kask edit-prediction
+    // port can make raw `/completions` calls through the same OpenRouter
+    // credentials the registry already holds, without a second inference router.
+    // Mirrors the pattern used by the kask embedding port. Without these
+    // overrides the trait default returns `None`, forcing callers to resolve
+    // credentials from env vars instead of the registry.
+    fn api_key(&self, cx: &App) -> Option<String> {
+        self.state.read_with(cx, |state, cx| {
+            let api_url = OpenRouterLanguageModelProvider::api_url(cx);
+            state.api_key_state.key(&api_url).map(|key| key.to_string())
+        })
+    }
+
+    fn api_url(&self, cx: &App) -> Option<String> {
+        Some(OpenRouterLanguageModelProvider::api_url(cx).to_string())
+    }
+
     fn max_token_count(&self) -> u64 {
         self.model.max_token_count()
     }
@@ -433,6 +451,11 @@ pub fn into_open_router(
     // we should revise this to use that instead.
     let is_anthropic_model = model.id().starts_with("anthropic/");
     let session_id = open_router_session_id(request.thread_id);
+    // zed-kask: D13 — read the per-request output budget before `request` is
+    // partially moved by the message loop below. When set (skill cascade), it
+    // overrides the model's default `max_output_tokens`; when `None` (agent
+    // chat), the model default is used as before.
+    let request_max_tokens = request.max_tokens;
 
     let mut messages = Vec::new();
     let mut any_message_wants_cache = false;
@@ -568,7 +591,7 @@ pub fn into_open_router(
         session_id,
         stop: request.stop,
         temperature: request.temperature.unwrap_or(0.4),
-        max_tokens: max_output_tokens,
+        max_tokens: request_max_tokens.or(max_output_tokens),
         parallel_tool_calls: if model.supports_parallel_tool_calls() && !request.tools.is_empty() {
             Some(false)
         } else {
@@ -769,6 +792,7 @@ impl OpenRouterEventMapper {
                 output_tokens: usage.completion_tokens,
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
+                cost: None,
             })));
         }
 
@@ -869,6 +893,15 @@ impl OpenRouterEventMapper {
 
                 // Don't emit reasoning_details here - already emitted immediately when captured
                 events.push(Ok(LanguageModelCompletionEvent::Stop(StopReason::ToolUse)));
+            }
+            // zed-kask: D25 — OpenRouter (OpenAI Chat Completions format) reports
+            // output truncation as finish_reason "length". Map it to MaxTokens,
+            // not the catch-all EndTurn, so downstream consumers detect the
+            // truncation instead of treating a cut-off response as a clean finish.
+            Some("length") => {
+                events.push(Ok(LanguageModelCompletionEvent::Stop(
+                    StopReason::MaxTokens,
+                )));
             }
             Some(stop_reason) => {
                 log::error!("Unexpected OpenRouter stop_reason: {stop_reason:?}",);
@@ -1113,6 +1146,140 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_max_completion_tokens_from_api_becomes_request_budget() {
+        // zed-kask: OpenRouter reserves the model's full default output size
+        // against the key's credit limit when `max_tokens` is omitted, and
+        // rejects with 402 on limited keys. The models endpoint advertises
+        // `top_provider.max_completion_tokens`; it must flow through to the
+        // request as an explicit budget.
+        let entry = open_router::ModelEntry {
+            id: "anthropic/claude-haiku-4.5".into(),
+            name: "Anthropic: Claude Haiku 4.5".into(),
+            created: 0,
+            description: String::new(),
+            context_length: Some(200000),
+            supported_parameters: vec!["tools".into()],
+            architecture: None,
+            top_provider: Some(open_router::TopProvider {
+                max_completion_tokens: Some(64000),
+            }),
+        };
+        let models = open_router::parse_models_response_for_test(entry)
+            .await
+            .unwrap();
+        let model = &models[0];
+        assert_eq!(model.max_output_tokens(), Some(64000));
+
+        let request = LanguageModelRequest {
+            messages: vec![language_model::LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![MessageContent::Text("Hello".to_string())],
+                cache: false,
+                reasoning_details: None,
+            }],
+            ..Default::default()
+        };
+        let result = into_open_router(request, model, model.max_output_tokens()).unwrap();
+        assert_eq!(result.max_tokens, Some(64000));
+    }
+
+    #[gpui::test]
+    async fn test_max_output_tokens_capped_at_half_context_length() {
+        // zed-kask: GLM 5.2 advertises `max_completion_tokens` equal to its
+        // `context_length` (1048576). That value is mathematically impossible
+        // (input + output can never exceed the context window), so sending it
+        // as `max_tokens` makes OpenRouter reject every non-empty request with
+        // 400, and it also breaks compaction math (`max_input_tokens =
+        // context - max_output_tokens` collapses to 0). The output budget is
+        // capped at half the context window so sane models (advertised cap
+        // already < 50%) are unaffected while broken models leave room for
+        // both input and output.
+        let entry = open_router::ModelEntry {
+            id: "z-ai/glm-5.2".into(),
+            name: "Z.ai: GLM 5.2".into(),
+            created: 0,
+            description: String::new(),
+            context_length: Some(1048576),
+            supported_parameters: vec!["tools".into()],
+            architecture: None,
+            top_provider: Some(open_router::TopProvider {
+                max_completion_tokens: Some(1048576),
+            }),
+        };
+        let models = open_router::parse_models_response_for_test(entry)
+            .await
+            .unwrap();
+        let model = &models[0];
+        assert_eq!(model.max_token_count(), 1048576);
+        assert_eq!(
+            model.max_output_tokens(),
+            Some(524288),
+            "max_output_tokens must be capped at half the context window so \
+             input + output never exceeds context_length"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_per_request_max_tokens_overrides_model_default() {
+        // zed-kask: D13 — the skill cascade sets max_tokens from
+        // LLMParameters (typically 2048) so the provider requests a tight
+        // output budget instead of the model full default. The per-request
+        // value wins; when None (agent chat), the model default is used.
+        let entry = open_router::ModelEntry {
+            id: "z-ai/glm-5.2".into(),
+            name: "Z.ai: GLM 5.2".into(),
+            created: 0,
+            description: String::new(),
+            context_length: Some(1048576),
+            supported_parameters: vec!["tools".into()],
+            architecture: None,
+            top_provider: Some(open_router::TopProvider {
+                max_completion_tokens: Some(1048576),
+            }),
+        };
+        let models = open_router::parse_models_response_for_test(entry)
+            .await
+            .unwrap();
+        let model = &models[0];
+        assert_eq!(model.max_output_tokens(), Some(524288));
+
+        // Per-request override (cascade path) wins over the model default.
+        let request = LanguageModelRequest {
+            messages: vec![language_model::LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![MessageContent::Text("Hello".to_string())],
+                cache: false,
+                reasoning_details: None,
+            }],
+            max_tokens: Some(2048),
+            ..Default::default()
+        };
+        let result = into_open_router(request, model, model.max_output_tokens()).unwrap();
+        assert_eq!(
+            result.max_tokens,
+            Some(2048),
+            "per-request max_tokens must override the model default"
+        );
+
+        // Agent chat path (max_tokens None) falls back to the model default.
+        let request = LanguageModelRequest {
+            messages: vec![language_model::LanguageModelRequestMessage {
+                role: Role::User,
+                content: vec![MessageContent::Text("Hello".to_string())],
+                cache: false,
+                reasoning_details: None,
+            }],
+            ..Default::default()
+        };
+        let result = into_open_router(request, model, model.max_output_tokens()).unwrap();
+        assert_eq!(
+            result.max_tokens,
+            Some(524288),
+            "when max_tokens is None the model default is used as before"
+        );
+    }
+
+    #[gpui::test]
     async fn test_session_id_uses_thread_id() {
         let model = open_router::Model::new(
             "openai/gpt-4o",
@@ -1186,6 +1353,45 @@ mod tests {
     }
 
     #[gpui::test]
+    async fn test_length_finish_reason_maps_to_max_tokens() {
+        // zed-kask: D25 — OpenRouter reports output truncation as
+        // finish_reason "length". It must map to StopReason::MaxTokens, not be
+        // logged as "Unexpected" and collapsed to EndTurn — otherwise a
+        // truncated cascade step silently feeds partial text into JSON parsing
+        // instead of emitting the structured-output tool call.
+        let mut mapper = OpenRouterEventMapper::new();
+        let events = mapper.map_event(ResponseStreamEvent {
+            id: Some("response_123".into()),
+            created: 1234567890,
+            model: "z-ai/glm-5.2".into(),
+            choices: vec![ChoiceDelta {
+                index: 0,
+                delta: ResponseMessageDelta {
+                    role: None,
+                    content: None,
+                    reasoning: None,
+                    tool_calls: None,
+                    reasoning_details: None,
+                },
+                finish_reason: Some("length".into()),
+            }],
+            usage: None,
+        });
+
+        let stop = events
+            .into_iter()
+            .find_map(|event| match event {
+                Ok(LanguageModelCompletionEvent::Stop(reason)) => Some(reason),
+                _ => None,
+            })
+            .expect("expected a Stop event for finish_reason \"length\"");
+        assert!(
+            matches!(stop, StopReason::MaxTokens),
+            "finish_reason \"length\" must map to MaxTokens, got {stop:?}"
+        );
+    }
+
+    #[gpui::test]
     async fn test_anthropic_model_caching_two_tier() {
         let model = open_router::Model::new(
             "anthropic/claude-sonnet-4-5",
@@ -1235,6 +1441,7 @@ mod tests {
             prompt_id: None,
             intent: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let result = into_open_router(request, &model, None).unwrap();
@@ -1374,6 +1581,7 @@ mod tests {
             prompt_id: None,
             intent: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let result = into_open_router(request, &model, None).unwrap();
@@ -1437,6 +1645,7 @@ mod tests {
             prompt_id: None,
             intent: None,
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         let result = into_open_router(request, &model, None).unwrap();

@@ -1,11 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- evaluate
-- validate
-- verify
-- classify
-- discriminate
 contract:
   input:
     candidate_skill_content: string
@@ -15,7 +9,6 @@ contract:
     safety_evaluation: object
     overall_score: number
     recommendation: string
-energy_cap: 6144
 visibility: Public
 ---
 {# Template: skill-discovery/skill-discovery-evaluate.j2 #}

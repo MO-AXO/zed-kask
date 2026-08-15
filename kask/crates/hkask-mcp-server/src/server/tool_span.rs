@@ -7,12 +7,6 @@ use std::time::Instant;
 use super::error::McpToolError;
 use super::http_helpers::McpToolOutput;
 
-/// Error healing callback: (error_string, operation_name).
-type HealCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
-
-/// Experience recording callback: fires when a span finishes with "success" or "error".
-pub type ExperienceCallback = Box<dyn Fn(&str) + Send + Sync>;
-
 /// RAII guard — emits Regulation tool span on drop. Use `span.ok(output)` or `span.error(kind, output)`.
 pub struct ToolSpanGuard {
     tool_name: String,
@@ -21,10 +15,6 @@ pub struct ToolSpanGuard {
     emitted: bool,
     /// Domain ontology concept for type-aware feedback routing (e.g. "pko:ChangeOfStatus").
     ontology: Option<&'static str>,
-    /// Optional heal callback: (error_string, operation_name).
-    heal_error_cb: Option<HealCallback>,
-    /// Optional experience callback: fires on ok/error with "success"/"error".
-    experience_cb: Option<ExperienceCallback>,
 }
 
 impl ToolSpanGuard {
@@ -40,45 +30,27 @@ impl ToolSpanGuard {
             caller: *caller,
             emitted: false,
             ontology: None,
-            heal_error_cb: None,
-            experience_cb: None,
         }
     }
 
     /// Tag this span with a domain ontology concept (e.g. "pko:ChangeOfStatus").
     /// The concept flows into the Regulation span for type-aware feedback routing.
     ///
-    /// All hKask bridge crate constants (`hkask-bridge-pko`, `hkask-bridge-dublincore`,
-    /// and domain-specific bridges like `hkask-mcp-companies/src/fibo.rs`) are valid
+    /// All hKask bridge crate constants (`hkask-bridge-ontology`,
+    /// which owns DC/BIBO/PKO + all domain bridges) are valid
     /// `&'static str` concepts. This function documents the intent: `with_ontology`
     /// accepts ontology concepts, not arbitrary debug strings.
     ///
     /// # Example
     ///
     /// ```ignore
-    /// use hkask_bridge_dublincore::STEP_EXECUTION;
+    /// use hkask_bridge_ontology::pko::STEP_EXECUTION;
     /// ToolSpanGuard::new("my_tool", &caller)
     ///     .with_ontology(STEP_EXECUTION);
     /// ```
     #[must_use]
     pub fn with_ontology(mut self, concept: &'static str) -> Self {
         self.ontology = Some(concept);
-        self
-    }
-
-    /// Attach a self-healing callback for automatic error recovery.
-    #[must_use]
-    pub fn with_heal_cb(mut self, cb: HealCallback) -> Self {
-        self.heal_error_cb = Some(cb);
-        self
-    }
-
-    /// Attach an experience callback that fires when the span completes.
-    ///
-    /// The callback receives "success" or "error" based on how the span finishes.
-    #[must_use]
-    pub fn with_experience(mut self, cb: ExperienceCallback) -> Self {
-        self.experience_cb = Some(cb);
         self
     }
 
@@ -98,9 +70,6 @@ impl ToolSpanGuard {
             Some(&self.caller),
             self.ontology,
         );
-        if let Some(ref cb) = self.experience_cb {
-            cb("success");
-        }
         output
     }
 
@@ -120,12 +89,6 @@ impl ToolSpanGuard {
             Some(&self.caller),
             self.ontology,
         );
-        if let Some(ref cb) = self.heal_error_cb {
-            cb(&output, &self.tool_name);
-        }
-        if let Some(ref cb) = self.experience_cb {
-            cb("error");
-        }
         output
     }
 
@@ -150,23 +113,6 @@ impl ToolSpanGuard {
             Ok(value) => self.ok_json(value),
             Err(e) => self.error(e.kind, e.to_json_string()),
         }
-    }
-
-    /// Produces McpToolError wire format so clients can distinguish errors from successes.
-    /// Finish span with an internal error.
-    ///
-    /// post: Regulation tool span emitted with "error" status
-    /// post: returns JSON error string
-    #[must_use]
-    pub fn internal_error(self, value: Value) -> String {
-        let message = match value {
-            Value::String(s) => s,
-            other => other.to_string(),
-        };
-        self.error(
-            McpErrorKind::Internal,
-            McpToolError::internal(message).to_json_string(),
-        )
     }
 }
 
@@ -206,30 +152,20 @@ fn emit_tool_span(
 /// Trait for MCP server types that want framework-level tool execution.
 ///
 /// Implement this on your server struct to enable `execute_tool()`, which
-/// handles Regulation span emission, error serialization, and semantic memory
-/// recording automatically.
+/// handles Regulation span emission and error serialization automatically.
 ///
-/// Override `record_tool_outcome` to wire richer semantic-memory recording.
-/// The default implementation emits a Regulation warning so the Curator knows memory
-/// recording is not configured; the `impl_tool_context!` macro overrides it with
-/// an in-process `reg.memory` debug log.
+/// The `reg.tool` span (emitted by `ToolSpanGuard`) is the production
+/// recording surface — it carries tool name, outcome, duration, and caller
+/// to the Regulation loop. There is no separate per-tool semantic-memory
+/// recording hook; thread-level memory via `RealMemoryPort` (D6) is the
+/// richer path, and per-tool debug logging is available via `tracing::debug!`
+/// at the call site if a server needs it.
 pub trait ToolContext {
     /// The WebID of the caller serving this tool (for Regulation span attribution).
     fn webid(&self) -> &hkask_types::WebID;
-
-    /// Record a tool outcome to semantic memory.
-    /// Override this to wire richer per-server recording (e.g. the condenser's
-    /// `record_experience` → `EpisodicMemory::store`). Default: emits a Regulation
-    /// warning — memory not configured for this server; the `impl_tool_context!`
-    /// macro overrides this with an in-process `reg.memory` debug log.
-    fn record_tool_outcome(&self, tool: &str, outcome: &str) {
-        tracing::warn!(target: "reg.memory", tool = %tool, outcome = %outcome,
-            "Tool outcome not persisted — ToolContext::record_tool_outcome not overridden");
-    }
 }
 
-/// Execute a tool with automatic Regulation span emission, error serialization,
-/// and optional semantic memory recording via [`ToolContext`].
+/// Execute a tool with automatic Regulation span emission and error serialization.
 ///
 /// The tool's business logic goes in the `fut` async block, which returns
 /// `Result<Value, McpToolError>`. The framework handles everything else.
@@ -253,15 +189,16 @@ pub async fn execute_tool<C: ToolContext>(
 ) -> String {
     let span = ToolSpanGuard::new(tool_name, ctx.webid());
     let result = fut.await;
-    match &result {
-        Ok(_) => ctx.record_tool_outcome(tool_name, "success"),
-        Err(_) => ctx.record_tool_outcome(tool_name, "error"),
-    }
     span.finish(result)
 }
 
 /// Like `execute_tool` but tags the Regulation span with a domain ontology concept
 /// (e.g. "pko:ChangeOfStatus") for type-aware feedback routing.
+///
+/// When `ontology` is `None`, emits a `tracing::warn!` naming the tool — the
+/// algedonic signal that a registered tool lacks an ontology anchor. This
+/// opens the S1→S5 feedback channel: a missing anchor is visible at runtime
+/// rather than silently producing an untagged span.
 #[must_use]
 pub async fn execute_tool_semantic<C: ToolContext>(
     ctx: &C,
@@ -272,30 +209,15 @@ pub async fn execute_tool_semantic<C: ToolContext>(
     let mut span = ToolSpanGuard::new(tool_name, ctx.webid());
     if let Some(concept) = ontology {
         span = span.with_ontology(concept);
+    } else {
+        tracing::warn!(
+            target: "hkask.mcp.ontology",
+            tool = %tool_name,
+            "execute_tool_semantic called with None ontology for tool '{}'; \
+             add an arm to the server's ontology_anchor fn",
+            tool_name
+        );
     }
     let result = fut.await;
-    match &result {
-        Ok(_) => ctx.record_tool_outcome(tool_name, "success"),
-        Err(_) => ctx.record_tool_outcome(tool_name, "error"),
-    }
     span.finish(result)
-}
-
-// ── Convenience helpers ────────────────────────────────────────────────────
-
-/// Convenience: produce an internal error response for a named failed operation.
-///
-/// Combines `context` ("what failed") and `e` into a standard `{"error": "Failed to ...: ..."}` JSON
-/// body, eliminating the repeated `span.internal_error(json!({...}))` pattern across servers.
-/// Produce a JSON-RPC error response for internal tool errors.
-///
-/// pre:  message is non-empty
-/// post: returns JSON string with error object
-#[must_use]
-pub fn tool_internal_error(
-    span: ToolSpanGuard,
-    context: &str,
-    e: impl std::fmt::Display,
-) -> String {
-    span.internal_error(serde_json::json!({"error": format!("Failed to {context}: {e}")}))
 }

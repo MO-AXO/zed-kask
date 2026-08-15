@@ -1,13 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- detect
-- explore
-- classify
-- discriminate
-- orient
-- assess
-- rank
 contract:
   input:
     focus_area: string
@@ -21,7 +13,6 @@ contract:
     deletion_test_results: array
     constraint_force_map: array
     top_recommendation: string
-energy_cap: 8192
 visibility: Public
 ---
 {# Template: refactor-architecture/rsl-audit.j2 #}
@@ -141,7 +132,7 @@ Respond with a JSON object:
   ],
   "constraint_force_map": [
     {
-      "decision": "OCAP gates in domain crates",
+      "decision": "capability-match gates in domain crates",
       "force": "Prohibition",
       "rationale": "P1 User Sovereignty — inviolable boundary"
     }

@@ -1,12 +1,6 @@
 {# goal: Synthesize audit findings into a structured report and propose regression entries with source citations. #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- synthesize
-- report
-- classify
-- escalate
-- evaluate
 contract:
   input:
     findings: array
@@ -16,7 +10,6 @@ contract:
   output:
     report: object
     proposed_regressions: array
-energy_cap: 4096
 visibility: Public
 ---
 {# Template: kali-audit/report.j2 #}
@@ -99,9 +92,9 @@ Respond with a JSON object:
     "defense_layer_gaps": [
       {
         "layer": 2,
-        "name": "Data/instruction separation",
-        "recommendation": "Implement spotlighting (datamarking) on MCP tool outputs",
-        "source": "Microsoft Research arXiv:2403.14720"
+        "name": "Runtime monitoring (Regulation, action distribution)",
+        "recommendation": "Emit reg.* spans on every governed tool invocation so action distribution is observable",
+        "source": "AgentGuard arXiv:2509.23864, NIST AI RMF"
       }
     ],
     "coverage_gaps": ["CWE-787 not checked — needs runtime fuzzing"]

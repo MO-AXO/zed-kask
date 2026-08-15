@@ -10,11 +10,11 @@ description = "Registry, vocabulary, and template execution for hKask"
 path = "src/hkask_templates.rs"
 
 [dependencies]
-hkask-types = { path = "../hkask-types" }
-hkask-capability = { path = "../hkask-capability" }
-hkask-forecast = { path = "../hkask-forecast" }
-hkask-guard = { path = "../hkask-guard" }
-hkask-regulation = { path = "../hkask-regulation" }
+hkask-types.workspace = true
+hkask-capability.workspace = true
+hkask-forecast.workspace = true
+hkask-lisp.workspace = true
+futures-util.workspace = true
 minijinja.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,14 +23,20 @@ thiserror.workspace = true
 tracing.workspace = true
 rusqlite.workspace = true
 tokio.workspace = true
-ed25519-dalek.workspace = true
 r2d2.workspace = true
 r2d2_sqlite.workspace = true
-zeroize.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+test-utils = []
 
 [dev-dependencies]
 proptest = { workspace = true }
 walkdir.workspace = true
+hkask-test-harness = { workspace = true }
+regex = { workspace = true }
 
 [[test]]
 name = "manifest_fuzz"
@@ -47,3 +53,40 @@ path = "tests/template_rendering.rs"
 [[test]]
 name = "bootstrap_test"
 path = "tests/bootstrap_test.rs"
+
+[[test]]
+name = "executor_properties"
+path = "tests/executor_properties.rs"
+
+[[test]]
+name = "executor_baseline_contract"
+path = "tests/executor_baseline_contract.rs"
+
+[[test]]
+name = "compute_properties"
+path = "tests/compute_properties.rs"
+
+[[test]]
+name = "compute_gap_properties"
+path = "tests/compute_gap_properties.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "condition_properties"
+path = "tests/condition_properties.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "input_mapping_properties"
+path = "tests/input_mapping_properties.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "step_graph_properties"
+path = "tests/step_graph_properties.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "token_budget_audit"
+path = "tests/token_budget_audit.rs"
+required-features = ["test-utils"]

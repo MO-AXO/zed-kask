@@ -1,11 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- evaluate
-- rank
-- select
-- converge
-- classify
 contract:
   input:
     tested_variants: object
@@ -16,7 +10,6 @@ contract:
     frontier: array
     dominated: array
     frontier_notes: string
-energy_cap: 3072
 visibility: Public
 ---
 {# hKask v0.31.0 — GEPA Evolution #}
@@ -35,7 +28,7 @@ visibility: Public
 temperature = 0.1
 work_effort = "medium"
 verbosity = "terse"
-max_tokens = 2000
+max_tokens = 2048
 thinking_budget = "off"
 
 You are a Pareto frontier updater for GEPA evolutionary optimization. Your job: merge the current frontier with newly tested variants, then keep only the non-dominated members.

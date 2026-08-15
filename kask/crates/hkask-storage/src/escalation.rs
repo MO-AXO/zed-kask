@@ -232,17 +232,26 @@ impl EscalationQueue {
                         .get(0)?
                         .as_text()?
                         .parse()
-                        .unwrap_or_else(|_| EscalationID::new()),
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(target: "reg.storage", error = %e, "Failed to parse escalation ID from DB — using a fresh random ID. The returned entry will not match its DB row, breaking resolve/dismiss.");
+                            EscalationID::new()
+                        }),
                     template_id: row
                         .get(1)?
                         .as_text()?
                         .parse()
-                        .unwrap_or_else(|_| TemplateID::new()),
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(target: "reg.storage", error = %e, "Failed to parse template_id from DB — using a fresh random ID.");
+                            TemplateID::new()
+                        }),
                     bot_id: row
                         .get(2)?
                         .as_text()?
                         .parse()
-                        .unwrap_or_else(|_| BotID::new()),
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(target: "reg.storage", error = %e, "Failed to parse bot_id from DB — using a fresh random ID.");
+                            BotID::new()
+                        }),
                     output: row.get(3)?.as_text()?.to_string(),
                     confidence: row.get(4)?.as_real()?,
                     retry_count: row.get(5)?.as_int()? as u32,
@@ -393,90 +402,6 @@ pub struct EscalationStats {
     pub pending: i64,
     pub resolved: i64,
     pub dismissed: i64,
-}
-
-// ── EscalationPort implementation ────────────────────────────────────
-
-use hkask_types::escalation::EscalationPort;
-
-impl EscalationPort for EscalationQueue {
-    fn list_pending(
-        &self,
-    ) -> Result<Vec<hkask_types::escalation::EscalationEntry>, InfrastructureError> {
-        self.list_pending()
-            .map(|entries| entries.into_iter().map(|e| e.into()).collect())
-            .map_err(|e| InfrastructureError::database(e.to_string()))
-    }
-
-    fn get(
-        &self,
-        id: &str,
-    ) -> Result<Option<hkask_types::escalation::EscalationEntry>, InfrastructureError> {
-        self.get(id)
-            .map(|opt| opt.map(|e| e.into()))
-            .map_err(|e| InfrastructureError::database(e.to_string()))
-    }
-
-    fn resolve(&self, id: &str, resolved_by: &str) -> Result<(), InfrastructureError> {
-        self.resolve(id, resolved_by)
-            .map_err(|e| InfrastructureError::database(e.to_string()))
-    }
-
-    fn dismiss(&self, id: &str, resolved_by: &str) -> Result<(), InfrastructureError> {
-        self.dismiss(id, resolved_by)
-            .map_err(|e| InfrastructureError::database(e.to_string()))
-    }
-
-    fn persist_batch(
-        &self,
-        _batch: &hkask_types::escalation::EscalationBatch,
-    ) -> Result<(), InfrastructureError> {
-        // Forward-compat: batch persistence not yet wired through the port.
-        // Individual entries are added via `add()`.
-        Ok(())
-    }
-
-    fn add(
-        &self,
-        template_id: TemplateID,
-        bot_id: BotID,
-        output: String,
-        confidence: f64,
-        retry_count: u32,
-        error_context: String,
-    ) -> Result<EscalationID, InfrastructureError> {
-        self.add(
-            template_id,
-            bot_id,
-            output,
-            confidence,
-            retry_count,
-            error_context,
-        )
-        .map_err(|e| InfrastructureError::database(e.to_string()))
-    }
-}
-
-impl From<EscalationEntry> for hkask_types::escalation::EscalationEntry {
-    fn from(e: EscalationEntry) -> Self {
-        Self {
-            id: e.id,
-            template_id: e.template_id,
-            bot_id: e.bot_id,
-            output: e.output,
-            confidence: e.confidence,
-            retry_count: e.retry_count,
-            error_context: e.error_context,
-            created_at: e.created_at,
-            status: match e.status {
-                EscalationStatus::Pending => hkask_types::escalation::EscalationStatus::Pending,
-                EscalationStatus::Resolved => hkask_types::escalation::EscalationStatus::Resolved,
-                EscalationStatus::Dismissed => hkask_types::escalation::EscalationStatus::Dismissed,
-            },
-            resolved_at: e.resolved_at,
-            resolved_by: e.resolved_by,
-        }
-    }
 }
 
 #[cfg(test)]

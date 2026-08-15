@@ -47,7 +47,7 @@ use language_model::{
     LanguageModelToolUse, LanguageModelToolUseId, MessageContent, Role, SelectedModel, Speed,
     StopReason, TokenUsage, ZED_CLOUD_PROVIDER_ID,
 };
-use project::{Project, trusted_worktrees::TrustedWorktrees};
+use project::{AgentId, Project, trusted_worktrees::TrustedWorktrees};
 use prompt_store::ProjectContext;
 use schemars::{JsonSchema, Schema};
 use serde::de::DeserializeOwned;
@@ -72,6 +72,37 @@ use util::{ResultExt, debug_panic, markdown::MarkdownCodeBlock, paths::PathStyle
 use uuid::Uuid;
 
 const TOOL_CANCELED_MESSAGE: &str = "Tool canceled by user";
+/// Used when a tool call was interrupted because the model's output reached
+/// the token limit before it finished emitting the tool's input. Distinct from
+/// `TOOL_CANCELED_MESSAGE` (which means the user stopped the turn) so the model
+/// can distinguish "retry with a simpler call" from "the user canceled me."
+const TOOL_TRUNCATED_MESSAGE: &str = "Tool call was interrupted because the model's output reached the token limit before completing the tool input. Try again with a shorter or simpler tool call.";
+const TOOL_CALL_INTERRUPTED_BY_FOLLOW_UP_MESSAGE: &str =
+    "Permission denied: user sent a follow-up message instead of approving the tool call.";
+pub(crate) const FOLLOW_UP_PERMISSION_DENIED_OPTION_ID: &str = "follow_up_permission_denied";
+
+/// The error string `ToolInput::recv()` returns when the channel closes without
+/// a final `Full` payload — i.e. the LLM stream ended before the tool_use input
+/// was complete. Streaming tools (`edit_file`, `write_file`) that call
+/// `input.next()` in a loop receive this as an `Err` and would otherwise pass
+/// the generic string through to the model. `map_tool_input_error` replaces
+/// it with an actionable message so the model knows to retry with a simpler
+/// call instead of treating it as an arbitrary failure.
+pub(crate) const TOOL_INPUT_NOT_FULLY_RECEIVED: &str = "tool input was not fully received";
+
+/// If `error` is the `ToolInput::recv()` channel-closed error, return a
+/// model-facing message that explains the cause and suggests a remedy.
+/// Otherwise return the original error string unchanged. Streaming tools
+/// call this in their `Err(error)` arm so the model can distinguish
+/// stream-truncation from genuine tool failures.
+pub(crate) fn map_tool_input_error(error: impl std::fmt::Display) -> String {
+    let text = error.to_string();
+    if text == TOOL_INPUT_NOT_FULLY_RECEIVED {
+        TOOL_TRUNCATED_MESSAGE.to_string()
+    } else {
+        text
+    }
+}
 pub const MAX_TOOL_NAME_LENGTH: usize = 64;
 pub const MAX_SUBAGENT_DEPTH: u8 = 1;
 
@@ -124,6 +155,33 @@ pub const MIN_COMPACTION_CONTEXT_WINDOW: u64 = 80_000;
 
 // Using the heuristic that 1 token is about 4 bytes, keep the last 80K bytes of user-message content (~20k tokens).
 const COMPACTION_RETAINED_USER_MESSAGES_BYTE_BUDGET: usize = 80_000;
+
+/// Tools whose output must never be passed through the `ThreadCondenser`.
+///
+/// These tools return structured content (source code, search results,
+/// directory listings, diagnostics, diffs) where every line is structurally
+/// meaningful. The condenser's line-level elision (joining non-consecutive
+/// selected lines with `...` ellipsis markers) is actively harmful here: the
+/// `...` looks like literal source content, and structurally meaningful lines
+/// (use statements, closing braces, method chains) are dropped because they
+/// score low on word-frequency saliency. The condenser is intended for
+/// verbose terminal/build/test output, not source code.
+///
+/// `terminal` is intentionally NOT in this list — terminal output (build
+/// logs, test output) is the condenser's intended use case. The condenser's
+/// `classify_tool` now recognizes `terminal` as `ShellCommand` so it routes
+/// to the head/tail `RtkStyleAlgorithm` instead of the ellipsis-based
+/// `FlashrankAlgorithm`.
+pub(crate) const NO_COMPRESS_TOOLS: &[&str] = &[
+    "read_file",
+    "grep",
+    "find_path",
+    "list_directory",
+    "diagnostics",
+    "find_references",
+    "get_code_actions",
+    "edit_file",
+];
 
 /// Returned when a turn is attempted but no language model has been selected.
 #[derive(Debug)]
@@ -913,6 +971,13 @@ pub enum ThreadEvent {
     AgentThinking(String),
     ToolCall(acp::ToolCall),
     ToolCallUpdate(acp_thread::ToolCallUpdate),
+    /// Real-time thinking trace from a tool's execution (e.g. skill cascade
+    /// step reasoning). Appended to the tool call's `thoughts` buffer so the
+    /// user sees a live thinking trace, not just a one-line title.
+    ToolCallThinking {
+        tool_call_id: acp::ToolCallId,
+        text: String,
+    },
     ToolCallAuthorization(ToolCallAuthorization),
     ToolCallAuthorizationResolved {
         tool_call_id: acp::ToolCallId,
@@ -1194,6 +1259,16 @@ pub struct ToolCallAuthorization {
     pub kind: acp_thread::AuthorizationKind,
 }
 
+fn ensure_tool_call_authorization_not_interrupted(
+    outcome: &acp_thread::SelectedPermissionOutcome,
+) -> Result<()> {
+    if outcome.option_id.0.as_ref() == FOLLOW_UP_PERMISSION_DENIED_OPTION_ID {
+        Err(anyhow!(TOOL_CALL_INTERRUPTED_BY_FOLLOW_UP_MESSAGE))
+    } else {
+        Ok(())
+    }
+}
+
 fn auto_resolve_permission_outcome(
     options: &acp_thread::PermissionOptions,
     is_allow: bool,
@@ -1314,6 +1389,11 @@ pub struct Thread {
     /// already-granted permissions skip the approval prompt.
     /// Never persisted — lives and dies with this thread.
     sandbox_grants: Rc<RefCell<ThreadSandboxGrants>>,
+    /// Tool retry tracker — hard-enforces the agent-loop retry cap. After 3
+    /// identical failures, warns the agent to switch tools. After 5, hard-refuses.
+    /// Prevents the zero-gain retry death spiral (Ashby variety-deficit).
+    /// Never persisted — lives and dies with this thread.
+    tool_retry_tracker: Rc<RefCell<crate::tool_retry_tracker::ToolRetryTracker>>,
     /// Cached rendered system prompt and its input digest. The system prompt is
     /// re-rendered on every `build_request_messages_until` call, but its inputs
     /// (available_tools, model_name, date, user_agents_md, sandboxing, project
@@ -1334,6 +1414,11 @@ pub struct Thread {
     /// in the system-prompt digest (I1). `None` when no `ContextInjector` is set
     /// or when it returns `None` (I2 — upstream Zed compatibility).
     static_context: Option<SharedString>,
+    /// Whether `inject_static_context` has been attempted this session. Without
+    /// this, an empty recall result (`None`) leaves `static_context` as `None`,
+    /// and the `is_none()` guard re-queries the memory store on every turn —
+    /// a redundant SQLite + embedding query per turn for zero benefit.
+    static_context_loaded: bool,
     /// When set, overrides the default system prompt template. Used by the
     /// Curator agent to inject its own persona/system prompt instead of the
     /// default Zed Agent prompt. When `None`, the standard `system_prompt.hbs`
@@ -1343,12 +1428,32 @@ pub struct Thread {
     /// from the injected `static_context` so both can coexist — the Curator
     /// context is merged with memory-recall context in `render_system_prompt`.
     agent_static_context: Option<SharedString>,
+    /// The agent ID that owns this thread (e.g., `CURATOR_AGENT_ID`, `ZED_AGENT_ID`).
+    /// `None` for threads created before agent identity was tracked (upstream-zed
+    /// compatibility) and for subagent threads that inherit from their parent.
+    /// Used by the memory ingestion path (D6) to route Curator turns to the
+    /// curator's sovereign DB, and by the context injector dispatch (D11) to
+    /// select the correct per-agent recall store.
+    agent_id: Option<AgentId>,
+    /// When set, `enabled_tools` filters context-server (MCP) tools to only
+    /// the named server — the kask panel's per-tab scoping enforcement.
+    /// `None` (upstream Zed and non-kask threads) means all servers pass.
+    /// The name matches the server's `ContextServerId` (e.g. `"companies"`).
+    mcp_server_scope: Option<SharedString>,
     /// Tool results that are delivered asynchronously, after the immediate
     /// tool-result slot has been flushed. The outer turn loop drains completed
     /// entries at the top of each iteration and injects them as a synthetic
     /// user message before `build_completion_request`. See
     /// `DeferredToolResult`.
     deferred_tool_results: Vec<DeferredToolResult>,
+    /// Set when the last completion ended with `StopReason::MaxTokens`,
+    /// indicating the model's output was truncated before it finished.
+    /// `flush_pending_message` reads this to distinguish stream-truncated
+    /// tool calls (where the model never sent `is_input_complete: true`)
+    /// from genuine user cancellations, so the model gets an accurate
+    /// reason instead of the misleading `TOOL_CANCELED_MESSAGE`.
+    /// Reset to `false` at the start of each completion request.
+    last_completion_truncated: bool,
 }
 
 /// A rendered system prompt cached alongside a digest of its inputs. The
@@ -1501,12 +1606,19 @@ impl Thread {
             inherits_parent_model_settings: true,
             sandboxed_terminal_temp_dir: None,
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::default())),
+            tool_retry_tracker: Rc::new(RefCell::new(
+                crate::tool_retry_tracker::ToolRetryTracker::default(),
+            )),
             cached_system_prompt: None,
             cached_filtered_context: None,
             static_context: None,
+            static_context_loaded: false,
             system_prompt_override: None,
             agent_static_context: None,
+            agent_id: None,
+            mcp_server_scope: None,
             deferred_tool_results: Vec::new(),
+            last_completion_truncated: false,
         }
     }
 
@@ -1735,7 +1847,14 @@ impl Thread {
                 self.sandbox_grants.clone(),
                 Some(cx.weak_entity()),
             );
-            tool.replay(input, output, tool_event_stream, cx).log_err();
+            if let Err(error) = tool.replay(input, output, tool_event_stream, cx) {
+                // Replay deserialization can fail when the persisted model output
+                // violates the tool's current input schema (e.g. a model emitted
+                // `timeout_ms` as a string, or omitted a required field). The raw
+                // output is still displayed via the update_tool_call_fields call
+                // below, so this only degrades the rich tool-specific rendering.
+                log::warn!("Failed to replay tool {}: {error:#}", tool_use.name);
+            }
         }
 
         stream.update_tool_call_fields(
@@ -1892,12 +2011,19 @@ impl Thread {
             sandbox_grants: Rc::new(RefCell::new(ThreadSandboxGrants::from_db(
                 &db_thread.sandbox_grants,
             ))),
+            tool_retry_tracker: Rc::new(RefCell::new(
+                crate::tool_retry_tracker::ToolRetryTracker::default(),
+            )),
             cached_system_prompt: None,
             cached_filtered_context: None,
             static_context: None,
+            static_context_loaded: false,
             system_prompt_override: None,
             agent_static_context: None,
+            agent_id: None,
+            mcp_server_scope: None,
             deferred_tool_results: Vec::new(),
+            last_completion_truncated: false,
         }
     }
 
@@ -2108,6 +2234,91 @@ impl Thread {
         self.agent_static_context = Some(context);
         self.cached_system_prompt = None; // bust the cache
         cx.notify();
+    }
+
+    /// Set the agent ID that owns this thread (e.g., `CURATOR_AGENT_ID`).
+    ///
+    /// Called by `NativeAgent::new_session` when the agent is the Curator (or
+    /// any other non-default native agent). `None` leaves the thread in the
+    /// default (Zed Agent) state — the memory ingestion path treats `None` as
+    /// the user agent and writes to the user's `memory.db`.
+    ///
+    /// This is stored separately from `system_prompt_override` and
+    /// `agent_static_context` because it is a routing key, not a prompt
+    /// fragment. The memory port (D6) and context injector dispatch (D11) both
+    /// read it to select the correct perspective-scoped store.
+    pub fn set_agent_id(&mut self, agent_id: AgentId, cx: &mut Context<Self>) {
+        self.agent_id = Some(agent_id);
+        cx.notify();
+    }
+
+    /// The agent ID that owns this thread, if set. `None` for the default
+    /// (Zed Agent) and for subagent threads that inherit from their parent.
+    pub fn agent_id(&self) -> Option<&AgentId> {
+        self.agent_id.as_ref()
+    }
+
+    /// Snapshot the last `n` turns as `LanguageModelRequestMessage`s, for
+    /// cascade context injection. Only user and assistant messages are
+    /// included (system, tool, and summary-compaction messages are skipped —
+    /// they are not part of the conversational context that memory should be
+    /// salient to). Returns an empty vec when `n` is 0 or the thread has no
+    /// qualifying messages.
+    ///
+    /// Used by `SkillTool::run` to snapshot recent turns for the cascade
+    /// context provider, so skill templates see the conversation they were
+    /// invoked from.
+    pub fn recent_turn_messages(
+        &self,
+        n: usize,
+    ) -> Vec<language_model::LanguageModelRequestMessage> {
+        if n == 0 {
+            return Vec::new();
+        }
+        let mut messages = Vec::new();
+        // Walk backwards through the message list, collecting user and
+        // assistant messages until we have `n` turns or run out.
+        for msg in self.messages.iter().rev() {
+            if messages.len() >= n {
+                break;
+            }
+            match msg.as_ref() {
+                Message::User(_) | Message::Agent(_) => {
+                    let req = msg.to_request();
+                    // Prepend to maintain chronological order.
+                    messages.splice(0..0, req);
+                }
+                Message::Resume | Message::Compaction(_) => {
+                    // Skip — not conversational turns.
+                }
+            }
+        }
+        messages
+    }
+
+    /// Restrict this thread's context-server (MCP) tools to a single server.
+    ///
+    /// Used by the kask panel's per-tab scoping: each tab's thread exposes
+    /// only the tools of the MCP server the tab is scoped to, so the
+    /// session-header instruction ("use only the `{server}` server's tools")
+    /// is enforced rather than advisory. `None` (the default) disables the
+    /// filter — upstream Zed threads are unaffected.
+    pub fn set_mcp_server_scope(&mut self, server: Option<SharedString>, cx: &mut Context<Self>) {
+        self.mcp_server_scope = server;
+        cx.notify();
+    }
+
+    /// The agent-set static context (e.g., the curator overlay's combined
+    /// base + per-tab prompt), if any. Distinct from the memory-injected
+    /// `static_context` — this is the agent's own contribution.
+    pub fn agent_static_context(&self) -> Option<&SharedString> {
+        self.agent_static_context.as_ref()
+    }
+
+    /// The MCP server this thread is scoped to, if any. `None` for upstream
+    /// Zed threads and non-kask threads (all servers pass `enabled_tools`).
+    pub fn mcp_server_scope(&self) -> Option<&SharedString> {
+        self.mcp_server_scope.as_ref()
     }
 
     pub fn set_model(&mut self, model: Arc<dyn LanguageModel>, cx: &mut Context<Self>) {
@@ -2426,6 +2637,7 @@ impl Thread {
             cache_read_input_tokens: previous_accounted_usage
                 .cache_read_input_tokens
                 .max(update.cache_read_input_tokens),
+            cost: None,
         };
         self.current_request_token_usage = current_accounted_usage;
         self.cumulative_token_usage = self.cumulative_token_usage
@@ -2442,6 +2654,7 @@ impl Thread {
                 cache_read_input_tokens: current_accounted_usage
                     .cache_read_input_tokens
                     .saturating_sub(previous_accounted_usage.cache_read_input_tokens),
+                cost: None,
             };
     }
 
@@ -2856,6 +3069,7 @@ impl Thread {
                                     .map(|m| m.name().0.to_string())
                                     .unwrap_or_default(),
                                 thread_title: thread.title().map(|t| t.to_string()),
+                                agent_id: thread.agent_id().cloned(),
                             });
                             if let Ok(record) = record {
                                 let port = port.clone();
@@ -2996,11 +3210,19 @@ impl Thread {
             // async because the underlying memory recall may need to await on
             // the GPUI or tokio executor. The result is cached on `Thread` for
             // the rest of the session.
-            if this
-                .read_with(cx, |this, _| this.static_context.is_none())
+            //
+            // We guard on `static_context_loaded` (not `static_context.is_none()`)
+            // because `inject_static_context` returns `None` for an empty recall
+            // result — without the flag, every turn would re-query the memory
+            // store and get the same empty answer.
+            if !this
+                .read_with(cx, |this, _| this.static_context_loaded)
                 .unwrap_or(false)
             {
-                if let Some(injector) = crate::context_injector() {
+                let agent_id = this
+                    .read_with(cx, |this, _| this.agent_id.clone())
+                    .unwrap_or(None);
+                if let Some(injector) = crate::context_injector_for(agent_id.as_ref()) {
                     let thread_id = this
                         .read_with(cx, |this, _| this.id.to_string())
                         .unwrap_or_default();
@@ -3008,8 +3230,13 @@ impl Thread {
                         let static_context = injector.inject_static_context(&thread_id).await;
                         this.update(cx, |this, _cx| {
                             this.static_context = static_context.map(SharedString::from);
+                            this.static_context_loaded = true;
                         })?;
+                    } else {
+                        this.update(cx, |this, _cx| this.static_context_loaded = true)?;
                     }
+                } else {
+                    this.update(cx, |this, _cx| this.static_context_loaded = true)?;
                 }
             }
 
@@ -3025,6 +3252,7 @@ impl Thread {
                 this.refresh_turn_tools(cx);
                 let request = this.build_completion_request(intent, cx)?;
                 this.current_request_token_usage = TokenUsage::default();
+                this.last_completion_truncated = false;
                 anyhow::Ok((model, request))
             })??;
 
@@ -3036,7 +3264,11 @@ impl Thread {
                 intent,
                 CompletionIntent::UserPrompt | CompletionIntent::Subagent
             ) {
-                if let Some(injector) = crate::context_injector() {
+                let agent_id = this
+                    .read_with(cx, |this, _| this.agent_id.clone())
+                    .ok()
+                    .unwrap_or(None);
+                if let Some(injector) = crate::context_injector_for(agent_id.as_ref()) {
                     let thread_id = this
                         .read_with(cx, |this, _| this.id.to_string())
                         .ok()
@@ -3821,7 +4053,10 @@ impl Thread {
                 self.update_token_usage(usage, cx);
             }
             Stop(StopReason::Refusal) => return Err(CompletionError::Refusal.into()),
-            Stop(StopReason::MaxTokens) => return Err(CompletionError::MaxTokens.into()),
+            Stop(StopReason::MaxTokens) => {
+                self.last_completion_truncated = true;
+                return Err(CompletionError::MaxTokens.into());
+            }
             Stop(StopReason::ToolUse | StopReason::EndTurn) => {}
             Started | Queued { .. } | Compaction(_) => {}
         }
@@ -3929,6 +4164,15 @@ impl Thread {
 
         if !tool_use.is_input_complete {
             if tool.supports_input_streaming() {
+                // [DIAG-T0001] Streaming path: tool supports input streaming and
+                // the provider sent a partial delta. The tool starts now and
+                // holds the ToolInput receiver; if the stream ends before
+                // is_input_complete=true, the drain at stream-end drops this
+                // sender and recv() returns "tool input was not fully received".
+                log::debug!(
+                    "[DIAG-T0001] tool {} entered streaming path (is_input_complete=false, supports_streaming=true)",
+                    tool_use.name
+                );
                 let running_turn = self.running_turn.as_mut()?;
                 if let Some(sender) = running_turn.streaming_tool_inputs.get_mut(&tool_use.id) {
                     sender.send_partial(input);
@@ -3936,6 +4180,7 @@ impl Thread {
                 }
 
                 let (mut sender, tool_input) = ToolInputSender::channel();
+                let input_for_tracking = input.clone();
                 sender.send_partial(input);
                 running_turn
                     .streaming_tool_inputs
@@ -3952,8 +4197,19 @@ impl Thread {
                     event_stream,
                     cancellation_rx,
                     cx,
+                    input_for_tracking,
+                    None,
                 ));
             } else {
+                // [DIAG-T0002] Non-streaming path: tool does not support input
+                // streaming, but the provider sent a partial delta. No tool
+                // starts. If the stream later ends without is_input_complete=true,
+                // flush_pending_message inserts TOOL_TRUNCATED_MESSAGE (for
+                // MaxTokens) or TOOL_CANCELED_MESSAGE (for user cancel).
+                log::debug!(
+                    "[DIAG-T0002] tool {} partial input ignored (is_input_complete=false, supports_streaming=false)",
+                    tool_use.name
+                );
                 return None;
             }
         }
@@ -3968,8 +4224,66 @@ impl Thread {
             return None;
         }
 
+        // Tool retry cap — hard enforcement of the agent-loop retry limit.
+        // After 3 failures, warn the agent to switch tools (with Bayesian probability).
+        // After 5, hard-refuse. Two trackers: per-input (identical retries) and
+        // per-tool consecutive (trivially different inputs, same tool). Prevents
+        // the zero-gain retry death spiral (Ashby variety-deficit).
+        let tool_name_str = tool_use.name.as_ref();
+        let retry_warning: Option<String> = match self
+            .tool_retry_tracker
+            .borrow()
+            .check(tool_name_str, &input)
+        {
+            crate::tool_retry_tracker::RetryVerdict::Refuse { attempt, reason } => {
+                let content =
+                    crate::tool_retry_tracker::format_refusal(tool_name_str, attempt, reason);
+                log::warn!(
+                    "Tool retry cap reached for '{tool_name_str}' (attempt {attempt}, {reason:?}) — refusing"
+                );
+                return Some(Task::ready((
+                    owning_message_ix,
+                    LanguageModelToolResult {
+                        content: vec![LanguageModelToolResultContent::Text(Arc::from(content))],
+                        tool_use_id: tool_use.id,
+                        tool_name: tool_use.name,
+                        is_error: true,
+                        output: None,
+                    },
+                )));
+            }
+            crate::tool_retry_tracker::RetryVerdict::AllowWithWarning {
+                attempt,
+                consecutive,
+                probability,
+            } => {
+                let warning = crate::tool_retry_tracker::format_warning(
+                    tool_name_str,
+                    attempt,
+                    consecutive,
+                    probability,
+                );
+                log::warn!(
+                    "Tool '{tool_name_str}' retry warning (attempt {attempt}, consecutive {consecutive}, P(success)={:.0}%)",
+                    probability * 100.0
+                );
+                Some(warning)
+            }
+            crate::tool_retry_tracker::RetryVerdict::Allow => None,
+        };
+
         log::debug!("Running tool {}", tool_use.name);
-        let tool_input = ToolInput::ready(input);
+        // [DIAG-T0003] Non-streaming complete path: is_input_complete=true,
+        // tool does not support streaming (or no prior partial was sent).
+        // ToolInput::ready() sends Full synchronously, so recv() should
+        // always succeed. If this log appears but the tool later fails with
+        // "tool input was not fully received", the channel was corrupted
+        // between ready() and recv() — a race condition worth investigating.
+        log::debug!(
+            "[DIAG-T0003] tool {} entered non-streaming complete path (is_input_complete=true)",
+            tool_use.name
+        );
+        let tool_input = ToolInput::ready(input.clone());
         Some(self.run_tool(
             tool,
             tool_input,
@@ -3979,6 +4293,8 @@ impl Thread {
             event_stream,
             cancellation_rx,
             cx,
+            input,
+            retry_warning,
         ))
     }
 
@@ -3992,6 +4308,8 @@ impl Thread {
         event_stream: &ThreadEventStream,
         cancellation_rx: watch::Receiver<bool>,
         cx: &mut Context<Self>,
+        input_for_tracking: serde_json::Value,
+        retry_warning: Option<String>,
     ) -> Task<(usize, LanguageModelToolResult)> {
         // A workspace can become restricted after a thread has already started.
         // Tools that aren't allowed in restricted workspaces must never run in
@@ -4033,9 +4351,15 @@ impl Thread {
         );
         let supports_images = self.model().is_some_and(|model| model.supports_images());
         let tool_result = tool.run(tool_input, tool_event_stream, cx);
+        let retry_tracker = self.tool_retry_tracker.clone();
+        let tool_name_for_tracking = tool_name.clone();
         cx.foreground_executor().spawn(async move {
             let (is_error, output) = match tool_result.await {
                 Ok(mut output) => {
+                    // Record success — resets the failure counter for this key.
+                    retry_tracker
+                        .borrow()
+                        .record_success(&tool_name_for_tracking, &input_for_tracking);
                     let contains_image = output
                         .llm_output
                         .iter()
@@ -4074,27 +4398,59 @@ impl Thread {
                         (false, output)
                     }
                 }
-                Err(output) => (true, output),
+                Err(output) => {
+                    // Record failure — increments the failure counter for this key.
+                    // After 3, the next call will carry a warning. After 5, the
+                    // next call will be hard-refused before tool.run() is called.
+                    retry_tracker
+                        .borrow()
+                        .record_failure(&tool_name_for_tracking, &input_for_tracking);
+                    (true, output)
+                }
             };
 
-            // D12: Compress tool result text before storing in message history.
+            // D8: Compress tool result text before storing in message history.
             // When a ThreadCondenser is wired, tool output text is compressed
             // to fit within the configured token budget. Non-text content
             // (images) is passed through unchanged.
+            //
+            // Code-reading tools (read_file, grep, list_directory, diagnostics,
+            // edit_file, etc.) are bypassed: their output is structurally
+            // meaningful and line-level elision (the `...` ellipsis markers
+            // the condenser inserts) is actively harmful — it looks like
+            // literal source content and drops structurally meaningful lines
+            // (use statements, closing braces, method chains). The condenser
+            // is intended for verbose terminal/build/test output, not source.
             let content = if let Some(condenser) = crate::thread_condenser() {
-                output
-                    .llm_output
-                    .into_iter()
-                    .map(|part| match part {
-                        LanguageModelToolResultContent::Text(text) => {
-                            let compressed = condenser.compress_tool_result(&tool_name, &text);
-                            LanguageModelToolResultContent::Text(Arc::from(compressed))
-                        }
-                        other => other,
-                    })
-                    .collect()
+                if NO_COMPRESS_TOOLS.contains(&tool_name.as_ref()) {
+                    output.llm_output
+                } else {
+                    output
+                        .llm_output
+                        .into_iter()
+                        .map(|part| match part {
+                            LanguageModelToolResultContent::Text(text) => {
+                                let compressed = condenser.compress_tool_result(&tool_name, &text);
+                                LanguageModelToolResultContent::Text(Arc::from(compressed))
+                            }
+                            other => other,
+                        })
+                        .collect()
+                }
             } else {
                 output.llm_output
+            };
+
+            // Inject the retry warning (if any) into the tool result so the
+            // agent sees it in the model context, not just in the logs. The
+            // warning carries the Bayesian probability of success and a
+            // directive to switch tools.
+            let content = if let Some(warning) = retry_warning {
+                let mut content = content;
+                content.push(LanguageModelToolResultContent::Text(Arc::from(warning)));
+                content
+            } else {
+                content
             };
 
             (
@@ -4177,6 +4533,8 @@ impl Thread {
             event_stream,
             cancellation_rx,
             cx,
+            serde_json::Value::Null,
+            None,
         ))
     }
 
@@ -4476,15 +4834,18 @@ impl Thread {
             };
 
             if !message.tool_results.contains_key(&tool_use.id) {
+                let cancel_message = if self.last_completion_truncated {
+                    TOOL_TRUNCATED_MESSAGE
+                } else {
+                    TOOL_CANCELED_MESSAGE
+                };
                 message.tool_results.insert(
                     tool_use.id.clone(),
                     LanguageModelToolResult {
                         tool_use_id: tool_use.id.clone(),
                         tool_name: tool_use.name.clone(),
                         is_error: true,
-                        content: vec![LanguageModelToolResultContent::Text(
-                            TOOL_CANCELED_MESSAGE.into(),
-                        )],
+                        content: vec![LanguageModelToolResultContent::Text(cancel_message.into())],
                         output: None,
                     },
                 );
@@ -4519,7 +4880,20 @@ impl Thread {
                 .iter()
                 .filter_map(|(tool_name, tool)| {
                     log::trace!("Including tool: {}", tool_name);
+                    // Truncate tool descriptions to avoid token bloat. The
+                    // LLM needs enough to select the right tool; full detail
+                    // is not needed for selection. The first sentence is
+                    // usually sufficient.
                     let mut description = tool.description().to_string();
+                    if description.len() > 200 {
+                        // Truncate at the first sentence boundary within 200 chars.
+                        if let Some(pos) = description[..200].find(". ") {
+                            description.truncate(pos + 1);
+                        } else {
+                            description.truncate(197);
+                            description.push_str("...");
+                        }
+                    }
                     let mut schema = tool.input_schema(model.tool_input_format()).log_err()?;
                     // TEMPORARY (sandboxing feature flag): with the flag off,
                     // the fetch and create_directory descriptions/schemas must
@@ -4539,7 +4913,7 @@ impl Thread {
                                 created.\n\nThis tool creates a directory and all necessary \
                                 parent directories. It should be used whenever you need to \
                                 create new directories within the project.\nThe only supported \
-                                path outside the project is `~/.agents/skills` or a descendant, \
+                                path outside the project is the global skills directory or a descendant, \
                                 for global agent skills."
                                 .to_string();
                             if let Some(properties) = schema
@@ -4591,6 +4965,7 @@ impl Thread {
             thinking_effort: self.thinking_effort.clone(),
             speed: self.speed(),
             compact_at_tokens: None,
+            max_tokens: None,
         };
 
         log::debug!("Completion request built successfully");
@@ -4654,6 +5029,11 @@ impl Thread {
         let mut seen_tools = tools.keys().cloned().collect::<HashSet<_>>();
         let mut duplicate_tool_names = HashSet::default();
         for (server_id, server_tools) in self.context_server_registry.read(cx).servers() {
+            // Kask panel per-tab scoping: when the thread is scoped to a
+            // specific MCP server, skip all other servers' tools.
+            if !mcp_server_in_scope(self.mcp_server_scope.as_deref(), server_id.0.as_ref()) {
+                continue;
+            }
             for (tool_name, tool) in server_tools {
                 if profile.is_context_server_tool_enabled(&server_id.0, &tool_name) {
                     let tool_name: SharedString =
@@ -5440,6 +5820,15 @@ fn filter_conditional_rules(mut context: ProjectContext, active_paths: &[&str]) 
 /// tools list, the model name, the date, the user's global AGENTS.md, the
 /// sandboxing flag, and the platform flags. Stable across Rust versions
 /// (SHA-256, not `DefaultHasher`).
+/// Whether a context-server id passes the kask panel's per-tab MCP scope.
+/// `None` (upstream Zed and non-kask threads) passes every server; `Some`
+/// passes only the exact server id (case-sensitive — server ids are
+/// registry keys, not display names). Extracted as a free function so the
+/// contract is testable without constructing a `Thread`.
+fn mcp_server_in_scope(scope: Option<&str>, server_id: &str) -> bool {
+    scope.is_none_or(|s| s == server_id)
+}
+
 fn system_prompt_digest(
     project: &ProjectContext,
     available_tools: &[SharedString],
@@ -5901,6 +6290,11 @@ impl<T: DeserializeOwned> ToolInput<T> {
                 }
             }
         }
+        log::warn!(
+            "ToolInput::recv() returned no final input — the sender was dropped \
+             before sending Full. This usually means the LLM stream ended \
+             (MaxTokens, error, or refusal) before the tool_use input was complete."
+        );
         Err(anyhow!("tool input was not fully received"))
     }
 
@@ -6400,6 +6794,14 @@ pub struct ToolCallEventStream {
 }
 
 impl ToolCallEventStream {
+    /// Get the owning thread, if any. Used by tools that need to snapshot
+    /// the thread's message history (e.g. `SkillTool` snapshots recent
+    /// turns for cascade context injection). Returns `None` in tests and
+    /// for streams not tied to a live thread.
+    pub fn thread(&self) -> Option<gpui::WeakEntity<Thread>> {
+        self.thread.clone()
+    }
+
     /// Enqueue a deferred tool result on the parent thread. The receiver
     /// will be polled on each outer-loop iteration; when it completes, the
     /// result is injected into the original agent message's `tool_results`
@@ -6454,9 +6856,12 @@ impl ToolCallEventStream {
         let (events_tx, events_rx) = mpsc::unbounded::<Result<ThreadEvent>>();
         let (_cancellation_tx, cancellation_rx) = watch::channel(false);
 
+        // The raw and scoped ids deliberately differ (mirroring
+        // `scoped_tool_call_id`) so that conflating them fails tests instead
+        // of silently passing.
         let stream = ToolCallEventStream::new(
             "test_id".into(),
-            acp::ToolCallId::new("test_id"),
+            acp::ToolCallId::new("0:test_id"),
             0,
             ThreadEventStream(events_tx),
             None,
@@ -6473,9 +6878,12 @@ impl ToolCallEventStream {
         let (events_tx, events_rx) = mpsc::unbounded::<Result<ThreadEvent>>();
         let (cancellation_tx, cancellation_rx) = watch::channel(false);
 
+        // The raw and scoped ids deliberately differ (mirroring
+        // `scoped_tool_call_id`) so that conflating them fails tests instead
+        // of silently passing.
         let stream = ToolCallEventStream::new(
             "test_id".into(),
-            acp::ToolCallId::new("test_id"),
+            acp::ToolCallId::new("0:test_id"),
             0,
             ThreadEventStream(events_tx),
             None,
@@ -6566,9 +6974,54 @@ impl ToolCallEventStream {
         &self.tool_use_id
     }
 
+    /// The ACP-facing id for this tool call (see [`scoped_tool_call_id`]).
+    pub fn tool_call_id(&self) -> &acp::ToolCallId {
+        &self.tool_call_id
+    }
+
     pub fn update_fields(&self, fields: acp::ToolCallUpdateFields) {
         self.stream
             .update_tool_call_fields(&self.tool_call_id, fields, None);
+    }
+
+    /// Create a title sender that updates the tool call's header label.
+    /// Used for step-label updates (e.g. "Step 2/5: scope") so the user
+    /// sees which cascade step is running in the tool call header.
+    pub fn title_sender(&self) -> Arc<dyn Fn(&str) + Send + Sync> {
+        let stream = self.stream.clone();
+        let tool_call_id = self.tool_call_id.clone();
+        Arc::new(move |text: &str| {
+            stream.update_tool_call_fields(
+                &tool_call_id,
+                acp::ToolCallUpdateFields::new().title(text),
+                None,
+            );
+        })
+    }
+
+    /// Create a progress sender that emits real-time thinking traces for
+    /// the tool call. Each call sends a `ToolCallThinking` event through the
+    /// thread event channel, which the foreground drainer appends to the
+    /// tool call's `thoughts` markdown buffer. The user sees a live,
+    /// accumulating thinking trace — not a one-line title that overwrites
+    /// itself.
+    ///
+    /// The returned callback is `Send + Sync` (it wraps an
+    /// `mpsc::UnboundedSender` + a `ToolCallId`, both `Send + Sync`), so it
+    /// can be passed into async cascade execution on a background tokio
+    /// executor.
+    pub fn thinking_sender(&self) -> Arc<dyn Fn(&str) + Send + Sync> {
+        let stream = self.stream.clone();
+        let tool_call_id = self.tool_call_id.clone();
+        Arc::new(move |text: &str| {
+            stream
+                .0
+                .unbounded_send(Ok(ThreadEvent::ToolCallThinking {
+                    tool_call_id: tool_call_id.clone(),
+                    text: text.to_string(),
+                }))
+                .ok();
+        })
     }
 
     pub fn update_fields_with_meta(
@@ -6753,6 +7206,10 @@ impl ToolCallEventStream {
             allow_fs_write_all: request.allow_fs_write_all,
             unsandboxed: request.unsandboxed,
             write_paths: request.write_paths.clone(),
+            // The Windows-drive warning is a separate pre-prompt
+            // (`authorize_windows_fs_warning`), never part of the escalation
+            // prompt, so this stays off here.
+            warn_windows_fs: false,
             reason,
         };
         let allow_thread_label = if self.is_subagent(cx) {
@@ -6833,8 +7290,8 @@ impl ToolCallEventStream {
                 };
                 futures::select_biased! {
                     outcome = (&mut response_rx).fuse() => {
-                        let outcome = outcome
-                            .map_err(|_| anyhow!("authorization channel closed"))?;
+                        let outcome = outcome.map_err(|_| anyhow!("authorization channel closed"))?;
+                        ensure_tool_call_authorization_not_interrupted(&outcome)?;
                         return Self::handle_sandbox_permission_outcome(
                             &outcome,
                             &request,
@@ -6859,6 +7316,90 @@ impl ToolCallEventStream {
                         }
                     }
                 }
+            }
+        })
+    }
+
+    /// Confirm, before running a command whose sandbox will contain a Windows
+    /// drive (DrvFs) path, that the user accepts the weaker integrity
+    /// guarantees. This is a transient gate *in front of* the normal sandbox
+    /// flow — it is never persisted or recorded as a grant; the only way to
+    /// stop it recurring is to disable `warn_ntfs_grants` in settings (offered
+    /// via the banner's gear). Returns `Ok(())` on "Continue" (after which the
+    /// caller proceeds to any escalation prompt) and `Err` on "Abort".
+    pub(crate) fn authorize_windows_fs_warning(&self, cx: &mut App) -> Task<Result<()>> {
+        // If the warning is already disabled, don't prompt.
+        if !AgentSettings::get_global(cx)
+            .sandbox_permissions
+            .warn_ntfs_grants
+        {
+            return Task::ready(Ok(()));
+        }
+
+        let details = acp_thread::SandboxAuthorizationDetails {
+            command: None,
+            network_hosts: Vec::new(),
+            network_all_hosts: false,
+            allow_fs_write_all: false,
+            unsandboxed: false,
+            write_paths: Vec::new(),
+            warn_windows_fs: true,
+            reason: String::new(),
+        };
+        let options = acp_thread::PermissionOptions::Flat(vec![
+            acp::PermissionOption::new(
+                acp::PermissionOptionId::new(acp_thread::SandboxPermission::AllowOnce.as_id()),
+                "Continue",
+                acp::PermissionOptionKind::AllowOnce,
+            ),
+            acp::PermissionOption::new(
+                acp::PermissionOptionId::new(acp_thread::SandboxPermission::Deny.as_id()),
+                "Abort",
+                acp::PermissionOptionKind::RejectOnce,
+            ),
+        ]);
+
+        let stream = self.stream.clone();
+        // The update must target the ACP-facing (scoped) id: an update keyed
+        // by the raw provider id matches no existing tool call, and creating
+        // one from empty fields is rejected downstream ("title is required"),
+        // which tears down the stream and turns the prompt into a phantom
+        // decline.
+        let tool_call_id = self.tool_call_id.clone();
+        cx.spawn(async move |_cx| {
+            let (response_tx, response_rx) = oneshot::channel();
+            if let Err(error) = stream
+                .0
+                .unbounded_send(Ok(ThreadEvent::ToolCallAuthorization(
+                    ToolCallAuthorization {
+                        tool_call: acp::ToolCallUpdate::new(
+                            tool_call_id,
+                            // Leave the title untouched so the card keeps
+                            // showing the command (matching the escalation
+                            // flow).
+                            acp::ToolCallUpdateFields::new(),
+                        )
+                        .meta(acp_thread::meta_with_sandbox_authorization(details)),
+                        options,
+                        response: response_tx,
+                        context: None,
+                        kind: acp_thread::AuthorizationKind::PermissionGrant,
+                    },
+                )))
+            {
+                log::error!("Failed to send Windows-drive sandbox warning: {error}");
+                return Err(anyhow!(
+                    "Failed to send Windows-drive sandbox warning: {error}"
+                ));
+            }
+
+            let outcome = response_rx
+                .await
+                .map_err(|_| anyhow!("authorization channel closed"))?;
+            ensure_tool_call_authorization_not_interrupted(&outcome)?;
+            match acp_thread::SandboxPermission::from_id(outcome.option_id.0.as_ref()) {
+                Some(acp_thread::SandboxPermission::AllowOnce) => Ok(()),
+                _ => Err(anyhow!("Windows-drive write aborted by user")),
             }
         })
     }
@@ -6961,8 +7502,15 @@ impl ToolCallEventStream {
                 if request.unsandboxed {
                     agent.allow_sandbox_unsandboxed();
                 }
-                for path in request.write_paths {
-                    agent.add_sandbox_write_path(path);
+                for granted in request.write_paths {
+                    // Persist the full (requested, resolved-canonical) pair so a
+                    // persistent grant is rebuilt from the vetted canonical
+                    // across restarts, not re-resolved by path string.
+                    agent.add_sandbox_write_path(settings::GrantedWritePathContent {
+                        requested: granted.requested,
+                        resolved: granted.resolved,
+                        on_windows_fs: granted.on_windows_fs,
+                    });
                 }
             });
         });
@@ -7124,6 +7672,7 @@ impl ToolCallEventStream {
             let outcome = response_rx
                 .await
                 .map_err(|_| anyhow!("authorization channel closed"))?;
+            ensure_tool_call_authorization_not_interrupted(&outcome)?;
 
             let option_id = outcome.option_id.0.as_ref();
             if option_id == acp_thread::SANDBOX_FALLBACK_RETRY_OPTION_ID {
@@ -7223,6 +7772,7 @@ impl ToolCallEventStream {
             let outcome = response_rx
                 .await
                 .map_err(|_| anyhow!("authorization channel closed"))?;
+            ensure_tool_call_authorization_not_interrupted(&outcome)?;
             Ok(outcome.option_id)
         })
     }
@@ -7297,6 +7847,7 @@ impl ToolCallEventStream {
                 let outcome = response_rx
                     .await
                     .map_err(|_| anyhow!("authorization channel closed"))?;
+                ensure_tool_call_authorization_not_interrupted(&outcome)?;
 
                 return Self::persist_permission_outcome(&outcome, fs, cx);
             };
@@ -7324,8 +7875,8 @@ impl ToolCallEventStream {
                 };
                 futures::select_biased! {
                     outcome = (&mut response_rx).fuse() => {
-                        let outcome = outcome
-                            .map_err(|_| anyhow!("authorization channel closed"))?;
+                        let outcome = outcome.map_err(|_| anyhow!("authorization channel closed"))?;
+                        ensure_tool_call_authorization_not_interrupted(&outcome)?;
                         return Self::persist_permission_outcome(&outcome, fs.clone(), cx);
                     }
                     _ = settings_changed.fuse() => {
@@ -7652,6 +8203,28 @@ mod tests {
     use serde_json::json;
     use settings::LanguageModelProviderSetting;
     use std::sync::Arc;
+
+    // ── Kask panel per-tab MCP scoping ──────────────────────────────────
+
+    /// The scoping contract: no scope = all servers pass; a scope passes
+    /// only its exact server id. This pins the enforcement half of the kask
+    /// panel's per-tab tool scoping — the per-tab prompt declares "only the
+    /// `{server}` server's tools are available", and this predicate is what
+    /// makes that true in `enabled_tools`.
+    #[test]
+    fn mcp_server_scope_filters_to_named_server() {
+        // No scope — upstream Zed behavior, everything passes.
+        assert!(mcp_server_in_scope(None, "companies"));
+        assert!(mcp_server_in_scope(None, "curator"));
+        assert!(mcp_server_in_scope(None, "anything-else"));
+
+        // Scoped — exact match only.
+        assert!(mcp_server_in_scope(Some("companies"), "companies"));
+        assert!(!mcp_server_in_scope(Some("companies"), "curator"));
+        assert!(!mcp_server_in_scope(Some("companies"), "Companies")); // case-sensitive
+        assert!(!mcp_server_in_scope(Some("companies"), "company"));
+        assert!(!mcp_server_in_scope(Some("kata-kanban"), "kata_kanban"));
+    }
 
     async fn setup_thread_for_test(cx: &mut TestAppContext) -> (Entity<Thread>, ThreadEventStream) {
         cx.update(|cx| {
@@ -8089,6 +8662,7 @@ mod tests {
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 195_000,
                         output_tokens: 0,
+                        cost: None,
                     },
                 );
 
@@ -8107,6 +8681,7 @@ mod tests {
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 195_000,
                         output_tokens: 0,
+                        cost: None,
                     },
                 );
 
@@ -8717,6 +9292,7 @@ mod tests {
             output_tokens: 9,
             cache_creation_input_tokens: 2,
             cache_read_input_tokens: 3,
+            cost: None,
         };
         let final_usage = TokenUsage {
             input_tokens: 500,
@@ -9141,6 +9717,45 @@ mod tests {
         }
     }
 
+    /// A tool whose `Input` requires a `path` field, so that replaying with an
+    /// empty JSON object `{}` fails deserialization. Used to verify that
+    /// `replay_tool_call` still sends `raw_output` to the UI when deserialize
+    /// fails.
+    struct ReplayFailsOnBadInputTool;
+
+    #[derive(Serialize, Deserialize, JsonSchema)]
+    struct ReplayFailsOnBadInput {
+        pub path: String,
+    }
+
+    impl AgentTool for ReplayFailsOnBadInputTool {
+        type Input = ReplayFailsOnBadInput;
+        type Output = String;
+
+        const NAME: &'static str = "failing_replay_tool";
+
+        fn kind() -> acp::ToolKind {
+            acp::ToolKind::Other
+        }
+
+        fn initial_title(
+            &self,
+            _input: Result<Self::Input, serde_json::Value>,
+            _cx: &mut App,
+        ) -> SharedString {
+            "Failing Replay Tool".into()
+        }
+
+        fn run(
+            self: Arc<Self>,
+            _input: ToolInput<Self::Input>,
+            _event_stream: ToolCallEventStream,
+            _cx: &mut App,
+        ) -> Task<Result<Self::Output, Self::Output>> {
+            Task::ready(Ok(String::new()))
+        }
+    }
+
     #[gpui::test]
     async fn test_authorize_sandbox_allow_always_does_not_cache_thread_grant(
         cx: &mut TestAppContext,
@@ -9153,10 +9768,10 @@ mod tests {
             allow_fs_write_all: false,
             unsandboxed: false,
             write_paths: vec![
-                PathBuf::from("/tmp/build"),
-                PathBuf::from("/tmp/cache"),
-                PathBuf::from("/tmp/logs"),
-                PathBuf::from("/tmp/secret"),
+                settings::GrantedWritePath::from_requested(PathBuf::from("/tmp/build")),
+                settings::GrantedWritePath::from_requested(PathBuf::from("/tmp/cache")),
+                settings::GrantedWritePath::from_requested(PathBuf::from("/tmp/logs")),
+                settings::GrantedWritePath::from_requested(PathBuf::from("/tmp/secret")),
             ],
         };
 
@@ -9364,6 +9979,41 @@ mod tests {
         assert!(event_stream.sandbox_fallback_granted_for_thread());
     }
 
+    /// Regression test: the Windows-drive (DrvFs) warning prompt must target
+    /// the ACP-facing *scoped* tool-call id. When it used the raw provider id,
+    /// the update matched no existing tool call, the ACP layer rejected the
+    /// resulting title-less insert ("title is required for a tool call"), the
+    /// event stream was torn down, and every terminal command was auto-declined
+    /// without the user ever seeing a prompt.
+    #[gpui::test]
+    async fn test_windows_fs_warning_targets_scoped_tool_call_id(cx: &mut TestAppContext) {
+        crate::tests::init_test(cx);
+
+        let (event_stream, mut receiver) = ToolCallEventStream::test();
+        let authorize = cx.update(|cx| event_stream.authorize_windows_fs_warning(cx));
+
+        let authorization = receiver.expect_authorization().await;
+        assert_eq!(
+            &authorization.tool_call.tool_call_id,
+            event_stream.tool_call_id(),
+            "the warning prompt must reference the scoped ACP tool-call id, \
+             not the raw provider id"
+        );
+        let details =
+            acp_thread::sandbox_authorization_details_from_meta(&authorization.tool_call.meta)
+                .expect("warning authorization should include sandbox details");
+        assert!(details.warn_windows_fs);
+
+        authorization
+            .response
+            .send(acp_thread::SelectedPermissionOutcome::new(
+                acp::PermissionOptionId::new(acp_thread::SandboxPermission::AllowOnce.as_id()),
+                acp::PermissionOptionKind::AllowOnce,
+            ))
+            .unwrap();
+        authorize.await.unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     #[gpui::test]
     async fn test_authorize_sandbox_fallback_deny(cx: &mut TestAppContext) {
@@ -9533,6 +10183,76 @@ mod tests {
         assert!(
             tool_use_ids_with_image_content
                 .contains(&scoped_tool_call_id(0, &missing_tool_use_id).to_string())
+        );
+    }
+
+    #[gpui::test]
+    async fn test_replay_tool_call_sends_raw_output_when_deserialize_fails(
+        cx: &mut TestAppContext,
+    ) {
+        // When a tool's persisted input violates its current schema (e.g. a
+        // model emitted `timeout_ms` as a string, or omitted a required field),
+        // `tool.replay` fails to deserialize. The raw_output must still be
+        // sent to the UI so the user sees the tool's result — only the rich
+        // tool-specific rendering is lost.
+        let (thread, _event_stream) = setup_thread_for_test(cx).await;
+
+        let tool_use_id = LanguageModelToolUseId::from("failing_replay_tool");
+        let raw_output = json!("the saved output");
+
+        let mut replay_events = cx.update(|cx| {
+            thread.update(cx, |thread, cx| {
+                thread.add_tool(ReplayFailsOnBadInputTool);
+
+                let tool_use = LanguageModelToolUse {
+                    id: tool_use_id.clone(),
+                    name: ReplayFailsOnBadInputTool::NAME.into(),
+                    // Input that violates the schema: `path` is required but missing.
+                    raw_input: "{}".to_string(),
+                    input: language_model::LanguageModelToolUseInput::Json(json!({})),
+                    is_input_complete: true,
+                    thought_signature: None,
+                };
+
+                let mut tool_results = IndexMap::default();
+                tool_results.insert(
+                    tool_use_id.clone(),
+                    LanguageModelToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        tool_name: ReplayFailsOnBadInputTool::NAME.into(),
+                        is_error: false,
+                        content: vec![LanguageModelToolResultContent::Text("text content".into())],
+                        output: Some(raw_output.clone()),
+                    },
+                );
+
+                thread.messages.push(Arc::new(Message::Agent(AgentMessage {
+                    content: vec![AgentMessageContent::ToolUse(tool_use)],
+                    tool_results,
+                    reasoning_details: None,
+                })));
+
+                thread.replay(cx)
+            })
+        });
+
+        // Collect all ToolCallUpdate events for this tool call.
+        let scoped_id = scoped_tool_call_id(0, &tool_use_id);
+        let mut saw_raw_output = false;
+        while let Some(event) = replay_events.next().await {
+            let event = event.unwrap();
+            if let ThreadEvent::ToolCallUpdate(acp_thread::ToolCallUpdate::UpdateFields(update)) =
+                event
+                && update.tool_call_id == scoped_id
+                && let Some(output) = &update.fields.raw_output
+            {
+                saw_raw_output = true;
+                assert_eq!(output, &raw_output);
+            }
+        }
+        assert!(
+            saw_raw_output,
+            "raw_output must be sent to UI even when replay deserialization fails"
         );
     }
 
@@ -10050,5 +10770,93 @@ mod tests {
             "rule without frontmatter should be kept"
         );
         assert!(filtered.has_rules);
+    }
+
+    // ── Condenser bypass for code-reading tools ─────────────────────────
+    //
+    // The condenser's line-level elision (joining non-consecutive selected
+    // lines with `...`) is destructive for source code. `NO_COMPRESS_TOOLS`
+    // pins the list of tools whose output must pass through verbatim even
+    // when a condenser is wired. This test wires a condenser that mutates
+    // every input and verifies the bypass list prevents the mutation for
+    // `read_file` while still allowing compression for a non-bypassed tool.
+
+    /// A condenser that appends a marker to every input, so the test can
+    /// detect whether compression was applied.
+    struct MarkerCondenser;
+
+    impl crate::ThreadCondenser for MarkerCondenser {
+        fn compress_tool_result(&self, _tool_name: &str, output: &str) -> String {
+            format!("{output} [COMPRESSED]")
+        }
+    }
+
+    #[test]
+    fn test_no_compress_tools_bypasses_read_file() {
+        // Wire a condenser that would mutate every input.
+        let condenser: Arc<dyn crate::ThreadCondenser> = Arc::new(MarkerCondenser);
+        crate::set_thread_condenser(Some(condenser));
+
+        // read_file is in NO_COMPRESS_TOOLS → output must pass through verbatim.
+        let tool_name: Arc<str> = Arc::from("read_file");
+        let original = "line one\nline two\nline three\n";
+        let condenser = crate::thread_condenser().expect("condenser should be wired");
+
+        let content = if NO_COMPRESS_TOOLS.contains(&tool_name.as_ref()) {
+            original.to_string()
+        } else {
+            condenser.compress_tool_result(&tool_name, original)
+        };
+
+        assert_eq!(
+            content, original,
+            "read_file output must pass through verbatim (NO_COMPRESS_TOOLS bypass)"
+        );
+        assert!(
+            !content.contains("[COMPRESSED]"),
+            "read_file output must not be compressed"
+        );
+
+        // A non-bypassed tool should still be compressed.
+        let other_tool: Arc<str> = Arc::from("terminal");
+        let other_content = if NO_COMPRESS_TOOLS.contains(&other_tool.as_ref()) {
+            original.to_string()
+        } else {
+            condenser.compress_tool_result(&other_tool, original)
+        };
+        assert!(
+            other_content.contains("[COMPRESSED]"),
+            "terminal output should be compressed (not in NO_COMPRESS_TOOLS)"
+        );
+
+        // Cleanup: unset the condenser so other tests are not affected.
+        crate::set_thread_condenser(None);
+    }
+
+    #[test]
+    fn test_no_compress_tools_list_is_complete() {
+        // Pin the bypass list contents — adding or removing a tool here is a
+        // deliberate behavior change that should be reviewed.
+        let expected = [
+            "read_file",
+            "grep",
+            "find_path",
+            "list_directory",
+            "diagnostics",
+            "find_references",
+            "get_code_actions",
+            "edit_file",
+        ];
+        for name in expected {
+            assert!(
+                NO_COMPRESS_TOOLS.contains(&name),
+                "{name} should be in NO_COMPRESS_TOOLS"
+            );
+        }
+        // terminal is intentionally NOT in the list.
+        assert!(
+            !NO_COMPRESS_TOOLS.contains(&"terminal"),
+            "terminal must NOT be in NO_COMPRESS_TOOLS — it is the condenser's intended use case"
+        );
     }
 }

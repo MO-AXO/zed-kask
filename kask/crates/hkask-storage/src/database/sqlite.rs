@@ -5,7 +5,7 @@
 //! via the pool's connection initializer.
 
 use super::driver::DatabaseDriver;
-use super::types::{DbError, DbProvider};
+use super::types::DbError;
 use super::value::{DbRow, DbValue};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -41,15 +41,35 @@ pub fn init_wal_pragmas(conn: &mut rusqlite::Connection) -> rusqlite::Result<()>
 /// returns it on completion, enabling concurrent read access.
 pub struct SqliteDriver {
     pool: Pool<SqliteConnectionManager>,
+    /// Human-readable label (typically the DB file path) prefixed to error
+    /// messages so a `SQLITE_BUSY`/lock failure names the offending pool.
+    /// `None` for unlabeled pools (in-memory tests); `Some` for file-backed
+    /// production pools where cross-process/cross-connection contention is
+    /// possible and the source file must be identifiable in logs.
+    label: Option<Arc<str>>,
 }
 
 impl SqliteDriver {
-    /// Create a new SQLite driver from a connection pool.
+    /// Create an unlabeled SQLite driver from a connection pool.
     ///
-    /// The pool should be configured with WAL mode and any encryption
-    /// PRAGMAs before being passed here.
+    /// Error messages carry no pool identity. Use `new_labeled` for
+    /// file-backed production pools where lock contention must be
+    /// attributable to a specific database file. The pool should be
+    /// configured with WAL mode and any encryption PRAGMAs before being
+    /// passed here.
     pub fn new(pool: Pool<SqliteConnectionManager>) -> Self {
-        Self { pool }
+        Self { pool, label: None }
+    }
+
+    /// Create a labeled SQLite driver. The label (typically the DB file
+    /// path) is prefixed to error messages as `[<label>]`, so a
+    /// `database is locked` failure names the offending file instead of
+    /// leaving operators to guess which pool contended.
+    pub fn new_labeled(pool: Pool<SqliteConnectionManager>, label: impl Into<Arc<str>>) -> Self {
+        Self {
+            pool,
+            label: Some(label.into()),
+        }
     }
 
     /// Create a pool for an in-memory database (testing only).
@@ -58,9 +78,25 @@ impl SqliteDriver {
     /// create a separate in-memory database per connection. A pool size
     /// greater than 1 would scatter writes across independent databases,
     /// breaking read-your-writes semantics for tests.
+    ///
+    /// Runs `core/sql/schema.sql` on each connection so tests get the real
+    /// schema (the same one `Database::sqlite_pool` runs in production). This
+    /// eliminates the divergent `CREATE TABLE IF NOT EXISTS hmems` that test
+    /// helpers previously duplicated with different column sets.
     pub fn in_memory_pool() -> Result<Pool<SqliteConnectionManager>, r2d2::Error> {
-        let manager = SqliteConnectionManager::memory()
-            .with_init(|conn| conn.execute_batch("PRAGMA foreign_keys = ON;"));
+        let manager = SqliteConnectionManager::memory().with_init(|conn| {
+            conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+            // Load sqlite-vec before schema init — schema.sql creates a
+            // `vec0` virtual table, which fails with "no such module: vec0"
+            // (aborting the whole batch and leaving zero tables created) if
+            // the extension isn't loaded. Mirrors the production pool init in
+            // `core::database::Database::sqlite_pool`.
+            crate::core::database::init_sqlite_vec_on(conn)?;
+            let schema = include_str!("../core/sql/schema.sql");
+            let dim = crate::core::database::embedding_dim();
+            conn.execute_batch(&schema.replace("$DIM", &dim.to_string()))?;
+            Ok(())
+        });
         Pool::builder().max_size(1).build(manager)
     }
 
@@ -69,15 +105,58 @@ impl SqliteDriver {
         Arc::new(Self::new(Self::in_memory_pool().expect("in-memory pool")))
     }
 
+    /// Create a pool for a file-backed SQLite database (WAL mode, FKs on).
+    /// For stores that want durable, unencrypted storage without the
+    /// SQLCipher/passphrase layer (e.g. the media gallery — non-secret
+    /// metadata + lineage). WAL gives concurrent-reader, single-writer
+    /// semantics without read-locking writers.
+    pub fn file_pool(path: &str) -> Result<Pool<SqliteConnectionManager>, r2d2::Error> {
+        // Reuse the shared `WAL_PRAGMA_BATCH` (busy_timeout before journal_mode
+        // = WAL). A bespoke string that omitted `busy_timeout` left this pool
+        // failing instantly on write contention with `r2d2: database is locked`;
+        // every other kask pool already routes through this constant.
+        let manager = SqliteConnectionManager::file(path)
+            .with_init(|conn| conn.execute_batch(WAL_PRAGMA_BATCH));
+        Pool::builder().build(manager)
+    }
+
+    /// Create a file-backed driver (panics on pool error; for tests / when
+    /// the caller has already validated the path). The driver is labeled
+    /// with `path` so lock errors from it are attributable.
+    pub fn file_driver(path: &str) -> Arc<dyn super::driver::DatabaseDriver> {
+        Arc::new(Self::new_labeled(
+            Self::file_pool(path).expect("file pool"),
+            path,
+        ))
+    }
+
     /// Acquire a raw `rusqlite::Connection` from the pool.
     ///
     /// Used by stores that need direct rusqlite access (e.g., sqlite-vec
     /// virtual tables that don't work through the DbValue abstraction).
     /// The connection is returned to the pool when the guard is dropped.
     pub fn acquire_raw(&self) -> Result<r2d2::PooledConnection<SqliteConnectionManager>, DbError> {
-        self.pool
-            .get()
-            .map_err(|e| DbError::Connection(e.to_string()))
+        self.pool.get().map_err(|e| self.map_conn_err(e))
+    }
+
+    /// Prefix the pool label (if any) to a connection-acquisition error.
+    fn map_conn_err(&self, e: impl std::fmt::Display) -> DbError {
+        DbError::Connection(self.enrich(&e))
+    }
+
+    /// Prefix the pool label (if any) to a database-operation error.
+    fn map_db_err(&self, e: impl std::fmt::Display) -> DbError {
+        DbError::Database(self.enrich(&e))
+    }
+
+    /// Render an error string with the pool label prefixed when set:
+    /// `[<path>] <error>`. Unlabeled (in-memory) pools pass the error through
+    /// unchanged so error-string assertions in tests are not disturbed.
+    fn enrich(&self, e: &impl std::fmt::Display) -> String {
+        match &self.label {
+            Some(label) => format!("[{label}] {e}"),
+            None => e.to_string(),
+        }
     }
 
     /// Get a reference to the pool (for stores that need it).
@@ -88,16 +167,11 @@ impl SqliteDriver {
     /// Raw query execution without Regulation span emission.
     /// Called by `query` and `query_optional` which each emit their own spans.
     fn query_raw(&self, sql: &str, params: &[DbValue]) -> Result<Vec<DbRow>, DbError> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| DbError::Connection(e.to_string()))?;
+        let conn = self.pool.get().map_err(|e| self.map_conn_err(e))?;
         let rusqlite_params = Self::to_rusqlite_params(params);
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             rusqlite_params.iter().map(|p| p.as_ref()).collect();
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| DbError::Database(e.to_string()))?;
+        let mut stmt = conn.prepare(sql).map_err(|e| self.map_db_err(e))?;
         let columns: Vec<String> = stmt
             .column_names()
             .into_iter()
@@ -107,10 +181,10 @@ impl SqliteDriver {
             .query_map(param_refs.as_slice(), |row| {
                 Self::row_to_dbrow(row, &columns)
             })
-            .map_err(|e| DbError::Database(e.to_string()))?;
+            .map_err(|e| self.map_db_err(e))?;
         let mut results = Vec::new();
         for row in rows {
-            results.push(row.map_err(|e| DbError::Database(e.to_string()))?);
+            results.push(row.map_err(|e| self.map_db_err(e))?);
         }
         Ok(results)
     }
@@ -161,16 +235,13 @@ impl DatabaseDriver for SqliteDriver {
     fn execute(&self, sql: &str, params: &[DbValue]) -> Result<usize, DbError> {
         let start = std::time::Instant::now();
         let table = super::regulation::extract_table(sql);
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| DbError::Connection(e.to_string()))?;
+        let conn = self.pool.get().map_err(|e| self.map_conn_err(e))?;
         let rusqlite_params = Self::to_rusqlite_params(params);
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             rusqlite_params.iter().map(|p| p.as_ref()).collect();
         let result = conn
             .execute(sql, param_refs.as_slice())
-            .map_err(|e| DbError::Database(e.to_string()));
+            .map_err(|e| self.map_db_err(e));
         let duration_us = start.elapsed().as_micros() as u64;
         match &result {
             Ok(rows) => {
@@ -182,12 +253,8 @@ impl DatabaseDriver for SqliteDriver {
     }
 
     fn execute_batch(&self, sql: &str) -> Result<(), DbError> {
-        let conn = self
-            .pool
-            .get()
-            .map_err(|e| DbError::Connection(e.to_string()))?;
-        conn.execute_batch(sql)
-            .map_err(|e| DbError::Database(e.to_string()))
+        let conn = self.pool.get().map_err(|e| self.map_conn_err(e))?;
+        conn.execute_batch(sql).map_err(|e| self.map_db_err(e))
     }
 
     fn query(&self, sql: &str, params: &[DbValue]) -> Result<Vec<DbRow>, DbError> {
@@ -237,10 +304,6 @@ impl DatabaseDriver for SqliteDriver {
         }
     }
 
-    fn provider(&self) -> DbProvider {
-        DbProvider::Sqlite
-    }
-
     fn commit_tx(&self) -> Result<(), DbError> {
         self.execute_batch("COMMIT")
     }
@@ -256,6 +319,40 @@ mod tests {
 
     fn make_driver() -> SqliteDriver {
         SqliteDriver::new(SqliteDriver::in_memory_pool().unwrap())
+    }
+
+    /// Attribution contract: a labeled driver prefixes `[<label>]` to its
+    /// error messages so a `database is locked` failure names the offending
+    /// pool. Unlabeled drivers pass errors through unchanged (so existing
+    /// error-string assertions in downstream tests are not disturbed).
+    #[test]
+    fn labeled_driver_prefixes_pool_label_on_errors() {
+        let labeled = SqliteDriver::new_labeled(
+            SqliteDriver::in_memory_pool().unwrap(),
+            "/tmp/test-attribution.db",
+        );
+        let unlabeled = make_driver();
+
+        // A syntax error surfaces the label only on the labeled driver.
+        let labeled_err = labeled
+            .execute_batch("SELECT * FROM table_that_does_not_exist;")
+            .unwrap_err();
+        let unlabeled_err = unlabeled
+            .execute_batch("SELECT * FROM table_that_does_not_exist;")
+            .unwrap_err();
+
+        // `execute_batch` routes errors through `map_db_err`, so the label
+        // (or its absence) appears in the rendered `DbError` Display string.
+        let labeled_msg = labeled_err.to_string();
+        let unlabeled_msg = unlabeled_err.to_string();
+        assert!(
+            labeled_msg.contains("[/tmp/test-attribution.db] "),
+            "labeled driver must prefix its label: got {labeled_msg:?}"
+        );
+        assert!(
+            !unlabeled_msg.contains('['),
+            "unlabeled driver must not add a label prefix: got {unlabeled_msg:?}"
+        );
     }
 
     #[test]

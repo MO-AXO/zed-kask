@@ -66,7 +66,7 @@ pub struct LLMParameters {
     /// base model and cannot be applied to a different one.
     ///
     /// Format: `"Qwen3.5-9B#pragmatic-semantics-v1"` (multi-LoRA)
-    ///         `"accounts/together/models/my-model"` (Together AI fine-tuned)
+    ///         `"accounts/<org>/models/my-model"` (hosted fine-tuned)
     ///
     /// The caller is responsible for resolving which base model the adapter
     /// was trained on (via AdapterStore lookup by skill_name).
@@ -74,23 +74,10 @@ pub struct LLMParameters {
     #[serde(default)]
     pub adapter: Option<String>,
 
-    /// Bypass the fusion model override when fusion is active.
-    /// When true, the router falls back to the default model even when fusion
-    /// is configured. Used by the condenser (classification/summarization path)
-    /// to avoid routing through fusion.
-    /// Default: false (fusion override applies if configured).
-    #[serde(default)]
-    pub bypass_fusion: bool,
-    /// Per-call fusion config override. When Some, the router uses this
-    /// FusionConfig instead of the global config for this inference call.
-    /// When None and bypass_fusion is false, uses the global config.
-    /// Set by the manifest executor when a per-manifest fusion config is declared.
-    #[serde(default)]
-    pub fusion_config: Option<crate::fusion::FusionConfig>,
     /// System prompt for the chat request. When present, sent as a
     /// `{"role": "system"}` message before the user message. Used by
-    /// the fusion orchestrator's panel dispatch to send few-shot examples
-    /// as a proper system message rather than prepending to user content.
+    /// inference paths that need few-shot examples as a proper system
+    /// message rather than prepending to user content.
     #[serde(default)]
     pub system_prompt: Option<String>,
 }
@@ -111,8 +98,6 @@ impl LLMParameters {
             seed: None,
             disable_thinking: false,
             adapter: None,
-            bypass_fusion: false,
-            fusion_config: None,
             system_prompt: None,
         }
     }
@@ -122,29 +107,4 @@ impl Default for LLMParameters {
     fn default() -> Self {
         Self::edge_work()
     }
-}
-
-/// Template file within a crate
-/// Loop: Inference
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TemplateFile {
-    pub path: String,
-    pub content: String,
-    pub template_type: String, // WordAct, KnowAct, FlowDef
-}
-
-/// Template crate structure (loaded from Git CAS)
-/// Loop: Inference
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TemplateCrate {
-    /// Crate name
-    pub name: String,
-    /// Git SHA (pinned version)
-    pub git_sha: String,
-    /// Agent persona YAML content
-    pub persona_yaml: String,
-    /// Dispatch manifest YAML content
-    pub dispatch_manifest_yaml: String,
-    /// Template files (path -> content)
-    pub templates: Vec<TemplateFile>,
 }

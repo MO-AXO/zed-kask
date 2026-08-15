@@ -1,8 +1,8 @@
 ---
 title: "Skills and Composition"
 audience: [developers, operators, users]
-last_updated: 2026-07-24
-version: "0.31.0"
+last_updated: 2026-08-14
+version: "0.34.0"
 status: "Active"
 domain: "Skill System"
 mds_categories: [domain, composition, lifecycle, trust]
@@ -10,13 +10,13 @@ mds_categories: [domain, composition, lifecycle, trust]
 
 # Skills and Composition
 
-Design, invoke, audit, publish, and compose hKask skills. Skills are PDCA (Plan-Do-Check-Act) templates loaded from a two-zone model and executed in-process by the `ManifestExecutor` (D1). This guide also covers building MCP servers that provide tool surfaces for skills and agents — in zed-kask, MCP servers register as builtin in-process servers inside the editor, not as standalone binaries started via a CLI.
+Design, invoke, audit, publish, and compose hKask skills. Skills are PDCA (Plan-Do-Check-Act) templates loaded from a two-zone model and executed in-process by the `BridgeManifestExecutor` (D1), which implements the `SkillManifestExecutor` trait defined in zed's `agent` crate. This guide also covers building MCP servers that provide tool surfaces for skills and agents — in zed-kask, MCP servers register as builtins inside the editor and are launched as child processes over stdio by zed's `context_server` host (D3); the standalone `kask mcp start <id>` CLI is deleted.
 
 ---
 
 ## Skill Anatomy
 
-A skill consists of three layers:
+A skill consists of three layers:[^jinja2-skill][^pdca-skill]
 
 ```
 .agents/skills/my-skill/               ← Private zone (source of truth)
@@ -61,7 +61,7 @@ registry/templates/                 (registry layer — canonical source per P5.
 └── ...
 ```
 
-**P5.1 rule:** The registry crate (`manifest.yaml` + `*.j2`) is the canonical source. `SKILL.md` is a generated companion. When they disagree, the registry is authoritative.
+**P5.1 rule:** The registry crate (`manifest.yaml` + `*.j2`) is the canonical source. `SKILL.md` is a generated companion. When they disagree, the registry is authoritative.[^ousterhout-p51]
 
 ### Skill Domain Types
 
@@ -85,11 +85,11 @@ Domain inference rules:
 
 ## Listing and Checking Skills
 
-Skill listing, status, and auditing are performed in-process through the zed-kask agent panel, the kask panel (D10), or the skill maintenance tooling. The former `kask skill list`, `kask skill status`, and `kask skill audit` standalone CLI commands have been removed.
+Skill listing, status, and auditing are performed in-process through the zed-kask agent panel or the skill maintenance tooling. The former `kask skill list`, `kask skill status`, and `kask skill audit` standalone CLI commands have been removed.[^fagan-skill-audit]
 
 ### List Available Skills
 
-Invoke the skill-listing surface from the agent panel or kask panel. The output shows the two-zone layout (private `.agents/skills/` and public `skills/`) with visibility, namespace, and content hash per skill:
+Invoke the skill-listing surface from the agent panel. The output shows the two-zone layout (private `.agents/skills/` and public `skills/`) with visibility, namespace, and content hash per skill:
 
 ```
   private zone (.agents/skills/):
@@ -193,7 +193,7 @@ loop:
 - **Threshold = 0.05**: converge when outputs are 95%+ similar (typical for reasoning skills)
 - **Threshold = 0.10+**: converge earlier (use for skills where refinement has diminishing returns)
 
-**Gas budget** represents the skill's energy budget. Each iteration reserves a portion. The PDCA cycle stops when gas is exhausted. Gas uses a hold-settle pattern: reserved before invocation, settled after, with refunds for over-estimates.
+**Gas budget** represents the skill's per-cascade compute budget (System B — `BudgetTracker`). Each `select` iteration charges `cost_per_iteration` against `gas.cap`; the PDCA cycle stops `MaxedOut` (`energy_spent`) when `gas_used` reaches `gas.cap` with `hard_limit: true`. There is no reserve/settle or refund — gas is a monotonic per-iteration counter. A separate `rjoule:` budget tracks the cascade's USD inference spend (charged from each call's observed `cost_usd`, 1 rJoule = $1 USD).
 
 **Loop action** is a natural-language instruction injected between PDCA iterations. It guides the LLM on how to refine its approach based on the previous output.
 
@@ -312,7 +312,7 @@ The skill-maintenance tooling reverse-translates the SKILL.md companion from the
 
 ### Step 1: Verify Discovery
 
-List skills through the agent panel or kask panel (D10). Your skill should appear in the private zone.
+List skills through the agent panel. Your skill should appear in the private zone.
 
 ### Step 2: Check Status
 
@@ -330,19 +330,19 @@ Open the zed-kask agent panel and invoke the skill:
 /skill my-skill "Review the authentication module in src/auth.rs"
 ```
 
-The agent panel routes this through the in-process `ManifestExecutor` (D1):
+The agent panel routes this through the in-process `BridgeManifestExecutor` (D1, implementing the `SkillManifestExecutor` trait):[^mcp-spec-skill-test]
 
 1. **Lookup** — Skill ID resolved against the loaded registry
 2. **Template rendering** — Jinja2 templates rendered with context variables
 3. **System prompt prepended** — Tool-awareness preamble added automatically
-4. **Inference** — Rendered template sent to the inference port via the guard layer (D4) (`temperature: 0.3`, `max_tokens: 2048`)
+4. **Inference** — Rendered template sent to the inference port (`temperature: 0.3`, `max_tokens: 2048`). (The former guard layer, D4, was removed 2026-08-10; provider-side safety and refusal fallbacks remain.)
 5. **Regulation span** — `reg.tool.skill_execute` emitted
 
 ---
 
 ## Publishing Skills
 
-To make a private skill available in the public zone, use the skill-maintenance tooling or agent panel publish workflow (the former `kask skill publish` CLI has been removed). Publishing:
+To make a private skill available in the public zone, use the skill-maintenance tooling or agent panel publish workflow (the former `kask skill publish` CLI has been removed). Publishing:[^fagan-publish]
 
 1. Copies the skill directory from `.agents/skills/<name>/` to `skills/<namespace>--<name>/`
 2. Sets `visibility: public` in the published copy's SKILL.md
@@ -355,7 +355,7 @@ After publishing, verify by querying the skill status surface for your skill nam
 
 ## Invoking Skills
 
-Skills are invoked in-process through the `ManifestExecutor` (D1), which is wired into zed-kask's `agent_skills` and `agent/tools/skill_tool.rs`. The former `kask skill execute` CLI and the `hkask-mcp-skill` MCP server have been removed — skill execution is now native, not routed through a separate MCP server.
+Skills are invoked in-process through the `BridgeManifestExecutor` (D1, implementing the `SkillManifestExecutor` trait), which is wired into zed-kask's `agent_skills` and `agent/tools/skill_tool.rs`. The former `kask skill execute` CLI and the `hkask-mcp-skill` MCP server have been removed — skill execution is now native, not routed through a separate MCP server. The `SkillTool` resolves the executor at invocation time (not session-creation time) so sessions created before the deferred post-login wiring pick up the executor on later invocations.[^mcp-spec-skill-invoke]
 
 ### Via the Agent Panel
 
@@ -365,7 +365,7 @@ Open the zed-kask agent panel and invoke a skill:
 /skill diagnose "My application crashes on startup"
 ```
 
-The agent panel routes this through the `skill_tool`, which calls the `ManifestExecutor` directly in-process. Alternatively, skills can be invoked through bundles:
+The agent panel routes this through the `skill_tool`, which calls the `BridgeManifestExecutor` directly in-process. Alternatively, skills can be invoked through bundles:
 
 ```
 /bundle diagnose coding-guidelines
@@ -373,15 +373,16 @@ The agent panel routes this through the `skill_tool`, which calls the `ManifestE
 
 ### Via the Kask Panel
 
-In the kask panel (D10), navigate to the skills surface, select a skill, and invoke it with context. The kask panel routes through the same in-process `ManifestExecutor` (D1) as the agent panel.
+The kask panel (D10) was removed — the chat panel was redundant with the agent panel. Skill invocation is now exclusively through the agent panel, which routes through the same in-process `BridgeManifestExecutor` (D1).
 
 ### What Happens During Execution
 
 When a skill is invoked in-process:
 
-1. **Lookup** — The skill ID is resolved against the loaded registry of `SkillDef` entries.
-2. **Template rendering** — The skill's Jinja2 template is rendered with the provided context variables.
-3. **System prompt prepended** — A tool-awareness preamble is added:
+1. **Lookup** — The skill ID is resolved against the loaded registry of `SkillDef` entries. The `BridgeManifestExecutor::has_manifest()` check determines whether a `registry/manifests/<name>.yaml` exists; if so, the cascade runs. If not, the `SkillTool` returns the no-manifest envelope (body injection is disabled in zed-kask — the SKILL.md body is never injected).
+2. **Task injection** — The user's task (from `SkillToolInput.task`) is injected into the cascade context as `task` so templates can reference `{{ task }}` instead of running blind.
+3. **Template rendering** — The skill's Jinja2 template is rendered with the provided context variables.
+4. **System prompt prepended** — A tool-awareness preamble is added:
 
    ```
    You are executing a skill template. Follow its instructions precisely.
@@ -392,8 +393,9 @@ When a skill is invoked in-process:
    or report the missing capability.
    ```
 
-4. **Inference** — The rendered template is sent to the inference port via the guard layer (D4) with `temperature: 0.3`, `max_tokens: 2048`.
-5. **Regulation span** — `reg.tool.skill_execute` is emitted with the skill ID and result.
+5. **Inference** — The rendered template is sent to the inference port with `temperature: 0.3`, `max_tokens: 2048`. (The former guard layer, D4, was removed 2026-08-10.)
+6. **Final-result extraction** — The `BridgeManifestExecutor` extracts the final step result via `extract_final_step_result()`, which parses the ordinal from `step_N_result` keys and picks the highest (HashMap iteration order is randomized, so `values().last()` would pick an arbitrary step).
+7. **Regulation span** — `reg.tool.skill_execute` is emitted with the skill ID and result.
 
 ### Convergence (FlowDef Skills Only)
 
@@ -407,13 +409,22 @@ Convergence is validated by `FlowDefValidationReport` in `hkask-types::flowdef_v
 
 ### Gas Consumption
 
-Every skill execution consumes **gas** from the agent's energy budget:
+Skill execution is bounded by **two independent budgets**:
 
-1. `McpRuntime::invoke` / `ToolGovernance` estimates cost via `EnergyEstimator::estimate_cost()`
-2. Gas is **reserved** before invocation (hold-settle pattern)
-3. After invocation, actual gas is **settled** — if actual < reserved, the difference is refunded
+1. **Per-agent call cap (System A)** — every governed MCP tool call via
+   `McpRuntime::invoke` charges one call against the agent's `CallCap`
+   (`CallCapManager::can_proceed` + `charge`). The cap resets to its ceiling each
+   regulation tick. An agent with no registered cap is denied fail-closed.
+2. **Per-cascade budget (System B)** — the cascade runs against a
+   `BudgetTracker` declared in the skill manifest's `gas:`/`rjoule:` blocks:
+   `gas` is charged per `select` iteration (`charge_iteration`), and `rJoule` is
+   charged from each inference call's observed USD cost (`charge_rjoule(cost_usd)`).
+   Hitting a hard limit finalizes the cascade `MaxedOut` (`energy_spent`).
 
-Gas consumption is observable via Regulation spans. Query the in-process Regulation span surface (kask panel or agent panel) and look for `reg.tool.invoked` (pre-invocation) and `reg.tool.completed` (post-invocation with settled cost). The former `kask regulation alerts` CLI has been removed.
+Gas/cost consumption is observable via Regulation spans. Query the in-process
+Regulation span surface (agent panel) and look for `reg.tool.invoked`
+(pre-invocation) and `reg.tool.completed` (post-invocation). The former
+`kask regulation alerts` CLI has been removed.
 
 ### Error Handling
 
@@ -427,7 +438,7 @@ Gas consumption is observable via Regulation spans. Query the in-process Regulat
 
 ## Composing Skill Bundles
 
-Bundle composition is driven in-process by the **skill-bundler** skill, which uses the bundle types in `crates/hkask-templates/src/bundle/`. The former `BundleService` in the deleted `hkask-services-skill` crate and the `kask bundle compose/list/show/apply/evolve/skills/off` CLI commands have been removed.
+Bundle composition is driven in-process by the **skill-bundler** skill, which uses the bundle types in `crates/hkask-templates/src/bundle/`. The former `BundleService` in the deleted `hkask-services-skill` crate and the `kask bundle compose/list/show/apply/evolve/skills/off` CLI commands have been removed.[^ousterhout-bundle]
 
 ### Creating a Bundle
 
@@ -486,7 +497,7 @@ The resulting manifest's `steps` array carries `phase` (Pre/Core/Post), `ordinal
 
 ### Bundle Management
 
-Bundle management (list, show, apply, evolve) is performed in-process through the agent panel or kask panel (D10). The former `kask bundle list/show/apply/evolve/skills/off` CLI commands have been removed. Bundles are session-scoped: applying a bundle activates its cascade for the current agent session; deactivating is a no-op since bundles do not persist beyond the session.
+Bundle management (list, show, apply, evolve) is performed in-process through the agent panel. The former `kask bundle list/show/apply/evolve/skills/off` CLI commands have been removed. Bundles are session-scoped: applying a bundle activates its cascade for the current agent session; deactivating is a no-op since bundles do not persist beyond the session.
 
 ### Bundle Manifest Structure
 
@@ -522,7 +533,7 @@ Bundle management (list, show, apply, evolve) is performed in-process through th
 
 ## Skill Routing and Discovery
 
-Two meta-skills govern how tasks find the right skills: **skill-router** matches tasks to installed skills, and **skill-discovery** acquires new skills when gaps are found. They compose in a feedback loop.
+Two meta-skills govern how tasks find the right skills: **skill-router** matches tasks to installed skills, and **skill-discovery** acquires new skills when gaps are found. They compose in a feedback loop.[^beer-feedback-loop]
 
 ### How It Works
 
@@ -586,7 +597,7 @@ The `when_to_use` field is prose extracted from SKILL.md, not a structured manif
 
 ## Building MCP Servers
 
-zed-kask hosts 10 MCP servers in-process (codegraph, companies, condenser, corpus, curator, kata-kanban, media, research, scenarios, training). Every server follows the same bootstrap pattern defined in `hkask-mcp-server`. In zed-kask, MCP servers register as builtin in-process servers inside the editor (D1–D3): the `context_server` transport hosts them natively, and servers are being refactored to take direct `KaskCore` handles instead of the stdio/daemon bootstrap. The former `kask mcp start <id>` CLI and the old per-crate `BUILTIN_SERVERS` tuple registry have been superseded by in-process registration against the canonical `kask_bridge::BUILT_IN_MCP_SERVERS` list.
+zed-kask hosts 13 MCP servers as child processes over stdio via zed's `context_server` host (codegraph, companies, condenser, corpus, curator, kata-kanban, media, portfolio, prediction-markets, research, scenarios, swarm, training). Every server follows the same bootstrap pattern defined in `hkask-mcp-server`. In zed-kask, MCP servers register as built-in context servers inside the editor (D1–D3): the `context_server` host launches them as child processes over stdio, and servers run standalone with identity from `ServerContext.webid` (resolved from `HKASK_WEBID`) — there is no `KaskCore` singleton (the composition root wires individual components directly; see `zed-host-architecture-plan.md` §13.3). The former `kask mcp start <id>` CLI and the old per-crate `BUILTIN_SERVERS` tuple registry have been superseded by in-process registration against the canonical `kask_bridge::BUILT_IN_MCP_SERVERS` list.[^mcp-spec-build][^ousterhout-mcp-build]
 
 ### Prerequisites
 
@@ -611,7 +622,7 @@ dotenvy = { workspace = true }
 
 ### Step 1: Define the Server Struct
 
-Use the `mcp_server!` macro from `hkask-mcp-server`. It generates the struct with a mandatory `webid` field plus your domain-specific fields, along with a `new()` constructor and a `ToolContext` implementation. The former `userpod`/`daemon` fields were removed when the daemon transport was deleted; semantic-memory recording now goes through `ToolContext::record_tool_outcome` (default: `reg.memory` warning; the macro's `impl_tool_context!` override: in-process `reg.memory` debug log). Thread-level memory via `RealMemoryPort` (D6) is the richer path.
+Use the `mcp_server!` macro from `hkask-mcp-server`. It generates the struct with a mandatory `webid` field plus your domain-specific fields, along with a `new()` constructor and a `ToolContext` implementation. The former `userpod`/`daemon` fields were removed when the daemon transport was deleted; the `reg.tool` span (emitted by `ToolSpanGuard` in `execute_tool`/`execute_tool_semantic`) is the production recording surface. Thread-level memory via `RealMemoryPort` (D6) is the richer path; per-tool debug logging is available via `tracing::debug!` at the call site if a server needs it.
 
 ```rust
 // mcp-servers/<your-mcp-package>/src/lib.rs
@@ -715,7 +726,7 @@ pub async fn run() -> Result<(), McpError> {
 ```
 
 Two variants are available:
-- **`run_server()`** — standard server with MCP negotiation (hosted in-process by zed-kask's transport)
+- **`run_server()`** — standard server with MCP negotiation (launched as a child process over stdio by zed-kask's `context_server` host)
 - **`run_server_with_preloaded()`** — passes preloaded credentials (used by servers that need custom credentials before MCP handshake)
 
 ### Step 5: Write the Binary Entry Point
@@ -744,7 +755,7 @@ Server startup can fail with `McpError` before reaching the MCP handshake:
 | Storage driver error | `McpError::Storage` — server fails to start |
 | Transport (rmcp) error | `McpError::Transport` — server fails to start |
 
-`HKASK_WEBID` unset is **not** a startup failure — the server starts with an anonymous WebID and emits a `reg.memory` warning. Capability denials are not a startup concept in the current API; OCAP gating happens per-tool-invocation via `DelegationToken` verification in `McpRuntime::invoke`, not at server boot.
+`HKASK_WEBID` unset is **not** a startup failure — the server starts with an anonymous WebID and emits a `reg.memory` warning. Capability denials are not a startup concept in the current API; capability matching happens per-tool-invocation in `McpRuntime::invoke`, not at server boot.
 
 ### Step 6: Register as an In-Process Builtin
 
@@ -761,7 +772,7 @@ pub const BUILT_IN_MCP_SERVERS: &[BuiltinMcpServer] = &[
 ];
 ```
 
-Each entry is a `BuiltinMcpServer { id, binary, description }` struct. In zed-kask, the `context_server` transport (D3) uses this registry to load servers in-process. The former `kask mcp start example` CLI has been removed; servers are loaded automatically by the editor at startup. As the in-process refactor (T3.0) progresses, servers will take direct `KaskCore` handles instead of the stdio/daemon bootstrap, and the `binary` field will be replaced by a direct factory registration. If you also add an `id`/`description`-only view, keep `BUILT_IN_MCP_SERVERS_IDS` and `BUILT_IN_MCP_SERVERS_PAIRS` in sync — the `ids_slice_matches_main_registry` and `pairs_slice_matches_main_registry` tests enforce this.
+Each entry is a `BuiltinMcpServer { id, binary, description, credentials, config_env }` struct. In zed-kask, the `context_server` transport (D3) uses this registry to load servers in-process. The former `kask mcp start example` CLI has been removed; servers are loaded automatically by the editor at startup. Servers run standalone with identity from `ServerContext.webid` (resolved from `HKASK_WEBID`) — there is no `KaskCore` singleton and no planned "direct `KaskCore` handles" refactor; the composition root wires individual components directly (see `zed-host-architecture-plan.md` §13.3). The `binary` field remains the canonical factory entry point. If you also add an `id`/`description`-only view, keep `BUILT_IN_MCP_SERVERS_IDS` and `BUILT_IN_MCP_SERVERS_PAIRS` in sync — the `ids_slice_matches_main_registry` and `pairs_slice_matches_main_registry` tests enforce this.
 
 ### Testing the Server
 
@@ -772,7 +783,7 @@ cargo build -p <your-mcp-package>
 HKASK_WEBID=<webid-uuid> cargo run -p <your-mcp-package>
 ```
 
-In-process test (production path): launch zed-kask and verify the server appears in the kask panel (D10) or agent panel tool list. The former `kask daemon start` standalone daemon mode has been removed.
+In-process test (production path): launch zed-kask and verify the server appears in the agent panel tool list. The former `kask daemon start` standalone daemon mode has been removed.
 
 ### Common Pitfalls
 
@@ -823,9 +834,9 @@ In-process test (production path): launch zed-kask and verify the server appears
 
 ## Related
 
-- [zed-kask Host Architecture Plan](../architecture/zed-host-architecture-plan.md) — D1 (skill execution), D2 (Curator agent), D3 (in-process MCP transport), D10 (kask panel)
-- [Sovereignty and Observability](sovereignty-and-observability.md) — Regulation spans emitted by skill execution
-- [Magna Carta Reference](../reference/magna-carta.md) — P5.1 registry canonical source rule
+- [zed-kask Host Architecture Plan](../architecture/zed-host-architecture-plan.md) — D1 (skill execution), D2 (Curator agent), D3 (MCP tool transport — child processes over stdio)
+- [Regulation Explanation](../diataxis/hkask-regulation/explanation.md) — Regulation spans emitted by skill execution
+- [Magna Carta Reference](../architecture/core/magna-carta.md) — P5.1 registry canonical source rule
 ---
 
 ## Inlined Diagrams
@@ -841,11 +852,11 @@ The following Mermaid diagrams were inlined from the former `docs/diagrams/` dir
 
 ## Description
 
-The Improvement Kata PDCA cycle in `hkask-services-kata-kanban` executes as a 5-step **single-pass** sequential pipeline within the `KataEngine` that maps to four conceptual PDCA phases. Each step runs an LLM inference via the registered template (e.g., `kata-improvement/improvement-step1-direction`), validates output against the step's `output_schema`, records a `StepExperience`, and emits Regulation spans. The `KataEngine::run_improvement_from()` iterates through steps **exactly once** (`for step in &manifest.steps` — no re-entry loop). The cycle is bounded by `gas.cap` (default 15,000). Metric capture flanks the execution: `metric_before` is captured pre-cycle and `metric_after` post-cycle, yielding an `ImprovementSignal` (Positive/Negative/Stalled/NotMeasured). Regulation algedonic alerts fire if variety deficit exceeds threshold.
+The Improvement Kata PDCA cycle in `hkask-mcp-kata-kanban` (folded from `hkask-services-kata-kanban`) executes as a 5-step **singlepass** sequential pipeline within the `KataEngine` that maps to four conceptual PDCA phases. Each step runs an LLM inference via the registered template (e.g., `kata-improvement/improvement-step1-direction`), validates output against the step's `output_schema`, records a `StepExperience`, and emits Regulation spans. The `KataEngine::run_improvement_from()` iterates through steps **exactly once** (`for step in &manifest.steps` — no re-entry loop). The cycle is bounded by `gas.cap` (default 15,000). Metric capture flanks the execution: `metric_before` is captured pre-cycle and `metric_after` post-cycle, yielding an `ImprovementSignal` (Positive/Negative/Stalled/NotMeasured). Regulation algedonic alerts fire if variety deficit exceeds threshold.[^rother-kata][^deming-pdca-kata]
 
-**Convergence iteration lives elsewhere:** The convergence loop (`max_iterations`, threshold, re-entry with updated data) is implemented in `ManifestExecutor::execute_manifest()` in `crates/hkask-templates/src/executor.rs` — the Pattern A Skills Model execution engine. The kata engine is a *step executor* called within that loop; it does not drive convergence itself. In zed-kask, `KataEngine` is constructed and `execute()` is invoked in-process via the kata-kanban MCP server (one of the 11 in-process MCP servers); the deleted `kask kata start` CLI is gone. The kanban service's prompt-generation tools (`kanban_task_kata_improvement`) do not invoke the engine — they render prompt text only.
+**Convergence iteration lives elsewhere:** The convergence loop (`max_iterations`, threshold, re-entry with updated data) is implemented in `ManifestExecutor::execute_manifest()` in `crates/hkask-templates/src/executor.rs` — the Pattern A Skills Model execution engine. The `kata-improvement` / `kata-coaching` skills are PDCA manifests executed by that in-process `ManifestExecutor` with their Jinja2 templates — that is the live kata execution path. `KataEngine` (in the `hkask-mcp-kata-kanban` crate, `src/kata.rs`) is a library-level kata engine exercised only by tests (`tests/gas_feedback_loop.rs`); it is **not** a step executor in `ManifestExecutor`'s loop and is **not** invoked by the kata-kanban MCP server in production. The kata-kanban MCP server (a child process over stdio) exposes kanban board/task tools plus kata prompt-generation tools (`kanban_task_kata_improvement`) that render prompt text only — they do not execute a kata loop. The deleted `kask kata start` CLI has no direct successor.
 
-**Key source:** `crates/hkask-services-kata-kanban/src/kata/mod.rs:333-486` (`execute` — single-pass orchestration), `crates/hkask-services-kata-kanban/src/kata/improvement.rs:20-121` (`run_improvement_from` — single-pass `for` loop, no re-entry), `crates/hkask-services-kata-kanban/src/kata/metrics.rs:6-133` (metric capture + signal).
+**Key source:** `mcp-servers/hkask-mcp-kata-kanban/src/kata.rs:333-486` (`execute` — single-pass orchestration), `mcp-servers/hkask-mcp-kata-kanban/src/kata/improvement.rs:20-121` (`run_improvement_from` — single-pass `for` loop, no re-entry), `mcp-servers/hkask-mcp-kata-kanban/src/kata/metrics.rs:6-133` (metric capture + signal).
 
 **Convergence loop source:** `crates/hkask-templates/src/executor.rs:267-679` (`execute_manifest` — `'cascade: loop` with convergence check and re-entry at step 0), `crates/hkask-templates/src/executor.rs:746-799` (`check_convergence` — threshold + improvement ratio gating).
 
@@ -973,7 +984,7 @@ stateDiagram-v2
 
 | PDCA Phase | Kanban `TaskStatus` | Regulation Event | Trigger |
 |------------|---------------------|-----------|---------|
-| **Plan** | `Backlog` | `reg.tool.kanban` (task created) | Kata-kanban MCP server `kanban_task_kata_improvement` (in-process, via Agent Panel or kask panel) |
+| **Plan** | `Backlog` | `reg.tool.kanban` (task created) | Kata-kanban MCP server `kanban_task_kata_improvement` (in-process, via Agent Panel) |
 | **Do** | `InProgress` | `reg.tool.kanban` (task moved) | Coaching Q4: "What is your next step?" |
 | **Check** | `Review` | `reg.tool.kanban` (task verified) | Coaching Q5: task transitions to Review |
 | **Act** | `Done` | `reg.tool.kanban` (task completed) | Verification passes |
@@ -984,39 +995,41 @@ stateDiagram-v2
 - **Init → Plan:** Curator consent required for Improvement Kata; `consent_check` must return `Ok(())`. Self-consent suffices for Starter; Learner consent for Coaching.
 - **Gas gate (any step):** `state.gas_consumed + step_gas > manifest.gas.cap` → `Err(KataError::GasExceeded)`. No soft continue; hard abort per `error_handling.on_gas_exceeded: abort`.
 - **Output schema check:** If step has `output_schema`, all `properties` keys must exist in the inference output JSON. Missing keys → Regulation `debug!` log, check returns `false`.
-- **Convergence threshold:** Default 0.15; `improvement_gate: threshold_only`. On `not_reached: escalate`, Curator is notified. **Note:** Convergence checking and re-iteration (`max_iterations: 3`, `min_iterations: 1`) are performed by `ManifestExecutor::execute_manifest()` in `crates/hkask-templates`, **not** by the kata engine. The kata engine is a single-pass executor consumed within that outer loop.
+- **Convergence threshold:** Default 0.15; `improvement_gate: threshold_only`. On `not_reached: escalate`, Curator is notified. **Note:** Convergence checking and re-iteration (`max_iterations: 3`, `min_iterations: 1`) are performed by `ManifestExecutor::execute_manifest()` in `crates/hkask-templates`, **not** by the kata engine. The kata engine is a single-pass library-level executor (exercised only by tests); it is **not** consumed by `ManifestExecutor`. The production kata path is `ManifestExecutor` + the `kata-improvement`/`kata-coaching` skill manifests, which do not invoke `KataEngine`.[^rother-guards]
 - **Regulation algedonic: `algedonic_threshold: 100` variety deficit → warning emitted to `reg.kata` target with `escalation_target: Curator`.
 
 ## Regulation Span Diagram
 
 ```
 reg.prompt.kata.improvement
-├── [pre-cycle]  kata_type="improvement", bot=<learner>
-├── [per-step]   step=<ordinal>, action=<action>, bot=<learner>
-├── [per-step]   step=<ordinal>, passed_check=<bool>
-├── [post-step]  step=<ordinal>, gas=<consumed>
-├── [post-cycle] steps=<completed>, gas=<consumed>, has_signal=<bool>
-└── [algedonic]  namespace=<...>, severity, deficit, threshold
+⋮3 [pre-cycle]  kata_type="improvement", bot=<learner>
+⋮3 [per-step]   step=<ordinal>, action=<action>, bot=<learner>
+⋮3 [per-step]   step=<ordinal>, passed_check=<bool>
+⋮3 [post-step]  step=<ordinal>, gas=<consumed>
+⋮3 [post-cycle] steps=<completed>, gas=<consumed>, has_signal=<bool>
+⋮2 [algedonic]  namespace=<...>, severity, deficit, threshold
 ```
+
+The span taxonomy follows a hierarchical structured-logging convention.[^otel-span-diagram]
 
 ---
 
 <!-- DIAGRAM_ALIGNMENT
 id: DIAG-FW-005
 verified_date: 2026-07-24
-verified_against: crates/hkask-services-kata-kanban/src/kata/mod.rs (execute:333-486), crates/hkask-services-kata-kanban/src/kata/improvement.rs (run_improvement_from:20-121 — single-pass for loop, no re-entry), crates/hkask-services-kata-kanban/src/kata/metrics.rs (capture_before/after:6-105, compute_improvement_signal:76-105), crates/hkask-services-kata-kanban/src/kata/manifest.rs (KataStep, KataManifest, convergence config), crates/hkask-services-kata-kanban/src/kanban/types/status.rs (TaskStatus transitions), registry/manifests/kata-improvement.yaml (step definitions, convergence parameters, Regulation spans:150-160), crates/hkask-templates/src/executor.rs (execute_manifest:209-686 — convergence loop, check_convergence:746-799)
-status: VERIFIED (v3 — hkask-cli deleted; kata engine is invoked in-process; convergence loop is ManifestExecutor concern)
+verified_against: mcp-servers/hkask-mcp-kata-kanban/src/kata.rs (execute:333-486), mcp-servers/hkask-mcp-kata-kanban/src/kata/improvement.rs (run_improvement_from:20-121 — single-pass for loop, no re-entry), mcp-servers/hkask-mcp-kata-kanban/src/kata/metrics.rs (capture_before/after:6-105, compute_improvement_signal:76-105), mcp-servers/hkask-mcp-kata-kanban/src/kata/manifest.rs (KataStep, KataManifest, convergence config), mcp-servers/hkask-mcp-kata-kanban/src/kanban/types/status.rs (TaskStatus transitions), registry/manifests/kata-improvement.yaml (step definitions, convergence parameters, Regulation spans:150-160), crates/hkask-templates/src/executor.rs (execute_manifest:209-686 — convergence loop, check_convergence:746-799)
+status: VERIFIED (v3 — hkask-cli deleted; kata engine is library-level/test-only, not invoked in production — production kata execution is ManifestExecutor (D1) + kata skill manifests; convergence loop is ManifestExecutor concern)
 -->
 
 ## Cross-Reference
 
-- [zed-kask Host Architecture Plan](../architecture/zed-host-architecture-plan.md) — D1–D10 integration seams (skill execution, Curator agent, in-process MCP transport)
-- [`PRINCIPLES.md` § P6 — Space for UserPods](../architecture/core/PRINCIPLES.md#p6--space-for-userpods)
-- [`kata/mod.rs`](crates/hkask-services-kata-kanban/src/kata/mod.rs) — `KataEngine::execute()` dispatch (L333-486)
-- [`kata/improvement.rs`](crates/hkask-services-kata-kanban/src/kata/improvement.rs) — `run_improvement_from()` single-pass step loop (L20-121)
+- [zed-kask Host Architecture Plan](../architecture/zed-host-architecture-plan.md) — D1–D28 integration seams (skill execution, Curator agent, MCP tool transport — child processes over stdio)
+- [`PRINCIPLES.md` § P6 — Space for Per-User Data Directories](../architecture/core/PRINCIPLES.md#p6--space-for-per-user-data-directories)
+- [`kata.rs`](mcp-servers/hkask-mcp-kata-kanban/src/kata.rs) — `KataEngine::execute()` dispatch (L333-486)
+- [`kata/improvement.rs`](mcp-servers/hkask-mcp-kata-kanban/src/kata/improvement.rs) — `run_improvement_from()` single-pass step loop (L20-121)
 - [`executor.rs`](crates/hkask-templates/src/executor.rs) — `ManifestExecutor::execute_manifest()` convergence loop (L209-686), `check_convergence()` (L746-799)
-- [`kata/metrics.rs`](crates/hkask-services-kata-kanban/src/kata/metrics.rs) — before/after capture, signal computation (L6-133)
-- [`kanban/types/status.rs`](crates/hkask-services-kata-kanban/src/kanban/types/status.rs) — `TaskStatus` column-ordered transitions
+- [`kata/metrics.rs`](mcp-servers/hkask-mcp-kata-kanban/src/kata/metrics.rs) — before/after capture, signal computation (L6-133)
+- [`kanban/types/status.rs`](mcp-servers/hkask-mcp-kata-kanban/src/kanban/types/status.rs) — `TaskStatus` column-ordered transitions
 - [`registry/manifests/kata-improvement.yaml`](registry/manifests/kata-improvement.yaml) — canonical step definitions, convergence params, Regulation spans
 
 
@@ -1027,9 +1040,9 @@ status: VERIFIED (v3 — hkask-cli deleted; kata engine is invoked in-process; c
 
 # Kata-Kanban Execution Boundary
 
-This reference sequence separates the two Kata paths. The Kanban MCP exposes task-scoped **prompt generation**. Full Kata execution is available in-process through the kata-kanban MCP server, which constructs `KataEngine` directly and calls `execute()`. The MCP prompt tools do not invoke the engine; the distinction is operationally important because prompt generation does not execute the manifest's convergence, budget, or OCAP declarations.
+This reference sequence separates the two Kata paths. The kata-kanban MCP server (a child process over stdio) exposes task-scoped **prompt generation** tools that render prompt text only. Full Kata execution (the PDCA loop) runs in-process via the `ManifestExecutor` (D1) executing the `kata-improvement` / `kata-coaching` skill manifests with their Jinja2 templates — `KataEngine` (this crate) is a library-level engine exercised only by tests and is not wired into either path in production. The MCP prompt tools do not invoke the engine; the distinction is operationally important because prompt generation does not execute the manifest's convergence, budget, or capability declarations.
 
-> **Note:** The deleted `kask kata start` CLI is gone. Kata execution is invoked in-process — the kata-kanban MCP server (one of the 11 in-process MCP servers) constructs `KataEngine` and runs `execute()` within the zed-kask process. The Agent Panel and the kask panel (D10) are the user-facing entry points.
+> **Note:** The deleted `kask kata start` CLI has no direct successor. Kata execution (the PDCA loop) runs in-process via the `ManifestExecutor` (D1) executing the `kata-improvement` / `kata-coaching` skill manifests — not via `KataEngine`, which is a library-level engine exercised only by tests. The kata-kanban MCP server (a child process over stdio) provides kanban tools + kata prompt generation (prompt text only). The Agent Panel is the user-facing entry point.
 
 ```mermaid
 sequenceDiagram
@@ -1037,7 +1050,6 @@ sequenceDiagram
     participant MCP as Kanban MCP
     participant Service as KanbanService
     participant Task as Task Store
-    participant Engine as KataEngine
 
     Caller->>+MCP: kanban_task_kata_improvement(task_id)
     MCP->>+Service: task_improvement_prompt(task_id)
@@ -1046,29 +1058,21 @@ sequenceDiagram
     Service-->>-MCP: rendered prompt text
     MCP-->>-Caller: TaskKataResponse
 
-    opt Full kata execution (in-process)
-        Caller->>+MCP: kata_execute(manifest, learner, context)
-        MCP->>+Engine: KataEngine::from_registry(registry)
-        MCP->>+Engine: execute(manifest, learner, context)
-        Engine-->>-MCP: KataResult
-        MCP-->>-Caller: KataResult
-    end
-
-    Note over MCP,Engine: The MCP prompt tools do not invoke the engine.<br/>Full execution is in-process via the kata-kanban MCP server,<br/>not via a deleted CLI surface.
+    note over Caller,MCP: Full kata execution (the PDCA loop) runs in-process via the ManifestExecutor (D1) + kata-improvement/kata-coaching skill manifests — NOT via a kata_execute MCP tool. KataEngine is library-level/test-only; there is no kata_execute tool and no production KataEngine construction.
 ```
 
 <!-- DIAGRAM_ALIGNMENT
 id: DIAG-FW-006
 verified_date: 2026-07-24
-verified_against: mcp-servers/hkask-mcp-kata-kanban/src/lib.rs:656-686 (kanban_task_kata_improvement calls task_improvement_prompt); crates/hkask-services-kata-kanban/src/kanban/service_impl/kata.rs:104-177 (task_improvement_prompt); crates/hkask-services-kata-kanban/src/kata/mod.rs:334-498 (KataEngine::execute)
-status: VERIFIED (v3 — hkask-cli deleted; kata engine is invoked in-process via the kata-kanban MCP server)
+verified_against: mcp-servers/hkask-mcp-kata-kanban/src/lib.rs:656-686 (kanban_task_kata_improvement calls task_improvement_prompt); mcp-servers/hkask-mcp-kata-kanban/src/kanban/service_impl/kata.rs:104-177 (task_improvement_prompt); mcp-servers/hkask-mcp-kata-kanban/src/kata.rs:334-498 (KataEngine::execute)
+status: VERIFIED (v3 — hkask-cli deleted; kata engine is library-level/test-only, not invoked in production; the kata-kanban MCP server exposes prompt-generation tools only; production kata execution is ManifestExecutor (D1) + kata skill manifests)
 -->
 
 ## Cross-reference
 
 
 - [Kata PDCA lifecycle state machine](#kata-pdca-lifecycle-state-machine)
-- [zed-kask Host Architecture Plan](../architecture/zed-host-architecture-plan.md) — D1–D10 integration seams
+- [zed-kask Host Architecture Plan](../architecture/zed-host-architecture-plan.md) — D1–D28 integration seams
 
 ### Kanban Task Lifecycle State Machine
 
@@ -1114,7 +1118,54 @@ stateDiagram-v2
 <!-- DIAGRAM_ALIGNMENT
 id: DIAG-FW-008
 verified_date: 2026-07-20
-verified_against: crates/hkask-services-kata-kanban/src/kanban/types/status.rs:61-73 (can_transition_to), crates/hkask-services-kata-kanban/src/kanban/service_impl/service.rs:820-843 (task_reopen), crates/hkask-services-kata-kanban/src/kanban/service_impl/dejam.rs:180-207 (task_gas_exhaust), crates/hkask-services-kata-kanban/src/kanban/service_impl/service.rs:613-624 (task_claim status check)
+verified_against: mcp-servers/hkask-mcp-kata-kanban/src/kanban/types/status.rs:61-73 (can_transition_to), mcp-servers/hkask-mcp-kata-kanban/src/kanban/service_impl/service.rs:820-843 (task_reopen), mcp-servers/hkask-mcp-kata-kanban/src/kanban/service_impl/dejam.rs:180-207 (task_gas_exhaust), mcp-servers/hkask-mcp-kata-kanban/src/kanban/service_impl/service.rs:613-624 (task_claim status check)
 status: VERIFIED
 -->
+
+## Footnotes
+
+[^jinja2-skill]: Ronacher, A. (2024). *Jinja2 documentation*. Pallets Projects. https://jinja.palletsprojects.com/
+    Cited for the Jinja2 template engine that renders skill `.j2` files with context variables.
+
+[^pdca-skill]: Deming, W. E. (1986). *Out of the Crisis*. MIT Center for Advanced Engineering Study.
+    Cited for the PDCA cycle that FlowDef skills implement as their convergence loop.
+
+[^fagan-skill-audit]: Fagan, M. E. (1976). Design and code inspections to reduce errors in program development. *IBM Systems Journal*, 15(3), 182–211. https://doi.org/10.1147/sj.153.0182
+    Cited for the inspection-based audit methodology the skill audit applies to manifest/template consistency.
+
+[^ousterhout-p51]: Ousterhout, J. (2018). *A Philosophy of Software Design*. Yakny Press.
+    Cited for the deep-module principle that the registry crate is the canonical source and SKILL.md is its generated companion.
+
+[^mcp-spec-skill-test]: Anthropic. (2024). *Model Context Protocol Specification*. Anthropic PBC. https://modelcontextprotocol.io/specification
+    Cited for the MCP protocol the in-process BridgeManifestExecutor routes skill invocations through.
+
+[^fagan-publish]: Fagan, M. E. (1976). Design and code inspections to reduce errors in program development. *IBM Systems Journal*, 15(3), 182–211. https://doi.org/10.1147/sj.153.0182
+    Cited for the inspection principle the publish-then-verify workflow follows.
+
+[^mcp-spec-skill-invoke]: Anthropic. (2024). *Model Context Protocol Specification*. Anthropic PBC. https://modelcontextprotocol.io/specification
+    Cited for the MCP protocol that skill execution migrated from a standalone MCP server to an in-process native path.
+
+[^ousterhout-bundle]: Ousterhout, J. (2018). *A Philosophy of Software Design*. Yakny Press.
+    Cited for the module-composition discipline the skill-bundler applies when ordering skills into cascade phases.
+
+[^beer-feedback-loop]: Beer, S. (1979). *The Heart of Enterprise*. John Wiley & Sons.
+    Cited for the cybernetic feedback-loop design the skill-router/skill-discovery pair implements.
+
+[^mcp-spec-build]: Anthropic. (2024). *Model Context Protocol Specification*. Anthropic PBC. https://modelcontextprotocol.io/specification
+    Cited for the MCP protocol every builtin MCP server follows.
+
+[^ousterhout-mcp-build]: Ousterhout, J. (2018). *A Philosophy of Software Design*. Yakny Press.
+    Cited for the deep-module principle that the composition root wires individual components directly instead of a `KaskCore` singleton.
+
+[^rother-kata]: Rother, M. (2010). *Toyota Kata: Managing People for Improvement, Adaptiveness, and Superior Results*. McGraw-Hill.
+    Cited for the Improvement Kata 4-step cycle (direction → current condition → target condition → experiment) the KataEngine implements.
+
+[^deming-pdca-kata]: Deming, W. E. (1986). *Out of the Crisis*. MIT Center for Advanced Engineering Study.
+    Cited for the PDCA conceptual phases the 5-step single-pass pipeline maps onto.
+
+[^rother-guards]: Rother, M. (2010). *Toyota Kata: Managing People for Improvement, Adaptiveness, and Superior Results*. McGraw-Hill.
+    Cited for the threshold-based convergence design; the kata engine is single-pass (no convergence) and library-level/test-only — convergence is a ManifestExecutor concern, and the production kata path is ManifestExecutor + skill manifests (which do not invoke KataEngine).
+
+[^otel-span-diagram]: OpenTelemetry. (2024). *OpenTelemetry Specification*. Cloud Native Computing Foundation. https://opentelemetry.io/docs/specs/otel/
+    Cited for the hierarchical span taxonomy the Regulation span diagram follows.
 

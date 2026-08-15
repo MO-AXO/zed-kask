@@ -1,5 +1,5 @@
 # Diataxis Diagram Process Manifest
-# hKask v0.31.0 — Convergent Mermaid diagram generation
+# hKask v0.34.0 — Convergent Mermaid diagram generation
 # Anchored in https://diataxis.fr/ methodology and https://mermaid.js.org/ syntax
 #
 # PDCA cycle:
@@ -25,23 +25,19 @@ manifest:
     sequence (from message flows), class (from traits/structs). Outputs to
     docs/diagrams/ with Diataxis-appropriate prose descriptions.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  # Rationale: 0.15 threshold — same as idiomatic-rust. The diagram should be
-  # structurally sound and complete. A score below 0.15 means: all entities
-  # present, relationships accurate, labels readable, type appropriate, voice
-  # matching the quadrant, cross-links present. Minor cosmetic issues (label
-  # phrasing, marginal clarity) can survive convergence — they're taste, not
-  # correctness.
-  threshold: 0.15
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: step_5_result.convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
+  target_artifacts_field: "current_artifacts"
 
 gas:
   cap: 60000
@@ -58,7 +54,7 @@ inputs:
   - name: target
     type: string
     description: "The target to diagram — a crate path, file path, module name, or description"
-    required: true
+    required: false
   - name: hint
     type: string
     description: "Optional hint: preferred diagram type, audience, or context"
@@ -88,9 +84,9 @@ steps:
     renderer: minijinja
     template_ref: diataxis-diagram/diataxis-diagram-classify
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
-      target: "{{ target }}"
+      target: "{{ task | default(target) }}"
       hint: "{{ hint | default('') }}"
 
   - ordinal: 2
@@ -109,7 +105,7 @@ steps:
     renderer: minijinja
     template_ref: diataxis-diagram/diataxis-diagram-extract
     gas_cap: 6144
-    timeout_seconds: 120
+    timeout_seconds: 180
     input_mapping:
       diagram_type: "{{ step_1_result.diagram_type }}"
       target: "{{ target }}"
@@ -128,12 +124,12 @@ steps:
     renderer: minijinja
     template_ref: diataxis-diagram/diataxis-diagram-generate
     gas_cap: 8192
-    timeout_seconds: 60
+    timeout_seconds: 180
     input_mapping:
       diagram_type: "{{ step_1_result.diagram_type }}"
       entities: "{{ step_2_result.entities | default([]) }}"
       relationships: "{{ step_2_result.relationships | default([]) }}"
-      refinement_directives: "{{ step_4_result.refinement_directives | default([]) }}"
+      refinement_directives: "{{ prev_step_4_result.refinement_directives | default([]) }}"
       extraction_notes: "{{ step_2_result.extraction_notes | default('') }}"
 
   - ordinal: 4
@@ -147,7 +143,7 @@ steps:
     renderer: minijinja
     template_ref: diataxis-diagram/diataxis-diagram-evaluate
     gas_cap: 6144
-    timeout_seconds: 60
+    timeout_seconds: 180
     input_mapping:
       diagram_type: "{{ step_1_result.diagram_type }}"
       diataxis_quadrant: "{{ step_1_result.diataxis_quadrant }}"
@@ -157,18 +153,32 @@ steps:
       extraction_notes: "{{ step_2_result.extraction_notes | default('') }}"
 
   - ordinal: 5
-    action: select
+    action: compute
+    compute_ref: lisp.eval
     description: >
-      CONVERGE — compute normalized metric from evaluation scores.
-      Weighted sum across six criteria, normalized to [0,1] where 0 = perfect.
-      Threshold 0.15: below means diagram is structurally sound.
-    renderer: minijinja
-    template_ref: diataxis-diagram/diataxis-diagram-convergence
-    gas_cap: 2048
-    timeout_seconds: 30
+      COMPUTE DIAGRAM QUALITY SCORE: Deterministic Lisp computation
+      that turns the evaluate step's output into a scalar convergence
+      signal. Lower = more converged (lower weighted total, fewer
+      refinement directives). The score is `weighted_total +
+      0.05 * directive_count` — the weighted total is the LLM-assessed
+      defect score (0 = perfect diagram); each refinement directive is
+      an unmet criterion the generate step must fix, so a small penalty
+      per directive makes the signal sensitive to whether the directives
+      are actually being resolved across iterations. No `default(1.0)`
+      fallback: a missing `weighted_total` surfaces as nil and is guarded
+      to 1.0 ("no score reported" = not converged), not masked.
+    gas_cap: 100
+    timeout_seconds: 10
     input_mapping:
-      evaluation_result: "{{ step_4_result }}"
-      iteration: "{{ loop_context.iteration | default(1) }}"
+      form: >
+        (let ((wt (assoc "weighted_total" step_4_result))
+              (directives (assoc "refinement_directives" step_4_result)))
+          (let ((score (if (numberp wt) wt 1.0))
+                (dc (if (is_null directives) 0 (length directives))))
+            (let ((raw (+ score (* dc 0.05))))
+              (if (> raw 1.0) 1.0 raw))))
+      env:
+        step_4_result: "{{ step_4_result }}"
 
   - ordinal: 6
     action: select
@@ -191,6 +201,25 @@ steps:
       related_docs: "{{ related_docs | default([]) }}"
 
   - ordinal: 7
+    action: render
+    description: >
+      SURFACE the finalized diataxis-diagram markdown (containing the fenced
+      ```mermaid block) as the cascade's final output. The write step (step 7)
+      produces {file_path, file_content, description_paragraph}; without this
+      render step, extract_final_step_result returns that JSON object and the
+      model must discover the file_content field. This render step flattens it
+      to a raw markdown string so the model sees the mermaid block directly
+      and reproduces it in its assistant message, which acp_thread renders.
+      The render action is deterministic (no LLM call).
+    renderer: minijinja
+    template_ref: diataxis-diagram/present-diagram
+    gas_cap: 100
+    timeout_seconds: 10
+    input_mapping:
+      file_content: "{{ step_6_result.file_content }}"
+      file_path: "{{ step_6_result.file_path }}"
+
+  - ordinal: 8
     action: loop
     description: >
       If convergence not met (metric > 0.15) and refinement directives
@@ -198,6 +227,9 @@ steps:
       focused improvement targets. Each iteration narrows the gap.
     input_mapping:
       loop_target: "{{ 3 }}"
+      # Push the diagram quality score from the lisp.eval step (ordinal 5)
+      # into convergence_signal. No default(1.0): a Lisp failure must surface.
+      convergence_signal: "{{ step_5_result }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -205,41 +237,6 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: diataxis-diagram/diataxis-diagram-classify
-      gas_budget: 4096
-    - resource: template
-      action: render
-      template_id: diataxis-diagram/diataxis-diagram-extract
-      gas_budget: 6144
-    - resource: template
-      action: render
-      template_id: diataxis-diagram/diataxis-diagram-generate
-      gas_budget: 8192
-    - resource: template
-      action: render
-      template_id: diataxis-diagram/diataxis-diagram-evaluate
-      gas_budget: 6144
-    - resource: template
-      action: render
-      template_id: diataxis-diagram/diataxis-diagram-convergence
-      gas_budget: 2048
-    - resource: template
-      action: render
-      template_id: diataxis-diagram/diataxis-diagram-write
-      gas_budget: 4096
-    - resource: manifest
-      action: execute
-      template_id: diataxis-diagram
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true
 
 ledger:
   emit_spans: true

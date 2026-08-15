@@ -4,10 +4,11 @@
 #   Martin et al. (arXiv:2603.29878): Few-Shot is the dominant strategy,
 #   lifting F1 from <30% (Zero-Shot) to 99%+ across all tested models.
 # Model: resolved from HKASK_CLASSIFIER_MODEL → DEFAULT_CLASSIFIER_MODEL
-#   (canonical: DI/Qwen/Qwen3-235B-A22B-Instruct-2507, 22B active MoE).
+#   (canonical: OR/deepseek/deepseek-v4-flash).
 #   The `model:` field below is intentionally empty; ClassifierConfig::from_def
-#   fills it from the canonical path and strips the DI/ router prefix.
-# Provider: DeepInfra (cloud API, OpenAI-compatible)
+#   fills it from the canonical path and the LanguageModelRegistry resolves
+#   the OpenRouter/ prefix to the provider.
+# Provider: OpenRouter (cloud API, OpenAI-compatible)
 #
 # Rationale: Martin et al. (arXiv:2603.29878) evaluated LLMs for RDF triple
 # extraction and found Few-Shot learning is the dominant strategy:
@@ -18,12 +19,6 @@
 #   topic, concepts, entities, relationships, primary_dimension, quality_flags
 # These become metadata triples in the embedding store, enabling semantic
 # queries beyond string-matching.
-#
-# Multi-model via fusion config (in corpus config YAML):
-# When the corpus config has a `fusion:` block with `judge: algo`, the
-# corpus pipeline routes triple extraction through the fusion orchestrator.
-# Panel models run in parallel; JSON responses are merged algorithmically
-# (union, case-insensitive dedup, diverging fields annotated [A:... B:...]).
 classifier:
   name: triple-extractor
   model: ""
@@ -82,9 +77,6 @@ classifier:
 
     Quality flags: clear, actionable, verbose, vague, well_structured,
     needs_example, precise, accessible, authoritative, outdated.
-
-  base_url: https://api.deepinfra.com/v1/openai/chat/completions
-  api_key_env: DEEPINFRA_API_KEY
 
   temperature: 0.0
   max_tokens: 300

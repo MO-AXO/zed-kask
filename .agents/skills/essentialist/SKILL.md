@@ -1,7 +1,8 @@
 ---
 name: essentialist
+core: true
 visibility: public
-description: "General-purpose recursive eliminative interrogation. Enforces 'always take away, never add' through a 3-gate challenge loop (Exist → Surface → Contract) that every artifact must survive before being committed. Delegates G1 to deep-module deletion test, G2 to deep-module surface assessment, and G3 to coding-guidelines abstraction audit."
+description: "General-purpose recursive eliminative interrogation. Enforces 'always take away, never add' through a 3-gate challenge loop (Exist, Surface, Contract) that every artifact must survive before being committed."
 ---
 
 
@@ -50,17 +51,6 @@ General-purpose recursive eliminative interrogation. Enforces "always take away,
 | Template | Type | Purpose |
 |----------|------|--------|
 | `essentialist-flow.j2` | `KnowAct` | Run the 3-gate eliminative interrogation loop in either autonomous (agent evaluates and recommends without pause) or advisory (agent recommends, human accepts/rejects/overrides per gate) mode. Classify every finding by constraint-force (Prohibition → required, Guideline → suggested), escalate to human on retry exhaustion (3 max), abort on zero-delta completion. Delegates reasoning to deep-module (G1, G2) and coding-guidelines (G3) templates. |
-
-,## Fusion Mode
-
-This skill supports **fusion mode** via the `fusion:` block in its flow manifest.
-When enabled, all analysis steps route through a multi-model panel — either with
-LLM judge synthesis or the **algo / no-judge** path (`judge: algo`) for deterministic
-JSON merge without an LLM judge call. The essentialist uses **critique mode** (draft →
-panel critiques → revise) to match the 3-gate challenge loop.
-
-The convergence check step has `fusion: false` to ensure deterministic rubric
-evaluation uses single-model inference.
 
 ## Constraints
 

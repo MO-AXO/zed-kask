@@ -7,7 +7,7 @@ crate:
   description: >
     Skill lifecycle management and maintenance. Registry crate (manifest.yaml + *.j2)
     is the canonical source of truth; SKILL.md is a generated companion.
-    Audit staleness, coverage gaps, and quality. List, build, validate, install,
+    Audit staleness, coverage gaps, and quality. List, build, validate, install
     translate, and prune skills. Pairs with skill-discovery and skill-bundler.
 
 templates:
@@ -15,47 +15,42 @@ templates:
     name: "Validate skills against registry format and quality checks"
     path: skill-maintenance-validate.j2
     type: KnowAct
-    lexicon_terms: [validate, verify, classify, audit, recommend]
     description: >
       Validate skills against registry format and quality checks. Check manifest
-      structure, .j2 frontmatter (template_type, contract, visibility, energy_cap).
+      structure, .j2 frontmatter (template_type, contract, visibility).
       SKILL.md is validated as secondary companion.
 
   - id: skill-maintenance/skill-maintenance-build
     name: "Scaffold a new registry crate from a user description"
     path: skill-maintenance-build.j2
     type: KnowAct
-    lexicon_terms: [create, specify, design, compose, verify]
     description: >
       Scaffold a new registry crate from a user description. Generate manifest.yaml
-      with crate metadata, template entries, and lexicon_terms. Generate companion
+      with crate metadata, template entries, and . Generate companion
       SKILL.md from the registry crate. Validate and confirm before writing.
 
   - id: skill-maintenance/skill-maintenance-translate
     name: "Forward translation: convert a classified source skill into a hKask…"
     path: skill-maintenance-translate.j2
     type: KnowAct
-    lexicon_terms: [translate, adapt, extract, compose, verify]
     description: >
       Forward translation: convert a classified source skill into a hKask registry crate
-      (manifest.yaml + *.j2 templates). Map source elements to hKask equivalents,
+      (manifest.yaml + *.j2 templates). Map source elements to hKask equivalents
       drop concepts with no equivalent, produce validated output with translation summary.
 
   - id: skill-maintenance/skill-maintenance-reverse
     name: "Reverse translation: generate a SKILL.md companion from a registry…"
     path: skill-maintenance-reverse.j2
     type: KnowAct
-    lexicon_terms: [translate, extract, compose, generate, verify]
     description: >
       Reverse translation: generate a SKILL.md companion from a registry crate.
-      Read manifest.yaml for crate metadata, read .j2 templates for methodology,
+      Read manifest.yaml for crate metadata, read .j2 templates for methodology
       produce a markdown companion suitable for the Zed coding agent.
 
   - id: skill-maintenance/skill-maintenance-prose
     name: "Prose-only derivation: synthesize the \"When to Use\" and…"
     path: skill-maintenance-prose.j2
     type: KnowAct
-    lexicon_terms: [synthesize, extract, compose, derive, instruct]
     description: >
       Prose-only derivation: synthesize the "When to Use" and "Instructions"
       sections of a SKILL.md from a registry crate, emitted as raw markdown.
@@ -68,7 +63,6 @@ templates:
     name: "Run staleness and health audit for target scope"
     path: skill-maintenance-audit.j2
     type: KnowAct
-    lexicon_terms: [audit, assess, classify, recommend, prioritize]
     description: >
       Run staleness and health audit for target scope. Checks R1-R12 registry
       rules, Z1-Z8 companion checks, X1-X4 cross-artifact checks. Used by the
@@ -78,75 +72,10 @@ templates:
     name: "Run corpus coverage analysis for uncovered/partial capabilities"
     path: skill-maintenance-coverage.j2
     type: KnowAct
-    lexicon_terms: [map, trace, gap, classify, prioritize]
     description: >
       Run corpus coverage analysis for uncovered/partial capabilities.
       Maps common task patterns against the existing skill corpus, identifies
       what is covered, uncovered, and partial. Used by the FlowDef manifest
       as step 2 of the maintenance PDCA loop.
 
-  - id: skill-maintenance/skill-maintenance-convergence-check
-    name: "Compute normalized convergence metric for maintenance cycle"
-    path: skill-maintenance-convergence-check.j2
-    type: KnowAct
-    lexicon_terms: [evaluate, converge, classify, verify, calibrate]
-    description: >
-      Compute normalized convergence metric for maintenance PDCA cycles.
-      Measures critical signal count, coverage gaps, and regression library
-      growth. Used by the FlowDef manifest as step 3 of the maintenance PDCA loop.
 
-  # -- Logic audit mode templates (folded from skill-logic-audit) --
-  - id: skill-maintenance/logic-load-goal
-    name: "Parse the annotated goal block from a .j2 or manifest.yaml file"
-    path: logic-load-goal.j2
-    type: WordAct
-    lexicon_terms: [extract, parse, specify, verify]
-    description: >
-      Parse the annotated goal: block from a .j2 or manifest.yaml file and
-      return it as a normalized string. Verify that a goal exists and is
-      non-empty.
-
-  - id: skill-maintenance/logic-critique-template
-    name: "Adversarial critique of a template body against its stated goal"
-    path: logic-critique-template.j2
-    type: KnowAct
-    lexicon_terms: [critique, assess, detect, classify, recommend]
-    description: >
-      Adversarial critique anchored to the extracted goal. For each flaw,
-      provide the location, claim, anchor to goal, severity, and suggested fix.
-
-  - id: skill-maintenance/logic-critique-critique
-    name: "Soundness filter — separate valid concerns from spurious ones"
-    path: logic-critique-critique.j2
-    type: KnowAct
-    lexicon_terms: [validate, filter, classify, assess, verify]
-    description: >
-      Review a critique for soundness and goal-anchoring. Separate valid,
-      goal-anchored concerns from spurious ones.
-
-  - id: skill-maintenance/logic-compose-proposal
-    name: "Compose a concrete revised artifact and diff from calibrated concerns"
-    path: logic-compose-proposal.j2
-    type: KnowAct
-    lexicon_terms: [compose, propose, revise, synthesize, verify]
-    description: >
-      Compose a concrete revised artifact and unified diff from the calibrated
-      concerns.
-
-  - id: skill-maintenance/logic-user-choice
-    name: "Present the proposal and capture accept/reject/counter-proposal"
-    path: logic-user-choice.j2
-    type: KnowAct
-    lexicon_terms: [present, recommend, confirm, classify, route]
-    description: >
-      Present the proposal to the user and capture accept, reject, or
-      counter-proposal choice.
-
-  - id: skill-maintenance/logic-convergence-check
-    name: "Compute convergence metric for logic audit cycle"
-    path: logic-convergence-check.j2
-    type: KnowAct
-    lexicon_terms: [evaluate, converge, classify, score, verify]
-    description: >
-      Compute a normalized convergence metric in [0,1] for audit PDCA cycles,
-      where 0 means no material flaws remain.

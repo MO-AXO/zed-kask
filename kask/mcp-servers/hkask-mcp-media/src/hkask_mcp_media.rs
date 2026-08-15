@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(clippy::let_underscore_future)]
 //! hKask MCP Media — AI media generation (image, video, voice via centralized inference router)
 //!
 //! Tool families:
@@ -9,38 +10,42 @@
 //! - Voice: voice_design, generate_speech
 //! - Audio: transcribe, transcribe_bundle, audio_capture, record_and_transcribe
 
-// Pre-existing clippy lints from original bin-only codebase (addressed in separate refactoring pass).
-#![allow(unused_crate_dependencies)] // Bin target — deps used in main.rs, lint checks lib target only
-#![allow(clippy::collapsible_if, clippy::cloned_ref_to_slice_refs)]
-
-pub mod omc;
-
+mod budget;
 mod error;
 mod gallery;
+pub mod media_block;
+pub mod omc;
 mod templates;
 pub mod video;
 
-pub use error::{MediaError, map_media_error};
+pub use budget::{MediaBudget, UnitCosts};
+use budget::{build_media_budget, charge_budget_gate};
+pub use error::{MediaError, map_gallery_store_error, map_image_open_error, map_media_error};
 
 // Bridge crates: shared ontological vocabulary (P5.4 dual-axis framework)
 
 use gallery::GalleryState;
 use gallery::vision::{self};
-use hkask_inference::InferenceRouter;
-use hkask_mcp_server::server::{McpToolError, execute_tool, validate_tool_url};
+use hkask_mcp_server::server::{McpToolError, execute_tool_semantic, validate_tool_url_with_dns};
 use hkask_storage::database::sqlite::SqliteDriver;
 use hkask_storage::database::value::DbValue;
-use hkask_storage::{Database, GalleryMode, GalleryStore, GalleryStoreError};
+use hkask_storage::{GalleryMode, GalleryStore, GalleryStoreError};
 use hkask_types::InferencePort;
 use hkask_types::VoiceDesign;
 
-use hkask_types::{TimedWord, TranscriptBundle, TranscriptSegment};
+use crate::transcript::{TimedWord, TranscriptBundle, TranscriptSegment};
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 pub mod tools;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+/// Maximum image file size for base64 encoding (32 MiB). Gallery images larger
+/// than this are rejected to prevent OOM — the image is read into memory and
+/// base64-encoded, which triples the size. A multi-GB image would exhaust the
+/// process's address space.
+const MAX_IMAGE_READ_BYTES: u64 = 32 * 1024 * 1024;
 use video::FfmpegRunner;
 
 use ab_glyph::Font;
@@ -50,21 +55,24 @@ use sha2::Digest;
 
 /// Default open-weight models for media processing.
 /// All can be overridden via environment variables.
+///
+/// The default values are `const` references to the single source of truth in
+/// `hkask_inference::model_constants` — do not duplicate the model ids here.
 pub mod models {
     /// Default TTS model: Qwen3-TTS (Apache 2.0) via fal.ai
-    pub const TTS_DEFAULT: &str = "fal.ai/qwen-3-tts";
+    pub const TTS_DEFAULT: &str = hkask_inference::model_constants::DEFAULT_TTS_MODEL;
     pub const TTS_ENV: &str = "HKASK_MEDIA_TTS_MODEL";
 
     /// Default STT model: fal.ai Wizper (optimized Whisper v3)
-    pub const STT_DEFAULT: &str = "fal.ai/wizper";
+    pub const STT_DEFAULT: &str = hkask_inference::model_constants::DEFAULT_STT_MODEL;
     pub const STT_ENV: &str = "HKASK_MEDIA_STT_MODEL";
 
-    /// Default vision model: Qwen3-VL (Apache 2.0) via KiloCode
-    pub const VISION_DEFAULT: &str = "KiloCode/qwen/qwen3-vl-235b-a22b-instruct";
+    /// Default vision model: Qwen3-VL (Apache 2.0) via OpenRouter
+    pub const VISION_DEFAULT: &str = hkask_inference::model_constants::DEFAULT_VISION_MODEL;
     pub const VISION_ENV: &str = "HKASK_MEDIA_VISION_MODEL";
 
     /// Default image generation model: FLUX.2 \[dev\] (open-source) via fal.ai
-    pub const IMAGE_GEN_DEFAULT: &str = "fal.ai/flux-2";
+    pub const IMAGE_GEN_DEFAULT: &str = hkask_inference::model_constants::DEFAULT_IMAGE_GEN_MODEL;
     pub const IMAGE_GEN_ENV: &str = "HKASK_MEDIA_IMAGE_GEN_MODEL";
 
     /// Resolve a model name from env var or default.
@@ -95,16 +103,48 @@ struct GalleryAccess {
 
 hkask_mcp_server::mcp_server!(
     pub struct MediaServer {
-        pub inference: Arc<InferenceRouter>,
+        /// Inference port for vision/chat AND media-generation calls routed
+        /// through zed's LanguageModelRegistry via the IPC bridge. The
+        /// `InferencePort::media_generate` trait method (overridden by
+        /// `InferenceIpcClient`) handles image/video/speech/transcription;
+        /// `embed` and `list_vision_models` handle the gallery embedding path.
+        pub vision_port: Arc<dyn InferencePort>,
         pub gallery_state: Arc<Mutex<Option<GalleryState>>>,
         pub gallery_store: Arc<GalleryStore>,
         pub template_env: minijinja::Environment<'static>,
         pub ffmpeg: FfmpegRunner,
+        /// Resolved rJoule budget configuration for inference cost (1 rJoule = $1 USD).
+        /// `tracker = None` = no budget enforcement (`HKASK_MEDIA_RJOULE_CAP` unset/0).
+        /// Gas (compute) is enforced upstream at `McpRuntime::invoke` +
+        /// `CyberneticsLoop`, so the tracker's gas cap is inert and never
+        /// charged here. Resolved once at startup so the gate is deterministic.
+        pub budget: MediaBudget,
     }
 );
 
+mod style;
+pub mod transcript;
 pub mod types;
 use types::*;
+
+/// Read an image file with a size cap to prevent OOM. Gallery images are
+/// read into memory and base64-encoded (which triples the size), so a
+/// multi-GB image would exhaust the process's address space. Rejects files
+/// larger than `MAX_IMAGE_READ_BYTES` before reading.
+fn read_image_capped(path: &str) -> Result<Vec<u8>, MediaError> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| MediaError::Io(format!("Failed to stat image: {e}")))?;
+    let size = metadata.len();
+    if size > MAX_IMAGE_READ_BYTES {
+        return Err(MediaError::Io(format!(
+            "Image file is {size} bytes ({:.1} MiB) — exceeds the {} byte limit; \
+             use a smaller image or increase MAX_IMAGE_READ_BYTES",
+            size as f64 / (1024.0 * 1024.0),
+            MAX_IMAGE_READ_BYTES
+        )));
+    }
+    std::fs::read(path).map_err(|e| MediaError::Io(format!("Failed to read image: {e}")))
+}
 
 /// Compute normalized Levenshtein similarity between two strings.
 /// Returns 1.0 for identical strings, 0.0 for completely different.
@@ -182,6 +222,33 @@ mod levenshtein_tests {
 }
 
 impl MediaServer {
+    // ── rJoule budget ───────────────────────────────────────────────────────
+    //
+    // The media server pre-charges rJoule (inference USD cost) before each
+    // billable generation call and rejects the request when the remaining
+    // budget is insufficient. Compute gas is NOT tracked here — it is
+    // enforced upstream at `McpRuntime::invoke` via `CyberneticsLoop`, so the
+    // tracker's gas cap is constructed inert (large cap, `hard_limit: false`)
+    // and never charged. We deliberately avoid `BudgetTracker::check_exhausted`
+    // because it returns `Gas` whenever `gas_used >= gas_cap` and would trip
+    // spuriously when the gas cap is 0 — instead the rJoule gate is checked
+    // directly via `remaining_rjoule()`.
+
+    /// Pre-charge the rJoule budget for an estimated call and enforce the hard
+    /// limit. Returns `Ok(())` when no budget is configured (enforcement
+    /// disabled) or when the remaining budget covers the estimate; returns an
+    /// `McpToolError` (propagated to the UI) when the budget is exhausted.
+    ///
+    /// Thin delegate to [`charge_budget_gate`] — the gate logic is a free
+    /// function so it can be tested without constructing a full `MediaServer`.
+    async fn charge_budget(
+        &self,
+        tool: &str,
+        params: &hkask_types::MediaGenerateParams,
+    ) -> Result<(), McpToolError> {
+        charge_budget_gate(&self.budget, tool, params).await
+    }
+
     /// Lock the gallery and extract essential state. Drops the lock before
     /// returning, so the result is safe to hold across .await points.
     fn access_gallery(&self) -> Result<GalleryAccess, MediaError> {
@@ -216,9 +283,35 @@ impl MediaServer {
     async fn require_vision(&self) -> Result<(&'static str, &'static str), McpToolError> {
         self.resolve_vision_model().await.ok_or_else(|| {
             McpToolError::unavailable(
-                "No vision-capable provider configured (set DEEPINFRA_API_KEY, OPENROUTER_API_KEY, or TOGETHERAI_API_KEY)",
+                "No vision-capable provider configured. Vision LLMs route through zed's \
+                 LanguageModelRegistry via the inference IPC bridge — enable a vision \
+                 model in the kask inference provider settings. The media server process \
+                 itself only reads FALAI_API_KEY / DEEPINFRA_API_KEY for generation.",
             )
         })
+    }
+
+    /// Embed a single text via the inference port's `embed` method.
+    ///
+    /// Resolves the embedding model from `HKASK_EMBEDDING_MODEL` (default
+    /// `DeepInfra/Qwen/Qwen3-Embedding-0.6B`) and returns the first (only)
+    /// embedding vector. Used by gallery similarity search.
+    async fn embed_text(&self, text: &str) -> Result<Vec<f32>, McpToolError> {
+        let model = hkask_inference::model_constants::embedding_model();
+        let vectors = self
+            .vision_port
+            .embed(&model, std::slice::from_ref(&text.to_string()))
+            .await
+            .map_err(|e| {
+                McpToolError::unavailable(format!(
+                    "Embedding model unavailable: {}. Configure a cloud provider.",
+                    e
+                ))
+            })?;
+        vectors
+            .into_iter()
+            .next()
+            .ok_or_else(|| McpToolError::unavailable("Embedding model returned an empty response"))
     }
 
     /// Render a Jinja2 prompt template with the given variables.
@@ -240,8 +333,7 @@ impl MediaServer {
                 ))
             })?;
 
-        let data = std::fs::read(&img.absolute_path)
-            .map_err(|e| MediaError::Io(format!("Failed to read image: {}", e)))?;
+        let data = read_image_capped(&img.absolute_path)?;
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
         let mime = match img.format.as_str() {
             "jpg" | "jpeg" => "image/jpeg",
@@ -304,7 +396,7 @@ impl MediaServer {
                 "SELECT absolute_path FROM gallery_images WHERE id = ?1 AND gallery_id = ?2",
                 &[
                     DbValue::Text(image_id.to_string()),
-                    DbValue::Text(ga.gallery_id.to_string()),
+                    DbValue::Text(ga.gallery_id),
                 ],
             )
             .map_err(|e| {
@@ -318,8 +410,7 @@ impl MediaServer {
             })?
             .to_string();
 
-        let data = std::fs::read(&absolute_path)
-            .map_err(|e| MediaError::Io(format!("Failed to read image: {}", e)))?;
+        let data = read_image_capped(&absolute_path)?;
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
         let mime = if absolute_path.ends_with(".png") {
             "image/png"
@@ -384,13 +475,13 @@ impl MediaServer {
         } else {
             let (vision_model, _vision_label) = self.require_vision().await?;
             let v = gallery::vision::validate_face_reference(
-                &self.inference,
+                &self.vision_port,
                 &self.template_env,
                 image_url,
                 Some(vision_model),
             )
             .await
-            .map_err(|e| McpToolError::internal(format!("Face validation failed: {}", e)))?;
+            .map_err(map_media_error)?;
             let status = if v.valid {
                 FaceStatus::Valid
             } else {
@@ -414,7 +505,7 @@ impl MediaServer {
             match self.require_vision().await {
                 Ok((vision_model, _)) => {
                     match gallery::vision::embed_face(
-                        &self.inference,
+                        &self.vision_port,
                         &self.template_env,
                         image_url,
                         Some(vision_model),
@@ -455,7 +546,7 @@ impl MediaServer {
                 status.as_ref(),
                 &notes,
             )
-            .map_err(|e| McpToolError::internal(format!("Failed to register face: {}", e)))?;
+            .map_err(|e| map_media_error(e.into()))?;
         Ok((record, validation))
     }
 
@@ -614,7 +705,7 @@ impl MediaServer {
             // Produce a query embedding once per face tag. Used for the fast
             // cosine path; falls back to LLM-only if extraction fails.
             let query_embedding: Option<Vec<f32>> = match gallery::vision::embed_face(
-                &self.inference,
+                &self.vision_port,
                 &self.template_env,
                 &query_url,
                 Some(vision_model),
@@ -687,7 +778,7 @@ impl MediaServer {
                 };
 
                 match gallery::vision::match_faces(
-                    &self.inference,
+                    &self.vision_port,
                     &self.template_env,
                     &ref_url,
                     &query_url,
@@ -884,7 +975,7 @@ impl MediaServer {
                 "SELECT absolute_path FROM gallery_images WHERE id = ?1 AND gallery_id = ?2",
                 &[
                     DbValue::Text(image_id.to_string()),
-                    DbValue::Text(ga.gallery_id.to_string()),
+                    DbValue::Text(ga.gallery_id),
                 ],
             )
             .map_err(|e| MediaError::ImageNotFound(format!("Image not found: {}", e)))?;
@@ -928,30 +1019,35 @@ impl MediaServer {
     }
 
     /// Resolve the best available vision model with fallback chain.
-    /// Tries: fal.ai → DeepInfra → OpenRouter → Together AI.
+    /// Tries: DeepInfra → OpenRouter.
     /// Returns (model_name, label) or None if no vision provider is configured.
     async fn resolve_vision_model(&self) -> Option<(&'static str, &'static str)> {
-        let models = self.inference.list_vision_models().await;
+        let models = match self.vision_port.list_vision_models().await {
+            Ok(models) => models,
+            Err(e) => {
+                tracing::warn!(
+                    target: "hkask.media",
+                    error = %e,
+                    "list_vision_models failed — inference port unavailable, returning None"
+                );
+                return None;
+            }
+        };
 
         for model in &models {
-            // Check the provider prefix in the model name.
+            // Check the provider prefix in the model name (case-insensitive —
+            // the IPC bridge returns zed provider ids like "deepinfra" (a
+            // standalone MediaRouter is media-only and returns no chat models).
             let prefix = model.prefixed_name.split('/').next().unwrap_or("");
-            match prefix {
-                "FA" => {
-                    // Qwen2.5-VL 72B — Apache 2.0 open-weight, served by fal.ai
-                    return Some(("fal.ai/Qwen/Qwen2.5-VL-72B-Instruct", "qwen2.5-vl-72b"));
-                }
-                "DI" => {
+            match prefix.to_ascii_lowercase().as_str() {
+                "deepinfra" => {
                     return Some((
                         "DeepInfra/meta-llama/Llama-3.2-11B-Vision-Instruct",
                         "llama-3.2-vision",
                     ));
                 }
-                "OR" => {
+                "openrouter" => {
                     return Some(("OpenRouter/qwen/qwen-2.5-vl-72b-instruct", "qwen2.5-vl-72b"));
-                }
-                "TG" => {
-                    return Some(("Together AI/Qwen/Qwen2.5-VL-72B-Instruct", "qwen-vl"));
                 }
                 _ => continue,
             }
@@ -1023,7 +1119,7 @@ impl MediaServer {
     ) -> (u32, Vec<String>) {
         let (vision_model, vision_label) = match self.resolve_vision_model().await {
             Some(v) => v,
-            None => return (0, vec!["No vision model available — configure a vision-capable provider (DeepInfra, OpenRouter, or Together AI)".to_string()]),
+            None => return (0, vec!["No vision model available — configure a vision-capable provider (DeepInfra, OpenRouter, or fal.ai)".to_string()]),
         };
         let mut analyzed = 0u32;
         let mut errors = Vec::new();
@@ -1052,7 +1148,7 @@ impl MediaServer {
 
             if run_faces {
                 match vision::detect_faces(
-                    &self.inference,
+                    &self.vision_port,
                     &self.template_env,
                     &image_url,
                     Some(vision_model),
@@ -1073,7 +1169,7 @@ impl MediaServer {
 
             if run_objects {
                 match vision::detect_objects(
-                    &self.inference,
+                    &self.vision_port,
                     &self.template_env,
                     &image_url,
                     Some(vision_model),
@@ -1094,7 +1190,7 @@ impl MediaServer {
 
             if run_colors {
                 match vision::analyze_colors(
-                    &self.inference,
+                    &self.vision_port,
                     &self.template_env,
                     &image_url,
                     Some(vision_model),
@@ -1122,7 +1218,7 @@ impl MediaServer {
 
             if run_composition {
                 match vision::analyze_composition(
-                    &self.inference,
+                    &self.vision_port,
                     &self.template_env,
                     &image_url,
                     Some(vision_model),
@@ -1153,7 +1249,7 @@ impl MediaServer {
 
             if run_scene {
                 match vision::caption_scene(
-                    &self.inference,
+                    &self.vision_port,
                     &self.template_env,
                     &image_url,
                     Some(vision_model),
@@ -1202,13 +1298,13 @@ impl MediaServer {
         ];
 
         for (code, name) in tag_map {
-            if let Some(entry) = exif.get_by_code(nom_exif::IfdIndex::MAIN, *code) {
-                if let Some(value_str) = entry.as_str() {
-                    fields.insert(
-                        name.to_string(),
-                        serde_json::Value::String(value_str.to_string()),
-                    );
-                }
+            if let Some(entry) = exif.get_by_code(nom_exif::IfdIndex::MAIN, *code)
+                && let Some(value_str) = entry.as_str()
+            {
+                fields.insert(
+                    name.to_string(),
+                    serde_json::Value::String(value_str.to_string()),
+                );
             }
         }
 
@@ -1255,10 +1351,10 @@ fn load_meme_font(font_path: Option<&str>) -> Result<ab_glyph::FontVec, MediaErr
     ];
 
     for path in &candidates {
-        if let Ok(data) = std::fs::read(path) {
-            if let Ok(font) = ab_glyph::FontVec::try_from_vec(data) {
-                return Ok(font);
-            }
+        if let Ok(data) = std::fs::read(path)
+            && let Ok(font) = ab_glyph::FontVec::try_from_vec(data)
+        {
+            return Ok(font);
         }
     }
 
@@ -1274,6 +1370,56 @@ fn measure_text(font: &ab_glyph::FontVec, scale: ab_glyph::PxScale, text: &str) 
     }
     let height = (font.ascent_unscaled() * scale.y / font.height_unscaled()).ceil() as u32;
     (total_width.ceil() as u32, height)
+}
+
+/// Draw text onto an image with alpha-blended glyph rasterization.
+///
+/// Replaces `imageproc::drawing::draw_text_mut` — uses only `ab_glyph`'s
+/// built-in rasterizer + `image` pixel manipulation, dropping `imageproc`
+/// and its `nalgebra` transitive dep tree (~155 packages).
+fn draw_text_mut(
+    img: &mut image::DynamicImage,
+    color: image::Rgba<u8>,
+    x: i32,
+    y: i32,
+    scale: ab_glyph::PxScale,
+    font: &ab_glyph::FontVec,
+    text: &str,
+) {
+    use ab_glyph::{Font, ScaleFont};
+    let scaled = font.as_scaled(scale);
+    let mut pen = ab_glyph::point(x as f32, y as f32 + scaled.ascent());
+    let Some(img_buf) = img.as_mut_rgba8() else {
+        return;
+    };
+    for ch in text.chars() {
+        let mut glyph = scaled.scaled_glyph(ch);
+        glyph.position = pen;
+        let advance = scaled.h_advance(glyph.id);
+        if let Some(outlined) = scaled.outline_glyph(glyph) {
+            let bb = outlined.px_bounds();
+            outlined.draw(|gx, gy, coverage| {
+                let px = (bb.min.x + gx as f32) as i32;
+                let py = (bb.min.y + gy as f32) as i32;
+                if px >= 0
+                    && py >= 0
+                    && (px as u32) < img_buf.width()
+                    && (py as u32) < img_buf.height()
+                {
+                    let pixel = img_buf.get_pixel_mut(px as u32, py as u32);
+                    let alpha = (coverage * 255.0).round() as u8;
+                    if alpha > 0 {
+                        for i in 0..4 {
+                            pixel[i] = ((pixel[i] as u32 * (255 - alpha as u32)
+                                + color[i] as u32 * alpha as u32)
+                                / 255) as u8;
+                        }
+                    }
+                }
+            });
+        }
+        pen.x += advance;
+    }
 }
 
 /// Cosine similarity between two vectors.
@@ -1321,10 +1467,15 @@ struct FaceSidecar {
 /// and face reference imports. Kept in sync with `gallery::state::DEFAULT_EXTENSIONS`.
 pub const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif"];
 
-/// Resolve the default face reference folder: `~/.hkask/faces/`.
-/// Returns `None` if `HOME` is not set.
+/// Resolve the default face reference folder: `{kask_data_dir}/mcp/media/faces/`.
+/// Returns `None` if the data dir cannot be resolved.
 fn default_face_folder() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".hkask").join("faces"))
+    let dir =
+        hkask_types::agent_paths::resolve_under_data_dir(std::path::Path::new("mcp/media/faces"));
+    if let Some(parent) = dir.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    Some(dir)
 }
 
 // ── Combined tool router (P5 Essentialism — modular tool groups) ──────────
@@ -1336,28 +1487,139 @@ impl MediaServer {
             + Self::audio_router()
             + Self::generation_router()
     }
+
+    /// Map a tool name to its OMC concept URI. The concept tags the
+    /// `reg.tool.*` span (via `execute_tool_semantic`) for type-aware feedback
+    /// routing — complementary to the output-JSON tag baked by
+    /// `media_block::enrich_with_omc_and_provenance` (which the media widget
+    /// consumes for UI dispatch). Delegates to `omc::tool_to_omc` — the single
+    /// source of truth for the tool → concept mapping.
+    fn ontology_anchor(tool: &str) -> Option<&'static str> {
+        crate::omc::tool_to_omc(tool)
+    }
 }
 
 #[rmcp::tool_handler(router = Self::combined_router())]
 impl rmcp::ServerHandler for MediaServer {}
 
+#[cfg(test)]
+mod tool_surface_tests {
+    use super::*;
+
+    // Pins the registered tool-surface count end-to-end. Catches silent
+    // registration drops — a `#[tool]` impl block without `#[tool_router]`, or
+    // a sub-router missing from `combined_router()`, silently registers nothing
+    // (`cargo check` passes on an unwired orphan). Mirrors the swarm pin.
+    #[test]
+    fn tool_surface_is_exactly_41_registered_tools() {
+        let n = MediaServer::combined_router().list_all().len();
+        assert_eq!(n, 41, "media registered tool surface changed; got {n}");
+    }
+
+    // Coverage: every registered tool must have a non-None ontology anchor.
+    // Catches the silent-drop failure mode where a new tool is added to the
+    // router without a corresponding arm in omc::tool_to_omc.
+    #[test]
+    fn ontology_anchor_covers_all_registered_tools() {
+        let router = MediaServer::combined_router();
+        for tool in router.list_all() {
+            assert!(
+                MediaServer::ontology_anchor(&tool.name).is_some(),
+                "ontology_anchor returned None for registered tool '{}'; \
+                 add an explicit arm in omc::tool_to_omc",
+                tool.name
+            );
+        }
+    }
+
+    // Regression: distinct tool families must anchor on distinct concepts.
+    #[test]
+    fn ontology_anchor_distinguishes_tool_families() {
+        let creative = MediaServer::ontology_anchor("generate_image");
+        let version = MediaServer::ontology_anchor("transform_image");
+        let scene = MediaServer::ontology_anchor("describe_image");
+        let asset = MediaServer::ontology_anchor("gallery_organize");
+        let source = MediaServer::ontology_anchor("generate_speech");
+        let sequence = MediaServer::ontology_anchor("video_clip");
+        let shot = MediaServer::ontology_anchor("video_extract_frames");
+        let task = MediaServer::ontology_anchor("gallery_record_generation");
+        // Eight distinct concepts across eight tool families.
+        let concepts = [
+            creative, version, scene, asset, source, sequence, shot, task,
+        ];
+        for (i, a) in concepts.iter().enumerate() {
+            for (j, b) in concepts.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        a, b,
+                        "tool families {i} and {j} must anchor on distinct concepts"
+                    );
+                }
+            }
+        }
+        assert_eq!(creative, Some("omc:CreativeWork"));
+        assert_eq!(version, Some("omc:Version"));
+        assert_eq!(scene, Some("omc:Scene"));
+        assert_eq!(asset, Some("omc:Asset"));
+        assert_eq!(source, Some("omc:MediaSource"));
+        assert_eq!(sequence, Some("omc:Sequence"));
+        assert_eq!(shot, Some("omc:Shot"));
+        assert_eq!(task, Some("omc:Task"));
+    }
+}
+
 /// Run the media MCP server (used by binary target).
 pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
-    dotenvy::dotenv().ok();
+    // Do NOT call `dotenvy::dotenv()` here — it mutates the process
+    // environment via `set_var`, which contradicts the `load_dotenv()`
+    // design. `run_server` calls `load_dotenv` internally.
 
-    // Build the inference router for vision LLM tasks.
-    // Backends are constructed lazily — only those with configured API keys are available.
-    let inference_config = hkask_inference::InferenceConfig::from_env();
-    let inference = Arc::new(InferenceRouter::new(inference_config));
+    // Resolve the inference port — routes through zed's LanguageModelRegistry
+    // via the IPC bridge when `HKASK_INFERENCE_SOCKET` is set, falling back to
+    // a standalone `MediaRouter` with env-var keys otherwise. The same
+    // port handles vision/chat AND media generation (image/video/speech/
+    // transcription) — `InferencePort::media_generate` is overridden by
+    // `InferenceIpcClient` to proxy media calls through the IPC bridge.
+    let vision_port = hkask_inference::resolve_inference_port().await;
 
-    // Create an in-memory GalleryStore for the media server.
-    // Gracefully degrade if DB initialization fails — gallery tools
-    // will return errors but the server stays alive.
-    // GalleryStore schema initialized by from_driver().
+    // Build the GalleryStore. Durable (file-backed SQLite) at
+    // `{kask_data_dir}/mcp/media/gallery.db` (D28 — Standardized Artifact
+    // Storage), or override via `HKASK_MEDIA_DB`; otherwise in-memory
+    // (tag/face/lineage metadata is lost on restart — the G14 gap, now
+    // opt-in rather than forced). The file DB is unencrypted (gallery
+    // metadata is not a secret), so it does NOT use `HKASK_DB_PASSPHRASE` —
+    // avoiding leaking the global SQLCipher key to this child process. Schema
+    // is initialized by `from_driver()`.
     let gallery_store = {
-        let db = Database::in_memory().expect("in-memory DB");
-        let pool = db.sqlite_pool().expect("sqlite pool");
-        let driver = Arc::new(SqliteDriver::new(pool));
+        let default_media_db = hkask_types::agent_paths::resolve_under_data_dir(
+            &hkask_types::agent_paths::mcp_server_db("media", "gallery"),
+        );
+        let db_path = std::env::var("HKASK_MEDIA_DB")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or(default_media_db);
+        let db_path_str = db_path.to_string_lossy().to_string();
+        let driver: Arc<dyn hkask_storage::database::driver::DatabaseDriver> =
+            match SqliteDriver::file_pool(&db_path_str) {
+                Ok(pool) => {
+                    tracing::info!(
+                        target: "hkask.mcp.media",
+                        path = %db_path_str,
+                        "Gallery store using durable file DB"
+                    );
+                    Arc::new(SqliteDriver::new_labeled(pool, db_path_str.as_str()))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "hkask.mcp.media",
+                        path = %db_path_str,
+                        error = %e,
+                        "Gallery DB open failed — falling back to in-memory gallery DB"
+                    );
+                    SqliteDriver::in_memory_driver()
+                }
+            };
         match GalleryStore::from_driver(driver) {
             Ok(store) => {
                 tracing::info!(target: "hkask.mcp.media", "Gallery store initialized");
@@ -1374,31 +1636,73 @@ pub async fn run() -> Result<(), hkask_mcp_server::McpError> {
         "hkask-mcp-media",
         env!("CARGO_PKG_VERSION"),
         |ctx: hkask_mcp_server::ServerContext| {
+            let media_budget = build_media_budget().map_err(|e| {
+                hkask_mcp_server::McpError::UnexpectedResponse {
+                    context: "media budget init".into(),
+                    detail: e.to_string(),
+                }
+            })?;
             Ok(MediaServer::new(
                 ctx.webid,
-                inference.clone(),
+                vision_port.clone(),
                 Arc::new(Mutex::new(None)),
                 gallery_store.clone(),
                 templates::create_env(),
                 FfmpegRunner::detect(),
+                media_budget,
             ))
         },
-        vec![
-            hkask_mcp_server::CredentialRequirement::optional(
-                "DEEPINFRA_API_KEY",
-                "DeepInfra API key for vision LLMs and media generation",
-            ),
-            hkask_mcp_server::CredentialRequirement::optional(
-                "FALAI_API_KEY",
-                "fal.ai API key for image/video generation",
-            ),
-            hkask_mcp_server::CredentialRequirement::optional(
-                "TOGETHERAI_API_KEY",
-                "Together AI API key for vision LLMs",
-            ),
-        ],
+        vec![hkask_mcp_server::CredentialRequirement::optional(
+            "DEEPINFRA_API_KEY",
+            "DeepInfra API key for vision LLMs and media generation",
+        )],
     )
     .await
+}
+
+// ── Dead-surface removal pins ────────────────────────────────────────────
+//
+// The MovieLabs OMC bridge was removed: it had zero call sites — write-only
+// documentation masquerading as architecture (the "advertised invariants need
+// enforcement points" trap). This test pins the removal so the module is not
+// re-added with a consumer. See kask/docs/plans/media-system-refactor.md
+// §6 (F-1).
+#[cfg(test)]
+mod dead_surface_pins {
+    /// The OMC bridge module was re-added on 2026-08-05 with a consumer: the
+    /// `media_block::enrich_with_omc_and_provenance` function references
+    /// `omc::tool_to_omc` to bake OMC concept tags into the `display_hint`
+    /// block body. This test pins the ENFORCEMENT (the call site), not the
+    /// absence — per `.rules` "Advertised invariants need enforcement points",
+    /// a module with no consumer is dead surface regardless of its doc
+    /// comments.
+    #[test]
+    fn omc_module_present_with_consumer() {
+        // The source file must exist.
+        let omc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/omc.rs");
+        assert!(
+            omc_path.exists(),
+            "src/omc.rs must exist — it is the MovieLabs OMC bridge"
+        );
+        // The lib root must declare the module.
+        let lib_root = include_str!("hkask_mcp_media.rs");
+        let declared = lib_root.lines().any(|line| {
+            let t = line.trim();
+            t == "pub mod omc;" || t == "mod omc;"
+        });
+        assert!(declared, "the omc module must be declared in the lib root");
+        // The media_block module must reference the omc module — the consumer.
+        // A line-level scan avoids matching this test's own text.
+        let media_block = include_str!("media_block.rs");
+        let has_consumer = media_block
+            .lines()
+            .any(|line| line.contains("crate::omc") || line.contains("use crate::omc"));
+        assert!(
+            has_consumer,
+            "media_block.rs must reference the omc module — \
+             a module without a consumer is dead surface"
+        );
+    }
 }
 
 // ── Integration tests ────────────────────────────────────────────────────
@@ -1737,5 +2041,83 @@ mod integration_tests {
 
         let pending = store.list_faces(Some("pending")).unwrap();
         assert_eq!(pending.len(), 0);
+    }
+
+    #[test]
+    fn gallery_lineage_record_and_replay_round_trip() {
+        let (store, temp) = setup_store();
+        let gallery = store
+            .create(&temp.path().to_string_lossy(), GalleryMode::ReadOnly)
+            .unwrap();
+        create_test_image(temp.path(), "gen.png", 10, 20, 30);
+        let img = store
+            .add_image(
+                &gallery.id,
+                "gen.png",
+                temp.path().join("gen.png").to_str().unwrap(),
+                "hash-gen",
+                64,
+                64,
+                "png",
+                1024,
+            )
+            .unwrap();
+
+        // Record the lineage a generation tool would attach after producing
+        // this image (the gallery_record_generation tool wraps this call).
+        let wf = store
+            .record_workflow("{\"nodes\":[],\"parallel\":false}")
+            .unwrap();
+        let params_json = serde_json::json!({ "size": "1024x1024" }).to_string();
+        let record = store
+            .record_generation(
+                &img.id,
+                "generate_image",
+                Some("a serene mountain landscape"),
+                Some("fal-ai/flux/dev"),
+                Some("fal.ai"),
+                Some(12345),
+                Some(&params_json),
+                Some(&wf.id),
+                None,
+            )
+            .unwrap();
+        assert_eq!(record.op, "generate_image");
+
+        // Re-read the lineage (what gallery_lineage returns).
+        let lineage = store
+            .get_generation(&img.id)
+            .unwrap()
+            .expect("lineage should be recorded");
+        assert_eq!(lineage.op, "generate_image");
+        assert_eq!(
+            lineage.prompt.as_deref(),
+            Some("a serene mountain landscape")
+        );
+        assert_eq!(lineage.model.as_deref(), Some("fal-ai/flux/dev"));
+        assert_eq!(lineage.provider.as_deref(), Some("fal.ai"));
+        assert_eq!(lineage.seed, Some(12345));
+        assert_eq!(lineage.workflow_id.as_deref(), Some(wf.id.as_str()));
+        // The stored params JSON round-trips — this is what gallery_reproduce
+        // deserializes to replay the generation.
+        let replay: serde_json::Value =
+            serde_json::from_str(lineage.params.as_deref().unwrap()).unwrap();
+        assert_eq!(replay["size"], "1024x1024");
+
+        // No lineage for an unrelated image.
+        create_test_image(temp.path(), "other.png", 1, 2, 3);
+        let other = store
+            .add_image(
+                &gallery.id,
+                "other.png",
+                temp.path().join("other.png").to_str().unwrap(),
+                "hash-other",
+                64,
+                64,
+                "png",
+                1024,
+            )
+            .unwrap();
+        assert!(store.get_generation(&other.id).unwrap().is_none());
     }
 }

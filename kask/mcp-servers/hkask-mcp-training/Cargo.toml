@@ -14,12 +14,14 @@ name = "hkask-mcp-training"
 path = "src/main.rs"
 
 [dependencies]
-hkask-mcp-server = { path = "../../crates/hkask-mcp-server" }
-hkask-types = { path = "../../crates/hkask-types" }
-hkask-capability = { path = "../../crates/hkask-capability" }
-hkask-memory = { path = "../../crates/hkask-memory" }
-hkask-storage = { path = "../../crates/hkask-storage" }
-hkask-inference = { path = "../../crates/hkask-inference" }
+hkask-mcp-server.workspace = true
+hkask-types.workspace = true
+
+hkask-memory.workspace = true
+hkask-storage.workspace = true
+hkask-inference.workspace = true
+# Ontology vocabulary bridge — concept URIs for the reg.tool span ontology tag.
+hkask-bridge-ontology.workspace = true
 rusqlite.workspace = true
 r2d2.workspace = true
 r2d2_sqlite.workspace = true
@@ -39,9 +41,12 @@ blake3.workspace = true
 reqwest = { workspace = true, features = ["multipart"] }
 
 sha2.workspace = true
-hf-hub = "1.0.0"
+hf-hub.workspace = true
 minijinja.workspace = true
-dirs = "5"
+dirs.workspace = true
+
+[lints]
+workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

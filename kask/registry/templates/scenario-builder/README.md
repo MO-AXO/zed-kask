@@ -2,7 +2,7 @@
 
 **Location:** `registry/manifests/scenario-builder.yaml`  
 **Templates:** `registry/templates/scenario-builder/`  
-**Version:** 0.31.0
+**Version:** 0.34.0
 
 ## Overview
 
@@ -66,7 +66,7 @@ The pipeline emits Regulation spans for monitoring:
 - `hkask.template.render` — Template execution at each step
 - `hkask.template.outcome` — Scenario set finalized
 
-## OCAP Requirements
+## Capability Requirements
 
 The pipeline requires template render permissions for all 7 templates plus manifest execution permission. All capabilities are template-scoped and expire after 3600 seconds.
 
@@ -78,19 +78,6 @@ The pipeline requires template render permissions for all 7 templates plus manif
 | Timeout | Retry (max 1, 1s backoff) |
 | Validation failure | Abort |
 | Capability denied | Escalate to Curator |
-
-,## Fusion Mode
-
-This skill supports **fusion mode** via the `fusion: true` field in the flow
-manifest. When fusion is globally enabled (env vars or `/fusion on`), all
-analysis steps route through a multi-model panel — either with LLM judge
-synthesis or the **algo / no-judge** path (`judge: algo`) for deterministic
-JSON merge without an LLM judge call.
-
-The quality gate (step 5) and convergence check (step 7) have `fusion: false`
-set explicitly — deterministic rubric evaluations use single-model inference.
-
-See the superforecasting README for full fusion configuration details.
 
 ## Future Enhancements
 

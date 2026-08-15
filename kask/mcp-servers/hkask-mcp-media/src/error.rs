@@ -53,6 +53,12 @@ pub enum MediaError {
     /// Face scan: image import or registration failure.
     #[error("{0}")]
     FaceRegistration(String),
+
+    /// Startup rJoule budget configuration error (e.g. malformed
+    /// `HKASK_MEDIA_RJOULE_CAP`). Fail-closed on a cost-control setting: a typo
+    /// in the cap must not silently remove the spend ceiling.
+    #[error("{0}")]
+    BudgetConfig(String),
 }
 
 impl From<std::io::Error> for MediaError {
@@ -94,6 +100,41 @@ pub fn map_media_error(e: MediaError) -> McpToolError {
         | MediaError::Template(_)
         | MediaError::SidecarNotFound(_)
         | MediaError::SidecarInvalid(_)
-        | MediaError::FaceRegistration(_) => McpToolError::internal(e.to_string()),
+        | MediaError::FaceRegistration(_)
+        | MediaError::BudgetConfig(_) => McpToolError::internal(e.to_string()), // rr0044-ok: mapper-internal-arm
+    }
+}
+
+/// Classify a `GalleryStoreError` from a gallery-store query into the MCP
+/// wire-level `McpToolError` kind: `NotFound` → `not_found`, infrastructure
+/// → per-variant via the shared `map_infra_error`, `InvalidMode` /
+/// `AlreadyExists` are caller-fixable (`invalid_argument`).
+pub fn map_gallery_store_error(e: GalleryStoreError) -> McpToolError {
+    let message = e.to_string();
+    match e {
+        GalleryStoreError::NotFound(_) => McpToolError::not_found(message),
+        GalleryStoreError::Infra(ref infra) => {
+            hkask_mcp_server::server::map_infra_error(infra, "gallery store")
+        }
+        GalleryStoreError::InvalidMode(_) | GalleryStoreError::AlreadyExists(_) => {
+            McpToolError::invalid_argument(message)
+        }
+    }
+}
+
+/// Classify an `image::open` failure on a caller-referenced path.
+///
+/// A missing file is `not_found` and a permission failure is
+/// `permission_denied` (caller/environment errors); other I/O kinds and
+/// opaque decode failures stay `internal`.
+pub fn map_image_open_error(path: &std::path::Path, e: image::ImageError) -> McpToolError {
+    let message = format!("Failed to open {}: {}", path.display(), e);
+    match e {
+        image::ImageError::IoError(io) => match io.kind() {
+            std::io::ErrorKind::NotFound => McpToolError::not_found(message),
+            std::io::ErrorKind::PermissionDenied => McpToolError::permission_denied(message),
+            _ => McpToolError::internal(message), // rr0044-ok: mapper-internal-arm
+        },
+        _ => McpToolError::internal(message), // rr0044-ok: mapper-internal-arm
     }
 }

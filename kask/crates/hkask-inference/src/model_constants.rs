@@ -12,16 +12,15 @@
 
 /// Canonical classifier model for all classification surfaces (corpus
 /// pipeline, QA triage, convergence evaluation, h_mem extraction).
-/// Qwen3-235B-A22B-Instruct: 235B total, 22B active MoE, hosted on DeepInfra.
+/// DeepSeek V4 Flash via OpenRouter: fast, cheap, strong classification quality.
 ///
 /// This is the single source of truth for the classifier model id. Every
 /// call site resolves it via [`classifier_model`] (env `HKASK_CLASSIFIER_MODEL`
 /// → this constant). Registry YAMLs in `registry/classify/` leave their
 /// `model:` field empty to defer to this path; `ClassifierConfig::from_def`
-/// strips the `DeepInfra/` router prefix before sending the raw id to the provider.
-/// Fusion orchestration (algo or LLM judge) merges panel outputs; see
-/// `fusion_orchestrator`.
-pub const DEFAULT_CLASSIFIER_MODEL: &str = "DeepInfra/Qwen/Qwen3-235B-A22B-Instruct-2507";
+/// passes the full provider-prefixed string to `InferencePort::generate_with_model`,
+/// and the `LanguageModelRegistry` resolves the `OpenRouter/` prefix to the provider.
+pub const DEFAULT_CLASSIFIER_MODEL: &str = "OpenRouter/deepseek/deepseek-v4-flash";
 
 /// Default embedding model.
 pub const DEFAULT_EMBEDDING_MODEL: &str = "DeepInfra/Qwen/Qwen3-Embedding-0.6B";
@@ -31,24 +30,21 @@ pub const DEFAULT_EMBEDDING_MODEL: &str = "DeepInfra/Qwen/Qwen3-Embedding-0.6B";
 pub const DEFAULT_OCR_MODEL: &str = "RunPod/kask-ocr";
 
 /// Fallback model when no other model is configured.
-/// Prefixed with `KiloCode/` so it routes to KiloCode (which hosts this exact id).
+/// Prefixed with `OpenRouter/` so it routes to OpenRouter (which hosts this exact id).
 /// Matches `InferenceConfig::from_env()` default.
 pub const DEFAULT_FALLBACK_MODEL: &str = "OpenRouter/z-ai/glm-5.2";
 
-/// Default TTS (text-to-speech) model.
-pub const DEFAULT_TTS_MODEL: &str = "fal.ai/Qwen3-TTS";
+/// Default TTS model — DeepInfra Kokoro-82B (DeepInfraBackend::generate_speech default).
+pub const DEFAULT_TTS_MODEL: &str = "DeepInfra/hexgrad/Kokoro-82M";
 
-/// Default STT (speech-to-text) model.
-pub const DEFAULT_STT_MODEL: &str = "fal.ai/wizper";
+/// Default STT model — DeepInfra Whisper (DeepInfraBackend::transcribe endpoint).
+pub const DEFAULT_STT_MODEL: &str = "DeepInfra/whisper-large-v3";
 
 /// Default vision model for image analysis.
-pub const DEFAULT_VISION_MODEL: &str = "KiloCode/Qwen/Qwen3-VL-235B-A22B-Instruct";
+pub const DEFAULT_VISION_MODEL: &str = "OpenRouter/Qwen/Qwen3-VL-235B-A22B-Instruct";
 
-/// Default image generation model.
-pub const DEFAULT_IMAGE_GEN_MODEL: &str = "fal.ai/flux-2";
-
-/// Default QA model.
-pub const DEFAULT_QA_MODEL: &str = "OpenRouter/zai-org/GLM-5.2";
+/// Default image-gen model — DeepInfra FLUX-2-klein-4B (DeepInfraBackend::generate_image).
+pub const DEFAULT_IMAGE_GEN_MODEL: &str = "DeepInfra/black-forest-labs/FLUX-2-klein-4b";
 
 // ── Test fixtures (arbitrary identifiers, no network calls) ──────────────
 

@@ -13,10 +13,32 @@ use super::cascade::CascadePhase;
 use super::composition::{BundleComplementarity, BundleConflict};
 use super::config::{
     BundleAuditConfig, BundleGasConfig, BundleLedgerConfig, ConvergenceConfig, ErrorHandlingConfig,
-    OcapConfig, RjouleConfig,
+    RjouleConfig,
 };
 use hkask_types::SkillPolarity;
 use hkask_types::Visibility;
+
+/// Default concurrency for step execution within a PDCA iteration.
+const DEFAULT_CONCURRENCY: u32 = 32;
+
+/// Default per-step timeout in seconds. Used when a manifest step omits
+/// `timeout_seconds` — serde's `#[serde(default = "default_timeout_seconds")]`
+/// calls this function instead of `u32::default()` (0). A zero timeout
+/// causes `tokio::time::timeout` to fire immediately without polling the
+/// future, silently breaking every `select` (inference) and `execute` (tool)
+/// step that doesn't explicitly set a timeout.
+const DEFAULT_STEP_TIMEOUT_SECONDS: u32 = 120;
+
+pub(crate) fn default_concurrency() -> u32 {
+    DEFAULT_CONCURRENCY
+}
+
+pub(crate) fn default_timeout_seconds() -> u32 {
+    DEFAULT_STEP_TIMEOUT_SECONDS
+}
+
+/// Maximum allowed concurrency (safety cap).
+pub const MAX_CONCURRENCY: u32 = 128;
 
 /// A skill reference within a bundle
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,7 +46,6 @@ use hkask_types::Visibility;
 pub struct BundleSkill {
     pub id: String,
     pub polarity: SkillPolarity,
-    pub lexicon_terms: Vec<String>,
     pub manifest_ref: String,
     pub content_hash: String,
 }
@@ -39,6 +60,13 @@ pub struct BundleManifestStep {
     pub renderer: Option<String>,
     pub template_ref: Option<String>,
     pub mcp: Option<String>,
+    /// Optional string identifier for the step. Used by pipeline manifests
+    /// that reference steps by name (e.g. `resume_from: "extract_text"`).
+    /// Skill manifests use `ordinal` exclusively; `id` is `None` for them.
+    /// When present, it supplements `ordinal` as a human-readable alias —
+    /// the executor still indexes by `StepId` (vector position).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// Canonical computation function to invoke for `action: compute` steps.
     /// Names a `hkask_forecast::*` primitive (e.g. "calibrate_from_fermi",
     /// "outside_view_adjustment", "bayesian_update", "apply_calibration_adjustment",
@@ -52,7 +80,9 @@ pub struct BundleManifestStep {
     #[serde(default)]
     pub gas_cap: u32,
     /// Per-step timeout in seconds (hard — enforced via tokio::time::timeout).
-    #[serde(default)]
+    /// Defaults to 120s when omitted — a zero timeout fires immediately without
+    /// polling the future, silently breaking inference and tool calls.
+    #[serde(default = "default_timeout_seconds")]
     pub timeout_seconds: u32,
     #[serde(default)]
     pub input_mapping: Option<serde_json::Value>,
@@ -66,14 +96,63 @@ pub struct BundleManifestStep {
     /// "a AND b" (both truthy), "a OR b" (either truthy).
     #[serde(default)]
     pub condition: Option<String>,
-    /// Per-step fusion override. When `Some(true)`, this step routes through
-    /// the fusion multi-model panel even if the manifest-level fusion is false.
-    /// When `Some(false)`, this step bypasses fusion even if the manifest-level
-    /// fusion is true. When `None`, inherits the manifest-level fusion setting.
-    /// Convergence checks and gates typically set `fusion: false` to avoid
-    /// multi-model deliberation on deterministic rubric evaluation.
+    /// Branching map: maps a routing key (read from the step result's
+    /// `branching_field`, default "routing") to a target step ordinal. When
+    /// present, the executor reads the routing key from the step result after
+    /// execution and jumps to the target step instead of continuing to the
+    /// next ordinal. Enables `select` and `execute` steps to route based on
+    /// their own output (e.g., a proptest fail → re-enter the tracer, a
+    /// bug-hunt gap → re-enter the plan). If the routing field is absent or
+    /// does not match any key, execution continues to the next ordinal
+    /// (safe default — no branching).
     #[serde(default)]
-    pub fusion: Option<bool>,
+    pub branching: Option<std::collections::HashMap<String, u32>>,
+    /// The field name in the step result to read for `branching` lookup.
+    /// Defaults to "routing". The step result's field value (a string) must
+    /// match a key in `branching`.
+    #[serde(default)]
+    pub branching_field: Option<String>,
+    /// Agent profile required for this step. When present, the executor verifies
+    /// that the `terminal` tool is NOT available — enforcing proposer/evaluator
+    /// separation (a proposer with `terminal` can evaluate its own tests, a
+    /// self-confirming loop anti-pattern). The check uses a `terminal_check`
+    /// callback (wired by the bridge with `AgentProfileSettings::is_tool_enabled`)
+    /// when available; falls back to `ToolPort::discover_tools()` (MCP tools
+    /// only — won't find built-in `terminal` in production) when the callback
+    /// is absent. Production enforcement requires the bridge to wire the
+    /// callback via `ManifestExecutor::with_terminal_check`.
+    /// Example: `profile: ask` (the built-in `ask` profile omits `terminal`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Shell command for `action: gate` steps. The executor runs this via
+    /// `std::process::Command::new("sh").arg("-c").arg(command)`, captures
+    /// stdout/stderr, and checks the last non-empty line for `GATE_PASS` or
+    /// `GATE_FAIL`. A non-zero exit code is also a failure. The full stdout
+    /// is stored as the step result for downstream inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Per-step failure handling. When present and the step fails (gate
+    /// failure, tool error, or timeout exhaustion), the executor applies
+    /// this instead of the manifest-level `error_handling` policy.
+    /// `action: halt` produces `Effect::Exit(ExitKind::Escalated)` with the
+    /// `resume` text; `action: escalate` is an alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<OnFailureConfig>,
+}
+
+/// Per-step failure handling configuration for pipeline manifests.
+/// Allows each step to declare its own failure behavior instead of relying
+/// solely on the manifest-level `error_handling` policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnFailureConfig {
+    /// What to do when the step fails: `halt` (stop the cascade, escalate)
+    /// or `escalate` (alias for `halt`).
+    pub action: String,
+    /// Human-readable instruction for how to resume from this failure.
+    /// Stored in the step result and surfaced to the operator.
+    #[serde(default)]
+    pub resume: String,
 }
 
 impl BundleManifestStep {
@@ -103,7 +182,6 @@ pub struct BundleManifest {
     pub gas: BundleGasConfig,
     pub rjoule: RjouleConfig,
     pub error_handling: ErrorHandlingConfig,
-    pub ocap: OcapConfig,
     pub ledger: BundleLedgerConfig,
     pub audit: BundleAuditConfig,
     #[serde(default)]
@@ -115,15 +193,35 @@ pub struct BundleManifest {
     pub category: Option<String>,
     #[serde(default)]
     pub inputs: Option<serde_json::Value>,
+    /// Opt-in to runtime validation of caller-supplied context against the
+    /// manifest's declared `inputs` (see `inputs::validate_inputs`). When
+    /// `Some(true)`, the skill executor rejects invocations that omit a
+    /// `required` input or supply a value whose JSON type does not match the
+    /// declared `type`. Unknown keys are warned, not rejected (manifests may
+    /// declare inputs sparsely). Default `None` = no validation, preserving
+    /// back-compat for skills whose required inputs are supplied programmatically
+    /// rather than via the interactive `skill` tool's `context` map.
+    #[serde(default)]
+    pub enforce_inputs: Option<bool>,
     #[serde(default)]
     pub principles: Option<serde_json::Value>,
-    /// Manifest-level fusion configuration. When `Some`, all steps in this
-    /// manifest route through this fusion config (panel models in parallel,
-    /// judge synthesizes). When `None`, follows the global default. Per-step
-    /// `fusion: Some(false)` bypasses fusion for that step; `fusion: Some(true)`
-    /// forces the manifest config even if the manifest-level config is None.
-    #[serde(default)]
-    pub fusion: Option<hkask_types::fusion::FusionConfig>,
+    /// Declared maximum number of steps to execute concurrently within a single
+    /// PDCA iteration. Default 32, max 128 (`MAX_CONCURRENCY`); set to 1 for
+    /// strictly serial execution.
+    ///
+    /// **Not yet enforced at the manifest level.** The kernel's `run_pass` is
+    /// strictly sequential; this field is parsed and round-tripped but has no
+    /// scheduling effect on the top-level iteration loop. `concurrency: 1` and
+    /// `concurrency: 32` produce identical output — pinned by
+    /// `executor_baseline_contract::concurrency_field_has_no_effect_today`.
+    ///
+    /// Concurrency is wired at the `parallel` step action level (slice K2) via
+    /// `input_mapping.concurrency_cap`, which bounds in-flight branch futures
+    /// (`futures::stream::buffer_unordered`). That is a per-step cap, not a
+    /// manifest-wide scheduler — the manifest-level `concurrency` field remains
+    /// advisory.
+    #[serde(default = "default_concurrency")]
+    pub concurrency: u32,
 }
 
 impl BundleManifest {
@@ -156,26 +254,6 @@ impl BundleManifest {
             errors.push(format!(
                 "Cascade depth exceeds matroshka limit ({} steps, max 7)",
                 self.steps.len()
-            ));
-        }
-        for skill in &self.skills {
-            if skill.lexicon_terms.len() > 10 {
-                errors.push(format!(
-                    "Skill '{}' has {} lexicon terms (max 10)",
-                    skill.id,
-                    skill.lexicon_terms.len()
-                ));
-            }
-        }
-        let all_terms: std::collections::HashSet<&str> = self
-            .skills
-            .iter()
-            .flat_map(|s| s.lexicon_terms.iter().map(|t| t.as_str()))
-            .collect();
-        if all_terms.len() > 30 {
-            warnings.push(format!(
-                "Bundle has {} unique lexicon terms (recommended max 30)",
-                all_terms.len()
             ));
         }
         // P1: No divergent + convergent in the same phase
@@ -326,5 +404,33 @@ impl ValidationResult {
     /// post: returns true if warnings is non-empty; false otherwise
     pub fn has_warnings(&self) -> bool {
         !self.warnings.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `timeout_seconds` defaults to 120 when omitted from a manifest step.
+    /// A zero timeout causes `tokio::time::timeout` to fire immediately without
+    /// polling the future, silently breaking every `select` (inference) and
+    /// `execute` (tool) step that doesn't explicitly set a timeout. This was
+    /// the root cause of skill cascades failing — the first `select` step would
+    /// time out at 0s before the inference call was even dispatched.
+    #[test]
+    fn timeout_seconds_defaults_to_nonzero_when_omitted() {
+        let yaml = r#"
+ordinal: 1
+action: select
+description: test
+renderer: default
+template_ref: test.j2
+"#;
+        let step: BundleManifestStep = serde_yaml_neo::from_str(yaml).expect("parses");
+        assert_eq!(
+            step.timeout_seconds, DEFAULT_STEP_TIMEOUT_SECONDS,
+            "timeout_seconds must default to {DEFAULT_STEP_TIMEOUT_SECONDS}, not 0 — \
+             a zero timeout breaks inference calls in the skill cascade"
+        );
     }
 }

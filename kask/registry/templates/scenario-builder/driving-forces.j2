@@ -1,17 +1,6 @@
 {# goal: Map macro-level driving forces (STEEP: society, technology, economy, environment, politics) against an importance-uncertainty matrix to identify critical uncertainties. #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- driving
-- macro
-- steep
-- society
-- technology
-- economy
-- environment
-- politics
-- uncertainty
-- matrix
 contract:
   input:
     refined_question: string
@@ -20,7 +9,6 @@ contract:
     driving_forces: array
     importance_uncertainty_matrix: object
     critical_uncertainties: array
-energy_cap: 4096
 visibility: Public
 ---
 {# Template: scenario-builder/driving-forces.j2 #}

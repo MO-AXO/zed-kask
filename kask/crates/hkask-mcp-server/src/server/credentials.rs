@@ -57,19 +57,16 @@ pub fn resolve_credential(env_var: &str) -> Result<String, hkask_keystore::Keyst
             let passphrase = hkask_keystore::keychain::resolve_db_passphrase_string()?;
             Ok(passphrase.to_string())
         }
-        "HKASK_OCAP_SECRET" => {
-            let bytes = hkask_keystore::keychain::get_or_create_ocap_secret()?;
-            Ok(hex::encode(&*bytes))
-        }
-        "HKASK_A2A_SECRET" => {
-            let bytes = hkask_keystore::keychain::resolve_a2a_secret()?;
-            Ok(hex::encode(&*bytes))
-        }
 
         _ => {
             // Unrecognized credential — try keychain, then env var.
+            // `retrieve_by_key` returns `Zeroizing<String>` (RR-0063). This
+            // function's contract is a plain `String` (the MCP `ServerContext`
+            // credential map is not zeroizing), so the wipe guarantee ends here;
+            // the keychain read itself no longer leaves a copy behind.
             let val = hkask_keystore::Keychain::default()
                 .retrieve_by_key(env_var)
+                .map(|secret| secret.to_string())
                 .or_else(|_| std::env::var(env_var))
                 .map_err(|_| {
                     hkask_keystore::KeystoreError::NotFound(hkask_types::NotFound {

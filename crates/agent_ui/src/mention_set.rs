@@ -424,7 +424,12 @@ impl MentionSet {
 
         let buffer = project.update(cx, |project, cx| project.open_buffer(project_path, cx));
         cx.spawn(async move |_, cx| {
-            let buffer = buffer.await?;
+            let buffer = match buffer.await {
+                Ok(buffer) => buffer,
+                Err(_error) => {
+                    return Ok(Mention::Link);
+                }
+            };
             let buffer_content = outline::get_buffer_content_or_outline(
                 buffer.clone(),
                 Some(&abs_path.to_string_lossy()),
@@ -492,14 +497,6 @@ impl MentionSet {
         skill_file_path: PathBuf,
         cx: &mut Context<Self>,
     ) -> Task<Result<Mention>> {
-        // Built-in skills have synthetic paths that don't exist on disk;
-        // serve their content directly from the compiled-in data.
-        if let Some(content) = agent_skills::builtin_skill_content(&skill_file_path) {
-            return Task::ready(Ok(Mention::Text {
-                content: content.to_string(),
-                tracked_buffers: Vec::new(),
-            }));
-        }
         cx.background_spawn(async move {
             let content = std::fs::read_to_string(&skill_file_path).map_err(|e| {
                 anyhow!(
@@ -520,6 +517,7 @@ impl MentionSet {
         source_range: Range<text::Anchor>,
         selections: Vec<(Entity<Buffer>, Range<text::Anchor>, Range<usize>)>,
         editor: Entity<Editor>,
+        workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -559,6 +557,8 @@ impl MentionSet {
                 selection_name(abs_path.as_deref(), &line_range).into(),
                 uri.icon_path(cx),
                 uri.tooltip_text(),
+                Some(uri.clone()),
+                Some(workspace.clone()),
                 range,
                 editor.downgrade(),
             );
@@ -1143,11 +1143,20 @@ pub(crate) fn crease_for_mention(
     label: SharedString,
     icon_path: SharedString,
     tooltip: Option<SharedString>,
+    mention_uri: Option<MentionUri>,
+    workspace: Option<WeakEntity<Workspace>>,
     range: Range<Anchor>,
     editor_entity: WeakEntity<Editor>,
 ) -> Crease<Anchor> {
     let placeholder = FoldPlaceholder {
-        render: render_fold_icon_button(icon_path.clone(), label.clone(), tooltip, editor_entity),
+        render: render_fold_icon_button(
+            icon_path.clone(),
+            label.clone(),
+            tooltip,
+            mention_uri,
+            workspace,
+            editor_entity,
+        ),
         merge_adjacent: false,
         ..Default::default()
     };
@@ -1162,6 +1171,8 @@ fn render_fold_icon_button(
     icon_path: SharedString,
     label: SharedString,
     tooltip: Option<SharedString>,
+    mention_uri: Option<MentionUri>,
+    workspace: Option<WeakEntity<Workspace>>,
     editor: WeakEntity<Editor>,
 ) -> Arc<dyn Send + Sync + Fn(FoldId, Range<Anchor>, &mut App) -> AnyElement> {
     Arc::new({
@@ -1171,6 +1182,8 @@ fn render_fold_icon_button(
                 .unwrap_or_default();
 
             MentionCrease::new(fold_id, icon_path.clone(), label.clone())
+                .mention_uri(mention_uri.clone())
+                .workspace(workspace.clone())
                 .is_toggled(is_in_text_selection)
                 .when_some(tooltip.clone(), |this, tooltip_text| {
                     this.tooltip(tooltip_text)

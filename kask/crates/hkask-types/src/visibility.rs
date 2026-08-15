@@ -65,11 +65,9 @@ impl Visibility {
     }
 
     // F-SYN-003: the three `is_*` predicates were dead code
-    // (F-L1-005) and collided with the same-named predicates on
-    // `DataSovereigntyBoundary` (F-L4-001). Removed entirely. Use
+    // (F-L1-005). Removed entirely. Use
     // `match self { Visibility::Private => ..., ... }` at the
-    // call site, or import `DataSovereigntyBoundary::is_category_shared`
-    // when the predicate is category-scoped.
+    // call site.
 }
 
 impl std::fmt::Display for Visibility {
@@ -153,19 +151,6 @@ impl AccessControl {
         }
     }
 
-    /// Convert to semantic access control: strip perspective, set visibility to Shared.
-    /// Convert to semantic access (strip perspective, set Shared).
-    ///
-    /// expect: "System types preserve semantic identity and are provenance-aware"
-    /// post: returns AccessControl with Shared visibility, no perspective
-    pub fn to_semantic(&self) -> Self {
-        Self {
-            perspective: None,
-            visibility: Visibility::Shared,
-            owner_webid: self.owner_webid,
-        }
-    }
-
     /// Convert to public access control: strip perspective, set visibility to Public.
     ///
     /// expect: "System types preserve semantic identity and are provenance-aware"
@@ -176,24 +161,6 @@ impl AccessControl {
             visibility: Visibility::Public,
             owner_webid: self.owner_webid,
         }
-    }
-
-    /// Is this an episodic (perspective-bound) access control?
-    /// Check if this is episodic (has perspective).
-    ///
-    /// expect: "System types preserve semantic identity and are provenance-aware"
-    /// post: returns true iff perspective is Some
-    pub fn is_episodic(&self) -> bool {
-        self.perspective.is_some()
-    }
-
-    /// Is this a semantic (shared, perspective-free) access control?
-    /// Check if this is semantic (Shared, no perspective).
-    ///
-    /// expect: "System types preserve semantic identity and are provenance-aware"
-    /// post: returns true iff visibility is Shared and perspective is None
-    pub fn is_semantic(&self) -> bool {
-        self.perspective.is_none() && self.visibility == Visibility::Shared
     }
 
     #[must_use = "builder methods must be chained or assigned"]
@@ -395,3 +362,71 @@ impl std::str::FromStr for Dimension {
 }
 
 // ── 5W1H Dimension ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_confidence() -> BoxedStrategy<Confidence> {
+        any::<f64>()
+            .prop_filter("must be finite", |f| f.is_finite())
+            .prop_map(Confidence::new)
+            .boxed()
+    }
+
+    fn arb_finite() -> BoxedStrategy<f64> {
+        any::<f64>()
+            .prop_filter("must be finite", |f| f.is_finite())
+            .boxed()
+    }
+
+    proptest! {
+        // Result is always in [0, 1] and never NaN for finite inputs.
+        #[test]
+        fn memory_decay_result_in_range(
+            c in arb_confidence(),
+            t in arb_finite(),
+            s in arb_finite(),
+        ) {
+            let result = c.memory_decay(t, s);
+            let v = result.value();
+            prop_assert!(!v.is_nan(), "memory_decay produced NaN: c={}, t={}, s={}", c.value(), t, s);
+            prop_assert!((0.0..=1.0).contains(&v), "memory_decay out of [0,1]: v={}, c={}, t={}, s={}", v, c.value(), t, s);
+        }
+
+        // Zero time preserves confidence regardless of S.
+        #[test]
+        fn memory_decay_zero_time_preserves(
+            c in arb_confidence(),
+            s in arb_finite(),
+        ) {
+            let result = c.memory_decay(0.0, s);
+            prop_assert_eq!(result.value(), c.value(), "zero time must preserve confidence");
+        }
+
+        // Zero or negative life saturates to zero for any elapsed time.
+        #[test]
+        fn memory_decay_zero_life_saturates(
+            c in arb_confidence(),
+            t in arb_finite().prop_filter("must be positive", |&t| t > 0.0),
+        ) {
+            let result = c.memory_decay(t, 0.0);
+            prop_assert_eq!(result.value(), 0.0, "zero life must saturate to zero for t>0");
+        }
+
+        // For S > 0, decay is monotonically decreasing in t.
+        #[test]
+        fn memory_decay_monotonically_decreasing(
+            c in arb_confidence(),
+            s in arb_finite().prop_filter("must be positive", |&s| s > 0.0),
+            t1 in arb_finite().prop_filter("must be positive", |&t| t > 0.0),
+            t2 in arb_finite().prop_filter("must exceed t1", |&t| t > 0.0),
+        ) {
+            prop_assume!(t2 > t1);
+            let r1 = c.memory_decay(t1, s).value();
+            let r2 = c.memory_decay(t2, s).value();
+            prop_assert!(r2 <= r1 + 1e-15, "decay not monotonic: r2={} > r1={} for t2={}, t1={}, s={}", r2, r1, t2, t1, s);
+        }
+    }
+}

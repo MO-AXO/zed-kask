@@ -1,11 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- create
-- specify
-- design
-- compose
-- verify
 contract:
   input:
     skill_description: string
@@ -16,7 +10,6 @@ contract:
     sk_name: string
     sk_description: string
     sk_body_outline: string
-energy_cap: 8192
 visibility: Private
 ---
 {# Template: skill-maintenance/skill-maintenance-build.j2 #}
@@ -66,7 +59,6 @@ templates:
   - id: <skill-name>/<skill-name>-<verb>
     path: <skill-name>-<verb>.j2
     type: KnowAct
-    lexicon_terms: [<term1>, <term2>, ...]
     description: >
       <what this template produces at inference time>
 
@@ -77,7 +69,7 @@ vocabulary_terms:
 ```
 
 Generate at least one `.j2` template with:
-- `[inference]` frontmatter: template_type, lexicon_terms, contract (input/output typed fields, energy_cap, visibility)
+- `[inference]` frontmatter: template_type, contract (input/output typed fields, visibility)
 - Jinja2 body after `---`: system prompt with imperative instructions, {{ input_variable }} placeholders, JSON output schema
 
 Template types (Pattern A):
@@ -149,6 +141,17 @@ steps:
     description: Re-enter PDCA cycle if convergence is not met.
     input_mapping:
       loop_target: "{{ 1 }}"
+
+ledger:
+  emit_spans: true
+  # MANDATORY: must be reg.skill.<manifest.id> (CI-enforced by
+  # scripts/check-skill-span-namespace.sh). Any other form fails the gate.
+  # The abolished `spans:` list MUST NOT appear here.
+  span_namespace: reg.skill.<skill-name>
+  telemetry_namespace: hkask.template.<skill-name>
+  variety_monitoring: true
+  algedonic_threshold: 100
+  escalation_target: Curator
 {% endraw %}
 ```
 
@@ -214,7 +217,7 @@ description: "<crate.description>"
 
 ## Constraints
 
-- <derived from .j2 contracts — visibility, energy_cap, safety rules>
+- <derived from .j2 contracts — visibility, safety rules>
 - Registry is authoritative — when this SKILL.md disagrees with registry templates, the registry wins
 ```
 
@@ -261,6 +264,9 @@ Respond with a JSON object:
 - The process manifest must have a `gas:` block with `cap > 0`.
 - The process manifest must have an `rjoule:` block with `cap > 0` if any step uses `action: select` (inference).
 - The process manifest must have a `convergence:` block with threshold, max_iterations, min_iterations, convergence_field, and on_not_reached.
+- The process manifest must have a `ledger:` block with `span_namespace: reg.skill.<manifest.id>` (CI-enforced). The `spans:` list is abolished — do not add it.
+- Every `lisp.eval` compute step must have a non-empty `form` string in `input_mapping` (E12). The `form` must use only supported special forms (`quote`, `if`, `let`, `lambda`, `define`, `begin`, `and`, `or`, `not`) and builtins (`+`, `-`, `*`, `/`, `=`, `!=`, `<`, `<=`, `>`, `>=`, `car`, `cdr`, `cons`, `list`, `length`, `nth`, `reverse`, `is_null`, `numberp`, `assoc`, `append`, `string=`, `concat`). `=` is numeric-only; string equality uses `string=`. String concatenation uses `concat`. List concatenation uses `append`. Boolean literals are `true`/`false`/`nil` (not `#t`/`#f`) (E14).
+- Every `{% raw %}{{ step_N_result ... }}{% endraw %}` reference in a `lisp.eval` step's `input_mapping.env` must reference an ordinal `N` less than the current step's ordinal (no forward references — silent `null` binding). If step N's result is a bare list, bind `step_N_result` directly, not `step_N_result.field` (always `undefined` on a list) (E13).
 - The name must pass all naming rules.
 - Do not add features, tools, or capabilities the user did not describe.
 - If the user description is too vague for a section, ask clarifying questions before scaffolding. Do not generate TODO markers or stubs.

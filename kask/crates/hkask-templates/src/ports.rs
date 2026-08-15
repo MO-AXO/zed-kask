@@ -1,7 +1,8 @@
-//! Port traits for registry and template execution
+//! Error types and filesystem reader for registry and template execution
 //!
-//! Defines the hexagonal architecture ports for template dispatch system.
-//! Per architecture v0.21.0: Rust is the loom, YAML/Jinja2 is the thread.
+//! Defines the error taxonomy (`TemplateError`, `SkillFinding`,
+//! `ManifestResolveError`) and the `FsSkillReader` filesystem wrapper used by
+//! `SkillLoader`.
 
 use hkask_types::NotFound;
 
@@ -15,6 +16,16 @@ pub enum TemplateError {
     Render(String),
     #[error("Manifest error: {0}")]
     Manifest(String),
+    /// A step exceeded its `timeout_seconds`. Carries the step ordinal and
+    /// the elapsed seconds so the retry loop in `run_pass` can detect it
+    /// without string-matching the `Manifest` message, and so callers can
+    /// report which step hung. Typed (not a `Manifest(String)`) because
+    /// retry policy branches on it.
+    #[error("Step {step_ordinal} timed out after {elapsed_seconds}s")]
+    Timeout {
+        step_ordinal: u32,
+        elapsed_seconds: u64,
+    },
     #[error("Database error: {0}")]
     Database(#[from] hkask_types::InfrastructureError),
     #[error("Inference error: {0}")]
@@ -28,8 +39,6 @@ pub enum TemplateError {
     PathTraversal(String),
     #[error("Sandbox violation: {0}")]
     SandboxViolation(String),
-    #[error("Capability denied: {0}")]
-    CapabilityDenied(String),
 
     /// Failed to load a skill from disk (typed replacement for `anyhow::anyhow!`
     /// in `skill_loader.rs`). Carries the path so callers can surface it in
@@ -63,24 +72,33 @@ impl TemplateError {
             Self::NotFound(_) => "HKASK-SKILL-001",
             Self::Render(_) => "HKASK-SKILL-002",
             Self::Manifest(_) => "HKASK-SKILL-003",
+            Self::Timeout { .. } => "HKASK-SKILL-013",
             Self::Database(_) => "HKASK-SKILL-004",
             Self::Inference(_) => "HKASK-SKILL-005",
             Self::Mcp(_) => "HKASK-SKILL-006",
             Self::Validation(_) => "HKASK-SKILL-007",
             Self::PathTraversal(_) => "HKASK-SKILL-008",
             Self::SandboxViolation(_) => "HKASK-SKILL-009",
-            Self::CapabilityDenied(_) => "HKASK-SKILL-010",
+            // HKASK-SKILL-010 was `CapabilityDenied`, removed with the vacuous
+            // per-call capability gate. The code is retired, not reused, so old
+            // logs remain unambiguous.
             Self::SkillLoad { .. } => "HKASK-SKILL-011",
             Self::Frontmatter { .. } => "HKASK-SKILL-012",
         }
     }
 
     /// Whether this error is transient (retryable). Mirrors Nika's
-    /// `is_transient()` pattern. Database and inference errors are transient;
-    /// validation, not-found, and security errors are not.
+    /// `is_transient()` pattern. Database, inference, MCP, and timeout
+    /// errors are transient; validation, not-found, and security errors
+    /// are not. Timeouts are transient because a slow model round-trip
+    /// may succeed on retry (cold cache warms, transient network latency
+    /// clears).
     #[must_use]
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Database(_) | Self::Inference(_) | Self::Mcp(_))
+        matches!(
+            self,
+            Self::Database(_) | Self::Inference(_) | Self::Mcp(_) | Self::Timeout { .. }
+        )
     }
 }
 
@@ -143,24 +161,16 @@ pub enum ManifestResolveError {
     NotASkill { reference: String, category: String },
 }
 
-/// Injected filesystem reader for skill loading (purity seam — mirrors
-/// Nika's `resolve_skills(wf, &mut dyn FnMut)` pattern). Production wires
-/// `FsSkillReader`; tests wire a mock. This keeps `SkillLoader` testable
-/// without a real filesystem and enables check≡run by construction.
-pub trait SkillReader {
-    /// Read a file's contents as UTF-8 text.
-    ///
-    /// # Errors
-    /// Returns an error if the file cannot be read or is not valid UTF-8.
-    fn read_to_string(&self, path: &std::path::Path) -> std::io::Result<String>;
-}
-
 /// Production filesystem reader — thin wrapper over `std::fs::read_to_string`.
 #[derive(Debug, Clone, Copy)]
 pub struct FsSkillReader;
 
-impl SkillReader for FsSkillReader {
-    fn read_to_string(&self, path: &std::path::Path) -> std::io::Result<String> {
+impl FsSkillReader {
+    /// Read a file's contents as UTF-8 text.
+    ///
+    /// # Errors
+    /// Returns an error if the file cannot be read or is not valid UTF-8.
+    pub fn read_to_string(&self, path: &std::path::Path) -> std::io::Result<String> {
         std::fs::read_to_string(path)
     }
 }

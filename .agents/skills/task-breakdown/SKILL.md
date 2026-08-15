@@ -1,12 +1,13 @@
 ---
 name: task-breakdown
+core: true
 visibility: public
-description: "Decompose work into small, verifiable, vertically-sliced tasks with explicit acceptance criteria and checkpoints. Convergent PDCA: gather read-only context and dependency graph, decompose (slice + write tasks in one producer), evaluate against sizing/red-flag/checkpoint criteria, iterate until the plan is stable, then finalize tasks/plan.md + tasks/todo.md with PKO process-axis anchors. v0.31.0: empty-spec validation, context_summary to evaluators (Good Regulator), skill_catalog wired, algedonic escalation for catastrophic plans, mechanical materiality guard, refinement history in plan.md. Distinct from kanban-task-decomposition (single-pass board populate) and tdd (consumes the plan one vertical slice at a time)."
+description: "Decompose work into small, verifiable, vertically-sliced tasks with explicit acceptance criteria and checkpoints. Convergent PDCA: gather context and dependency graph, decompose, evaluate against criteria, iterate until stable, then finalize plan."
 ---
 
 # Task Breakdown
 
-Decompose work into small, verifiable, vertically-sliced tasks with explicit acceptance criteria and checkpoints. Convergent PDCA: gather read-only context and dependency graph, decompose (slice + write tasks in one producer), evaluate against sizing/red-flag/checkpoint criteria, iterate until the plan is stable, then finalize tasks/plan.md + tasks/todo.md with PKO process-axis anchors. v0.31.0: empty-spec validation, context_summary to evaluators (Good Regulator), skill_catalog wired, algedonic escalation for catastrophic plans, mechanical materiality guard, refinement history in plan.md. Distinct from kanban-task-decomposition (single-pass board populate) and tdd (consumes the plan one vertical slice at a time).
+Decompose work into small, verifiable, vertically-sliced tasks with explicit acceptance criteria and checkpoints. Convergent PDCA: gather read-only context and dependency graph, decompose (slice + write tasks in one producer), evaluate against sizing/red-flag/checkpoint criteria, iterate until the plan is stable, then finalize tasks/plan.md + tasks/todo.md with PKO process-axis anchors. v0.31.0: empty-spec validation, context_summary to evaluators (Good Regulator), skill_catalog wired, algedonic escalation for catastrophic plans, mechanical materiality guard, refinement history in plan.md. Distinct from kanban-task-management (single-pass board populate) and tdd (consumes the plan one vertical slice at a time).
 
 ## When to Use
 
@@ -17,7 +18,7 @@ Decompose work into small, verifiable, vertically-sliced tasks with explicit acc
 - When the deliverable is `tasks/plan.md` + `tasks/todo.md` with PKO process-axis anchors (Procedure, Step, StepVerification, etc.) and DC+BIBO document metadata, plus a Refinement History section making the PDCA loop visible.
 - When prior outcome evidence (`prior_outcome`) or operator feedback (`prior_operator_feedback`) should calibrate the plan — the self-improvement feedback loop.
 - When the installed `skill_catalog` is available and each task should carry a `skill_match_query` for skill-router consumption.
-- When you need to distinguish this skill from kanban-task-decomposition (single-pass board populate) or tdd (consumes the plan one vertical slice at a time).
+- When you need to distinguish this skill from kanban-task-management (single-pass board populate) or tdd (consumes the plan one vertical slice at a time).
 
 ## Instructions
 
@@ -61,7 +62,7 @@ Decompose work into small, verifiable, vertically-sliced tasks with explicit acc
 
 ### task-breakdown-quality-gate
 
-1. Evaluate the plan independently (fusion: false) — do NOT trust the producer's self-assessment; `evaluation_result` is provided for bias detection only.
+1. Evaluate the plan independently — do NOT trust the producer's self-assessment; `evaluation_result` is provided for bias detection only.
 2. Use the `context_summary` (v0.31.0, Good Regulator) to check project-specific conventions independently of the producer's evaluation.
 3. Re-derive every score from the plan itself using the same six weighted criteria.
 4. Score each criterion 0 (perfect) to 1 (severely deficient), honestly.
@@ -69,16 +70,6 @@ Decompose work into small, verifiable, vertically-sliced tasks with explicit acc
 6. Detect compensation masking: if any single criterion exceeds 0.30, set `gate_pass` to false regardless of the weighted total.
 7. Set `gate_pass` to true ONLY if `gate_weighted_total` ≤ 0.15 AND no individual criterion exceeds 0.30.
 8. Produce a JSON object with `gate_scores`, `gate_weighted_total`, `gate_pass`, and `gate_findings`.
-
-### task-breakdown-convergence
-
-1. Measure whether the plan is stable and complete using LLM-assessed saturation detection, computed from the INDEPENDENT gate's scores (not the producer's self-assessment).
-2. Score from 0.00 (plan complete: all tasks ≤M, vertical slices, specific ACs, ordered, checkpointed, zero red flags) to 1.00 (no coherent plan, tasks unordered, all XL).
-3. Start at 0.0 and add per violation: sizing (+0.25), vertical-slice integrity (+0.20), AC specificity (+0.20), dependency ordering (+0.15), checkpoints (+0.10), red flags (+0.10); clamp to [0,1].
-4. Apply the materiality guard (v0.31.0 — mechanical, not self-reported): if `prior_metric` is not null, compare the current tasks array against the prior iteration's tasks by (task_id, title, estimated_scope). If all three fields match for every task AND the task count and ordering are the same, the plan is unchanged. If |metric − prior_metric| < 0.02 AND the plan is unchanged, force `convergence_metric` to 0.0 and set `materiality_guard: true` with `materiality_guard_method: "mechanical"` — the residual gap is taste, not a fixable defect.
-5. If the prior iteration's tasks are not available (manifest executor does not preserve cross-iteration step results), fall back to LLM best judgment and set `materiality_guard_method: "self_reported"`.
-6. Otherwise set `materiality_guard` to false and report the computed metric.
-7. Produce a JSON object with `convergence_metric`, `convergence_method`, `materiality_guard`, `materiality_guard_method`, `metric_decomposition`, `rationale`, and `blockers`.
 
 ### task-breakdown-write-plan
 
@@ -95,7 +86,7 @@ Decompose work into small, verifiable, vertically-sliced tasks with explicit acc
 
 1. If convergence is not met (metric > 0.15) and refinement directives exist, loop back to DECOMPOSE (step 2) with directives as focused, task-addressable improvement targets.
 2. v0.31.0: refinement_directives are explicitly routed back to decompose (was implicit, depended on the manifest executor preserving cross-iteration step results — now mechanical and documented).
-3. Carry `prior_metric` forward so the next convergence check's materiality guard can detect a stable-but-unconverged plan. Each iteration narrows the gap.
+3. Carry `prior_metric` forward so the Cauchy criterion can detect a stable-but-unconverged plan. Each iteration narrows the gap.
 
 ## Registry Templates
 
@@ -104,16 +95,8 @@ Decompose work into small, verifiable, vertically-sliced tasks with explicit acc
 | `task-breakdown-plan.j2` | KnowAct | PLAN phase — read-only mode. Read the spec and relevant codebase sections, identify existing patterns/conventions, build the dependency graph, and note risks/unknowns. v0.31.0: validates empty `spec_or_intent` to prevent silent convergence on an empty plan; consumes `prior_outcome` and `prior_operator_feedback` for self-improvement calibration. No code is written. Produces context summary, dependency graph, and risk register. |
 | `task-breakdown-decompose.j2` | KnowAct | DO phase — single producer: slice vertically AND write tasks in one step. v0.31.0: emits `plan_escalation` for catastrophic plans (all XL, no deps in multi-task plan, no ACs, empty decomposition) as algedonic short-circuit; emits `skill_match_query` per task when `skill_catalog` is provided. Each task carries slice_id/feature_path, acceptance criteria, verification, dependencies, files, and scope (XS/S/M/L/XL). The PDCA loop re-enters here so refinement directives are task-addressable and re-slicing + re-writing happen together. |
 | `task-breakdown-evaluate.j2` | KnowAct | CHECK phase — score the plan against six weighted criteria: task sizing (0.25, v0.31.0: now includes task-count awareness — >20 or <3 tasks penalized), vertical-slice integrity (0.20), acceptance-criteria specificity (0.20), dependency ordering (0.15), checkpoint presence (0.10), red-flag absence (0.10). v0.31.0: receives `context_summary` for project-specific convention checking (Good Regulator). Emits specific task-addressable `refinement_directives` consumed by decompose. |
-| `task-breakdown-quality-gate.j2` | KnowAct | Independent quality gate (fusion: false) — evaluates the plan WITHOUT self-assessment bias, distinct from the producer-coupled evaluate step. v0.31.0: receives `context_summary` for independent project-specific convention checking. Scores the six criteria independently, flags compensation masking (any criterion > 0.30 forces `gate_pass: false`), and detects bias deltas vs the producer's self-assessment. Mirrors superforecasting's forecast-quality-gate separation of concerns. |
-| `task-breakdown-convergence.j2` | KnowAct | Compute normalized convergence metric from the INDEPENDENT gate's scores. v0.31.0: materiality guard now uses mechanical plan-unchanged check (task_id + title + estimated_scope comparison) rather than LLM self-report, with fallback to `self_reported` when prior tasks aren't available. Weighted sum across six criteria, normalized to [0,1] where 0 = plan is complete. Threshold 0.15. |
+| `task-breakdown-quality-gate.j2` | KnowAct | Independent quality gate — evaluates the plan WITHOUT self-assessment bias, distinct from the producer-coupled evaluate step. v0.31.0: receives `context_summary` for independent project-specific convention checking. Scores the six criteria independently, flags compensation masking (any criterion > 0.30 forces `gate_pass: false`), and detects bias deltas vs the producer's self-assessment. Mirrors superforecasting's forecast-quality-gate separation of concerns. |
 | `task-breakdown-write-plan.j2` | KnowAct | ACT phase — finalize the plan into `tasks/plan.md` (overview, architecture decisions, phased task list with checkpoints, risks, open questions) and `tasks/todo.md` (checklist-style task list), with a `pko_anchors` map giving each element a PKO process-axis identity. v0.31.0: includes a Refinement History section in `plan.md` documenting what was refined across PDCA iterations, making the loop visible in the artifact. The `plan.md` document itself carries DC+BIBO state metadata. Create the `tasks/` directory if absent. |
-
-## Fusion Mode
-
-- Steps 1–3, 6 (plan, decompose, evaluate, write-plan): `fusion: true` (default) — producer-coupled, may carry context across iterations.
-- Step 4 (quality-gate): `fusion: false` — independent evaluation, no self-assessment bias. Re-derives every score from the plan itself; uses `evaluation_result` only for bias detection.
-- Step 5 (convergence): `fusion: false` — computes the metric from the independent gate's scores, not the producer's self-assessment.
-- Step 7 (loop): explicitly routes `refinement_directives` back to decompose (step 2) and carries `prior_metric` forward for the materiality guard.
 
 ## Constraints
 
@@ -121,6 +104,5 @@ Decompose work into small, verifiable, vertically-sliced tasks with explicit acc
 - `task-breakdown-decompose.j2`: Public. Every task is a vertical feature path, not a horizontal layer. No task may be XL. No "and" in a task title. The "~5 files" limit is advisory for cross-crate Rust features (legitimate 5–7 file touches allowed with justification). Every task must have acceptance criteria AND a verification step AND declared dependencies (or "None"). Dependency order must be respected. `skill_match_query` is required per task when `skill_catalog` is provided, omitted otherwise. `plan_escalation` is emitted for catastrophic conditions (algedonic short-circuit).
 - `task-breakdown-evaluate.j2`: Public. Score each criterion independently 0–1; do not inflate. Weighted_total must lie in [0,1]. Only emit refinement directives for criteria scored above 0.00. Task-count awareness (>20 or <3) applies to the sizing criterion only.
 - `task-breakdown-quality-gate.j2`: Public. Independent evaluation — do not inherit the producer's scores. Compensation masking: any single criterion > 0.30 forces `gate_pass: false`. Report `bias_delta` only where |your_score − producer_score| > 0.2 for that criterion.
-- `task-breakdown-convergence.j2`: Public. Materiality guard is mechanical (task_id + title + estimated_scope) when prior tasks are available; falls back to `self_reported` otherwise. Threshold 0.15; max_iterations 3; min_iterations 0 (first-pass convergence allowed).
 - `task-breakdown-write-plan.j2`: Public. Both files must be complete, self-contained markdown. `plan.md` must include overview, architecture decisions, phased task list with checkpoints, risks table, open questions, and (when refinement occurred) Refinement History. `todo.md` must be a checklist grouped by phase. Do not invent tasks not present in the input `tasks` array.
 - Registry is authoritative — when this SKILL.md disagrees with registry templates, the registry wins.

@@ -1,11 +1,6 @@
 [inference]
+max_tokens = 2048
 template_type: KnowAct
-lexicon_terms:
-- read
-- detect
-- classify
-- calibrate
-- analyze
 contract:
   input:
     text: string
@@ -15,7 +10,6 @@ contract:
     domain: string
   output:
     analysis: object
-energy_cap: 4096
 visibility: Public
 ---
 # Ellipsis Analysis — Bloom Method Cognition Template

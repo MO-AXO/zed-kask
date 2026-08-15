@@ -5,6 +5,7 @@ mod ranking;
 mod rate_limiter;
 mod validation;
 
+use hkask_mcp_server::AnyJsonValue;
 use hkask_mcp_server::server::McpToolError;
 use hkask_types::McpErrorKind;
 use schemars::JsonSchema;
@@ -37,15 +38,10 @@ pub const MAX_JSON_SCHEMA_BYTES: usize = 32_768;
 
 // ── Re-exports ──
 
-pub use freshness::{Freshness, freshness_brave, freshness_serpapi, normalize_freshness};
-pub use ranking::{
-    apply_rerank, dedup_results, normalize_date_bucket, parse_age_to_days, rrf_score,
-};
+pub use freshness::{Freshness, freshness_brave, freshness_serpapi};
+pub use ranking::{apply_rerank, parse_age_to_days, rrf_score};
 pub use rate_limiter::RateLimiter;
-pub use validation::{
-    COMPOUND_PROVIDER_TIMEOUT_SECS, sanitize_health_error, validate_browse_request,
-    validate_extract_request, validate_search_request,
-};
+pub use validation::{COMPOUND_PROVIDER_TIMEOUT_SECS, sanitize_health_error};
 
 // ── Request types ──
 
@@ -70,7 +66,13 @@ pub struct ExtractRequest {
     pub url: String,
     pub format: Option<String>,
     pub json_prompt: Option<String>,
-    pub json_schema: Option<serde_json::Value>,
+    /// Optional JSON Schema describing the structured output to extract.
+    ///
+    /// Accepts arbitrary JSON. Typed as [`AnyJsonValue`] (not `serde_json::Value`)
+    /// so the generated tool input schema is the empty object `{}` rather than the
+    /// bare boolean `true` schemars emits for `Value` — Ollama rejects boolean
+    /// property schemas with `400 cannot unmarshal bool into ... api.ToolProperty`.
+    pub json_schema: Option<AnyJsonValue>,
     pub main_content_only: Option<bool>,
     pub wait_for_ms: Option<u64>,
 }
@@ -80,6 +82,53 @@ pub struct BrowseRequest {
     pub url: String,
     pub instruction: Option<String>,
     pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EvaluateEvidenceRequest {
+    /// The research question to evaluate evidence against.
+    pub question: String,
+    /// Artifacts to evaluate (URLs + optional content/metadata from web_search/web_extract).
+    pub artifacts: Vec<EvaluateArtifact>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EvaluateArtifact {
+    pub url: String,
+    /// Title of the source (from SearchResultOutput.title).
+    pub title: Option<String>,
+    /// Publication date (from SearchResultOutput.published).
+    pub published: Option<String>,
+    /// Source domain (from SearchResultOutput.source).
+    pub source: Option<String>,
+    /// Extracted content (from web_extract).
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CiteSourcesRequest {
+    /// Sources to cite (URLs + metadata from web_search/web_extract results).
+    pub sources: Vec<CiteSource>,
+    /// Citation style.
+    pub style: CiteStyle,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CiteSource {
+    pub url: String,
+    pub title: Option<String>,
+    pub published: Option<String>,
+    pub source: Option<String>,
+    pub authors: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiteStyle {
+    Apa,
+    Bibtex,
+    Chicago,
+    Json,
 }
 
 // ── Result types ──
@@ -205,7 +254,7 @@ pub struct ProviderInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderError {
+pub struct ProviderFailureRecord {
     pub kind: String,
     pub error: String,
 }
@@ -219,7 +268,7 @@ pub struct CompoundSearchResult {
     pub related_questions: Vec<String>,
     pub providers_queried: Vec<ProviderInfo>,
     pub providers_succeeded: Vec<String>,
-    pub providers_failed: Vec<ProviderError>,
+    pub providers_failed: Vec<ProviderFailureRecord>,
     pub total_before_dedup: usize,
     pub duplicates_removed: usize,
 }
@@ -322,6 +371,9 @@ pub struct SearchOutput {
     pub answer_box: Option<AnswerBox>,
     pub related_questions: Vec<String>,
     pub count: usize,
+    /// Providers that were queried but failed, so callers can distinguish a
+    /// genuine zero-result search from one where every provider errored.
+    pub providers_failed: Vec<ProviderFailureRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -329,7 +381,7 @@ pub struct SearchMetadata {
     pub strategy: String,
     pub providers_queried: Vec<ProviderInfo>,
     pub providers_succeeded: Vec<String>,
-    pub providers_failed: Vec<ProviderError>,
+    pub providers_failed: Vec<ProviderFailureRecord>,
     pub total_before_dedup: usize,
     pub duplicates_removed: usize,
     pub top_rrf_scores: Vec<f64>,
@@ -410,3 +462,29 @@ pub struct PingOutput {
 // port — see docs/explanation/architecture-patterns.md. The port-level
 // check was speculative and never wired. If per-tool capability gating is
 // needed at the port in the future, reintroduce it with a real wiring plan.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hkask_mcp_server::find_boolean_schema_positions;
+    use schemars::schema_for;
+
+    /// `json_schema` is typed [`AnyJsonValue`] so its schema is the empty
+    /// object `{}`, never the bare boolean `true` that `serde_json::Value`
+    /// produces. Ollama's Go API rejects boolean property schemas with
+    /// `400 cannot unmarshal bool into ... api.ToolProperty`, failing the whole
+    /// chat-completion request. The scanner asserts the *entire* generated
+    /// schema is free of bare-boolean property values, so a future field on this
+    /// struct that reverts to `serde_json::Value` is caught here, not at runtime.
+    #[test]
+    fn extract_request_schema_has_no_boolean_property_values() {
+        let schema = schema_for!(ExtractRequest);
+        let value = serde_json::to_value(&schema).expect("schema serializes");
+        let violations = find_boolean_schema_positions(&value);
+        assert!(
+            violations.is_empty(),
+            "ExtractRequest schema has bare-boolean property values \
+             (Ollama/Gemini would reject): {violations:?}"
+        );
+    }
+}

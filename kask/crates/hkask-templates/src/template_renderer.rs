@@ -14,12 +14,12 @@
 //! from reading files outside the base path (CWE-22).
 
 use crate::ports::{Result, TemplateError};
-use crate::{template_file, template_yaml_file};
+use crate::step_context::StepContext;
 use hkask_types::NotFound;
 use minijinja::UndefinedBehavior;
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Default base path for template files relative to the project root.
 pub const DEFAULT_TEMPLATE_BASE_PATH: &str = "registry/templates";
@@ -42,20 +42,50 @@ pub fn safe_template_join(base: &Path, template_ref: &str) -> Option<PathBuf> {
     Some(rv)
 }
 
-/// Template renderer — owns the resolution ladder and minijinja environment.
+/// Template renderer — owns the resolution ladder and a cached minijinja
+/// `Environment`.
 ///
-/// Constructed once with a `base_path` and reused across renders. The renderer
-/// is stateless beyond the base path; it holds no locks, no ports, no mutable
-/// state. Cloning is cheap (one `PathBuf`).
-#[derive(Clone)]
+/// Constructed once with a `base_path` and reused across renders. The
+/// `Environment` (filter registration, undefined behavior, `{% include %}`
+/// loader) is built once in `new` and reused on every render — only the
+/// per-render template string is re-registered via `add_template_owned`.
+/// This eliminates the ~50 `Environment` reconstructions per cascade
+/// iteration that the prior per-render construction incurred.
+///
+/// The `Environment` is behind a `Mutex` because `add_template_owned`
+/// requires `&mut`. The guard is held only for the duration of the
+/// synchronous render (no await points), so contention is negligible —
+/// the executor is single-threaded per cascade.
 pub struct TemplateRenderer {
     base_path: PathBuf,
+    env: Mutex<minijinja::Environment<'static>>,
+    /// Disk content cache: template_ref → (mtime, content). Avoids re-reading
+    /// the same .j2/.yaml file on every cascade iteration when the file hasn't
+    /// changed. Without this, a 5-step cascade with 3 `select` steps re-reads
+    /// 3 files from disk per iteration — 30 file reads for a 10-iteration
+    /// convergence loop.
+    disk_cache:
+        std::sync::Mutex<std::collections::HashMap<String, (std::time::SystemTime, String)>>,
+}
+
+impl Clone for TemplateRenderer {
+    fn clone(&self) -> Self {
+        Self {
+            base_path: self.base_path.clone(),
+            env: Mutex::new(self.env.lock().unwrap_or_else(|e| e.into_inner()).clone()),
+            disk_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
 }
 
 impl TemplateRenderer {
     /// Construct a renderer rooted at `base_path`.
     pub fn new(base_path: PathBuf) -> Self {
-        Self { base_path }
+        Self {
+            env: Mutex::new(build_environment(&base_path)),
+            base_path,
+            disk_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
     }
 
     /// The base path this renderer resolves template_refs against.
@@ -63,22 +93,16 @@ impl TemplateRenderer {
         &self.base_path
     }
 
-    /// Load a template by ref, preferring the embedded (build-time) copy and
-    /// falling back to the filesystem path.
+    /// Load a template by ref from the filesystem. Disk is the single
+    /// runtime source — there is no compiled-in fallback. The shipped
+    /// templates are seeded to disk at startup by the registry seeding path,
+    /// so a fresh install has the full template tree on disk and edits take
+    /// effect immediately without recompilation.
     ///
-    /// Resolution order: embedded `.j2` → embedded `.yaml` → filesystem as-is
-    /// → filesystem `.j2` → filesystem `.yaml`. This covers all four Pattern A
-    /// template types: WordAct/KnowAct (`.j2`), FlowDef sub-manifests (`.yaml`),
-    /// and RenderAct (either).
+    /// Resolution order on disk: ref as-is → ref `.j2` → ref `.yaml`.
     ///
-    /// `step_ordinal` is used for error messages and heal callbacks.
+    /// `step_ordinal` is used for error messages.
     pub fn load(&self, template_ref: &str, step_ordinal: u32) -> Result<String> {
-        if let Some(content) = template_file(template_ref) {
-            return Ok(content.to_string());
-        }
-        if let Some(content) = template_yaml_file(template_ref) {
-            return Ok(content.to_string());
-        }
         self.load_from_disk(template_ref, step_ordinal)
     }
 
@@ -92,8 +116,24 @@ impl TemplateRenderer {
             ))
         })?;
 
+        // Check the disk cache — avoids re-reading the same file on every
+        // cascade iteration when it hasn't changed.
+        if let Ok(metadata) = std::fs::metadata(&template_path) {
+            let mtime = metadata
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if let Ok(cache) = self.disk_cache.lock() {
+                if let Some((cached_mtime, content)) = cache.get(template_ref) {
+                    if *cached_mtime == mtime {
+                        return Ok(content.clone());
+                    }
+                }
+            }
+        }
+
         // Try the ref as-is first.
         if let Ok(c) = std::fs::read_to_string(&template_path) {
+            self.cache_template(template_ref, &template_path, &c);
             return Ok(c);
         }
 
@@ -103,6 +143,7 @@ impl TemplateRenderer {
             if let Some(j2_path) = safe_template_join(&self.base_path, &j2_ref)
                 && let Ok(c) = std::fs::read_to_string(&j2_path)
             {
+                self.cache_template(template_ref, &j2_path, &c);
                 return Ok(c);
             }
         }
@@ -114,6 +155,7 @@ impl TemplateRenderer {
             if let Some(yaml_path) = safe_template_join(&self.base_path, &yaml_ref)
                 && let Ok(c) = std::fs::read_to_string(&yaml_path)
             {
+                self.cache_template(template_ref, &yaml_path, &c);
                 return Ok(c);
             }
         }
@@ -127,17 +169,60 @@ impl TemplateRenderer {
         }))
     }
 
+    /// Cache a template's content with its file modification time.
+    fn cache_template(&self, template_ref: &str, path: &Path, content: &str) {
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mtime = metadata
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if let Ok(mut cache) = self.disk_cache.lock() {
+                cache.insert(template_ref.to_string(), (mtime, content.to_string()));
+            }
+        }
+    }
+
     /// Render a template with full Jinja2 syntax via minijinja.
     ///
     /// `template_content` is the raw template string (already loaded via `load`).
     /// `context` provides the template variables. `{% include %}` references
     /// resolve relative to `base_path` using the same resolution ladder.
-    pub fn render(
-        &self,
-        template_content: &str,
-        context: &HashMap<String, Value>,
-    ) -> Result<String> {
-        render_minijinja(template_content, context, &self.base_path)
+    ///
+    /// The cached `Environment` is reused across renders — only the "step"
+    /// template is re-registered per call via `add_template_owned` (which
+    /// replaces any prior "step" registration). This avoids rebuilding the
+    /// Environment, re-registering filters, and re-setting the loader on every
+    /// render.
+    pub fn render(&self, template_content: &str, context: &StepContext) -> Result<String> {
+        let mut env = self.env.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Strip YAML front matter before rendering. hKask templates have a
+        // front matter block (metadata, contract) terminated by
+        // `\n---\n`. Without stripping, the front matter is sent to the LLM
+        // as literal prompt text — confusing the model and wasting tokens.
+        let after_front_matter = strip_front_matter(template_content);
+
+        // Strip the `[inference]` config block from the body. This TOML-like
+        // block declares per-step parameters (temperature, max_tokens,
+        // thinking_budget). Without stripping, it's sent to the LLM as prompt
+        // text. The parsed config is extracted separately by the caller via
+        // `parse_and_strip_inference_block` on the raw template content.
+        let (renderable, _inference_block) = parse_and_strip_inference_block(after_front_matter);
+
+        // Register the per-render template under the synthetic name "step".
+        // `add_template_owned` replaces any prior "step" registration (no
+        // accumulation across renders). The loader handles only `{% include %}`
+        // references, not "step".
+        env.add_template_owned("step", renderable)
+            .map_err(|e| TemplateError::Render(format!("Invalid template: {}", e)))?;
+
+        // `Value::from_serialize` accepts any `Serialize` type directly — the
+        // prior code serialized to an intermediate `serde_json::Value` first,
+        // a redundant double-conversion on every render.
+        let minijinja_context = minijinja::Value::from_serialize(context);
+
+        env.get_template("step")
+            .and_then(|tmpl| tmpl.render(minijinja_context))
+            .map_err(|e| TemplateError::Render(format!("Template render error: {}", e)))
     }
 
     /// Render an inline template using simple `{{key}}` substitution.
@@ -145,9 +230,9 @@ impl TemplateRenderer {
     /// This is the fast path for templates that only use `{{variable}}` placeholders
     /// — no `{% %}` logic. Used for `template_ref` and `mcp` field resolution
     /// before loading.
-    pub fn render_inline(template: &str, context: &HashMap<String, Value>) -> String {
+    pub fn render_inline(template: &str, context: &StepContext) -> String {
         let mut result = template.to_string();
-        for (key, value) in context {
+        for (key, value) in context.entries() {
             let placeholder = format!("{{{{{}}}}}", key);
             let replacement = match value {
                 Value::String(s) => s.clone(),
@@ -159,21 +244,135 @@ impl TemplateRenderer {
     }
 }
 
-/// Render a template using minijinja (full Jinja2 syntax).
+/// Strip YAML front matter from a template file before rendering.
 ///
-/// Supports `{% for %}`, `{{ var }}`, `| filter`, `{% if %}`, `{% include %}`
-/// etc. The main template is registered under the synthetic name `"step"`;
-/// `{% include "path/frag.j2" %}` references resolve relative to
-/// `template_base_path` using the same embedded→filesystem ladder.
-pub fn render_minijinja(
-    template: &str,
-    context: &HashMap<String, Value>,
-    template_base_path: &Path,
-) -> Result<String> {
+/// hKask `.j2` templates have a front matter block at the top containing
+/// metadata (`[inference]`, `template_type`, `contract`
+/// `visibility`) terminated by a `\n---\n` separator. The body after the
+/// separator is the actual Jinja2 prompt template.
+///
+/// Without stripping, the front matter is sent to the LLM as literal prompt
+/// text — the model sees `[inference]\ntemplate_type: KnowAct\ncontract:...`
+/// before the actual instructions, wasting tokens and confusing the model.
+///
+/// Templates without a `\n---\n` separator are returned as-is (no front
+/// matter to strip — e.g., inline templates, simple prompts).
+pub fn strip_front_matter(template_content: &str) -> &str {
+    if let Some(separator_pos) = template_content.find("\n---\n") {
+        // Skip past the separator (5 chars: \n---\n)
+        &template_content[separator_pos + 5..]
+    } else {
+        template_content
+    }
+}
+
+/// Parsed `[inference]` config block from a template body.
+///
+/// Templates declare per-step inference parameters in a TOML-like block:
+/// ```text
+/// [inference]
+/// temperature = 0.2
+/// max_tokens = 4096
+/// thinking_budget = "full"
+/// ```
+/// This struct captures the parsed values. Fields not present in the block
+/// remain `None` — the caller merges them over `LLMParameters::default()`.
+#[derive(Debug, Default, Clone)]
+pub struct InferenceBlock {
+    pub temperature: Option<f32>,
+    pub max_tokens: Option<u32>,
+    pub thinking_budget: Option<String>,
+}
+
+/// Parse and strip the `[inference]` config block from a template body.
+///
+/// The block starts with `[inference]` on its own line and ends at the first
+/// blank line. Key-value pairs use `key = value` syntax (TOML-like). String
+/// values are quoted; numeric values are bare.
+///
+/// Returns `(stripped_body, parsed_config)`. The stripped body has the
+/// `[inference]` block removed so it's not sent to the LLM as prompt text.
+/// If no `[inference]` block is found, returns the original text and an empty
+/// `InferenceBlock`.
+pub fn parse_and_strip_inference_block(body: &str) -> (String, InferenceBlock) {
+    // Find the `[inference]` marker on its own line.
+    let marker = "[inference]";
+    let marker_pos = match body.find(marker) {
+        Some(pos) => pos,
+        None => return (body.to_string(), InferenceBlock::default()),
+    };
+
+    // The marker must be at the start of a line (or start of string).
+    if marker_pos > 0 && body.as_bytes().get(marker_pos - 1) != Some(&b'\n') {
+        return (body.to_string(), InferenceBlock::default());
+    }
+
+    // Find the end of the block: the first blank line after the marker.
+    let after_marker = &body[marker_pos + marker.len()..];
+    let block_end = after_marker.find("\n\n").unwrap_or(after_marker.len());
+    let block_content = &after_marker[..block_end];
+
+    // Parse key = value lines.
+    let mut config = InferenceBlock::default();
+    for line in block_content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+            // Strip surrounding quotes from string values.
+            let unquoted = value
+                .strip_prefix('"')
+                .and_then(|v| v.strip_suffix('"'))
+                .unwrap_or(value);
+            match key {
+                "temperature" => {
+                    config.temperature = unquoted.parse().ok();
+                }
+                "max_tokens" => {
+                    config.max_tokens = unquoted.parse().ok();
+                }
+                "thinking_budget" => {
+                    config.thinking_budget = Some(unquoted.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Rebuild the body without the `[inference]` block.
+    let before = &body[..marker_pos];
+    let after = if marker_pos + marker.len() + block_end < body.len() {
+        // Skip past the `\n\n` blank line separator that terminated the block.
+        let rest_start = marker_pos + marker.len() + block_end;
+        let rest = &body[rest_start..];
+        // Strip leading newlines — the blank line(s) that terminated the block.
+        rest.trim_start_matches('\n')
+    } else {
+        ""
+    };
+
+    let stripped = format!("{before}{after}");
+    (stripped, config)
+}
+
+/// Build a minijinja `Environment` configured for the renderer.
+///
+/// The environment has:
+/// - `UndefinedBehavior::Lenient` (undefined values render as empty).
+/// - The `truncate` custom filter.
+/// - A loader that resolves `{% include %}` references from the filesystem
+///   relative to `base_path`, with `.j2`/`.yaml` extension fallbacks. The
+///   loader does NOT handle the synthetic "step" name — that is registered
+///   per-render via `add_template_owned`.
+///
+/// Built once in `TemplateRenderer::new` and reused across renders.
+fn build_environment(base_path: &Path) -> minijinja::Environment<'static> {
     let mut env = minijinja::Environment::new();
     env.set_undefined_behavior(UndefinedBehavior::Lenient);
 
-    // Register custom filters
     env.add_filter(
         "truncate",
         |state: &minijinja::State, value: String, max_len: usize| -> String {
@@ -188,28 +387,11 @@ pub fn render_minijinja(
         },
     );
 
-    // Loader: the synthetic "step" name resolves to the in-memory main
-    // template; any other name (from `{% include %}`) resolves from the
-    // embedded registry first, then from disk under `template_base_path`,
-    // mirroring the `template_ref` resolution rules (including the `.j2`
-    // extension fallback).
-    let main_template = template.to_string();
-    let base = template_base_path.to_path_buf();
+    let base = base_path.to_path_buf();
     env.set_loader(
         move |name: &str| -> std::result::Result<Option<String>, minijinja::Error> {
-            if name == "step" {
-                return Ok(Some(main_template.clone()));
-            }
-            // Prefer the embedded (build-time) template — works regardless
-            // of CWD or install location. Try .j2 first, then .yaml.
-            if let Some(content) = template_file(name) {
-                return Ok(Some(content.to_string()));
-            }
-            if let Some(content) = template_yaml_file(name) {
-                return Ok(Some(content.to_string()));
-            }
-            // safe_join rejects any segment starting with '.' or containing '\\',
-            // preventing `{% include "../../etc/passwd" %}` path traversal.
+            // The "step" name is registered via `add_template_owned` per-render;
+            // the loader handles only `{% include %}` references here.
             let primary = match safe_template_join(&base, name) {
                 Some(p) => p,
                 None => return Ok(None),
@@ -237,24 +419,33 @@ pub fn render_minijinja(
         },
     );
 
-    // Convert HashMap<String, Value> to minijinja context via serde
-    let context_value = serde_json::to_value(context)
-        .map_err(|e| TemplateError::Render(format!("Failed to serialize context: {}", e)))?;
-    let minijinja_context = minijinja::Value::from_serialize(&context_value);
+    env
+}
 
-    // Validate the main template parses, surfacing syntax errors with a
-    // clear message (the loader resolves "step" lazily on first access).
-    env.add_template("step", template)
-        .map_err(|e| TemplateError::Render(format!("Invalid template: {}", e)))?;
-
-    env.get_template("step")
-        .and_then(|tmpl| tmpl.render(minijinja_context))
-        .map_err(|e| TemplateError::Render(format!("Template render error: {}", e)))
+/// Render a template using minijinja (full Jinja2 syntax).
+///
+/// This is the one-shot entry point for callers that do not own a
+/// `TemplateRenderer` (notably `input_mapping::resolve_mapping_value` and
+/// tests). Production renders go through `TemplateRenderer::render`, which
+/// reuses a cached `Environment` and avoids rebuilding it per call.
+///
+/// Supports `{% for %}`, `{{ var }}`, `| filter`, `{% if %}`, `{% include %}`
+/// etc. The main template is registered under the synthetic name `"step"`;
+/// `{% include "path/frag.j2" %}` references resolve relative to
+/// `template_base_path`.
+pub fn render_minijinja(
+    template: &str,
+    context: &StepContext,
+    template_base_path: &Path,
+) -> Result<String> {
+    let renderer = TemplateRenderer::new(template_base_path.to_path_buf());
+    renderer.render(template, context)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     // ── Path traversal regression tests (CWE-22) ──────────────────────────
 
@@ -265,7 +456,7 @@ mod tests {
         std::fs::write(tmp.join("legit.j2"), "hello").unwrap();
 
         let malicious_template = r#"{% include "../../../etc/passwd" %}"#;
-        let ctx = HashMap::new();
+        let ctx = StepContext::new(HashMap::new());
         let result = render_minijinja(malicious_template, &ctx, &tmp);
         assert!(
             result.is_err(),
@@ -281,7 +472,7 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let malicious_template = r#"{% include "..\\..\\etc\\passwd" %}"#;
-        let ctx = HashMap::new();
+        let ctx = StepContext::new(HashMap::new());
         let result = render_minijinja(malicious_template, &ctx, &tmp);
         assert!(
             result.is_err(),
@@ -298,7 +489,7 @@ mod tests {
         std::fs::write(tmp.join("fragment.j2"), "world").unwrap();
 
         let template = r#"hello {% include "fragment.j2" %}"#;
-        let ctx = HashMap::new();
+        let ctx = StepContext::new(HashMap::new());
         let result = render_minijinja(template, &ctx, &tmp);
         assert!(
             result.is_ok(),
@@ -337,23 +528,25 @@ mod tests {
 
     #[test]
     fn render_inline_substitutes_string_values() {
-        let mut ctx = HashMap::new();
-        ctx.insert("name".to_string(), Value::String("world".to_string()));
+        let mut inputs = HashMap::new();
+        inputs.insert("name".to_string(), Value::String("world".to_string()));
+        let ctx = StepContext::new(inputs);
         let out = TemplateRenderer::render_inline("hello {{name}}", &ctx);
         assert_eq!(out, "hello world");
     }
 
     #[test]
     fn render_inline_substitutes_non_string_values() {
-        let mut ctx = HashMap::new();
-        ctx.insert("count".to_string(), serde_json::json!(42));
+        let mut inputs = HashMap::new();
+        inputs.insert("count".to_string(), serde_json::json!(42));
+        let ctx = StepContext::new(inputs);
         let out = TemplateRenderer::render_inline("count={{count}}", &ctx);
         assert_eq!(out, "count=42");
     }
 
     #[test]
     fn render_inline_leaves_unknown_keys_intact() {
-        let ctx = HashMap::new();
+        let ctx = StepContext::new(HashMap::new());
         let out = TemplateRenderer::render_inline("hello {{missing}}", &ctx);
         assert_eq!(out, "hello {{missing}}");
     }
@@ -410,5 +603,78 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── Front matter stripping tests ──────────────────────────────────────
+
+    #[test]
+    fn strip_front_matter_removes_yaml_metadata() {
+        let template = "{# comment #}\n[inference]\ntemplate_type: KnowAct\ncontract:\n  output:\n    result: string\n---\nYou are an evaluator.\n";
+        let result = strip_front_matter(template);
+        assert!(result.starts_with("You are an evaluator."));
+        assert!(!result.contains("[inference]"));
+        assert!(!result.contains("template_type"));
+    }
+
+    #[test]
+    fn strip_front_matter_passes_through_without_separator() {
+        let template = "You are an evaluator. Respond with JSON.";
+        let result = strip_front_matter(template);
+        assert_eq!(result, template);
+    }
+
+    // ── Inference block parsing tests ─────────────────────────────────────
+
+    #[test]
+    fn parse_inference_block_extracts_temperature_and_max_tokens() {
+        let body = "[inference]\ntemperature = 0.2\nmax_tokens = 4096\nthinking_budget = \"full\"\n\nYou are a code reviewer.\n";
+        let (stripped, config) = parse_and_strip_inference_block(body);
+        assert_eq!(config.temperature, Some(0.2));
+        assert_eq!(config.max_tokens, Some(4096));
+        assert_eq!(config.thinking_budget.as_deref(), Some("full"));
+        assert!(stripped.starts_with("You are a code reviewer."));
+        assert!(!stripped.contains("[inference]"));
+        assert!(!stripped.contains("temperature ="));
+    }
+
+    #[test]
+    fn parse_inference_block_returns_empty_when_no_block() {
+        let body = "You are an evaluator. Respond with JSON.";
+        let (stripped, config) = parse_and_strip_inference_block(body);
+        assert_eq!(config.temperature, None);
+        assert_eq!(config.max_tokens, None);
+        assert_eq!(config.thinking_budget, None);
+        assert_eq!(stripped, body);
+    }
+
+    #[test]
+    fn parse_inference_block_handles_partial_config() {
+        let body = "[inference]\nmax_tokens = 8192\n\nYou are a decomposer.\n";
+        let (stripped, config) = parse_and_strip_inference_block(body);
+        assert_eq!(config.temperature, None);
+        assert_eq!(config.max_tokens, Some(8192));
+        assert_eq!(config.thinking_budget, None);
+        assert!(stripped.starts_with("You are a decomposer."));
+    }
+
+    #[test]
+    fn parse_inference_block_handles_thinking_budget_none() {
+        let body = "[inference]\ntemperature = 0.0\nthinking_budget = \"none\"\n\nYou are a triage agent.\n";
+        let (_stripped, config) = parse_and_strip_inference_block(body);
+        assert_eq!(config.thinking_budget.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn parse_inference_block_handles_thinking_budget_off() {
+        let body = "[inference]\nthinking_budget = \"off\"\n\nFormat probe results.\n";
+        let (_stripped, config) = parse_and_strip_inference_block(body);
+        assert_eq!(config.thinking_budget.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn parse_inference_block_handles_thinking_budget_on() {
+        let body = "[inference]\nthinking_budget = \"on\"\n\nGenerate a response.\n";
+        let (_stripped, config) = parse_and_strip_inference_block(body);
+        assert_eq!(config.thinking_budget.as_deref(), Some("on"));
     }
 }

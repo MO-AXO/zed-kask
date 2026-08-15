@@ -1,7 +1,7 @@
 ---
 name: graph-audit
 visibility: public
-description: "Unified graph analysis skill with three modes. Code mode: query, traverse, analyze, and assemble context from the code graph via the hkask-mcp-codegraph MCP server. Semantic mode: domain-agnostic dependency graph health analysis — classify edges by constraint force, detect cycles/redundancies/gaps/orphans, evaluate through pragmatic-semantics, pragmatic-cybernetics, essentialist, and grill-me lenses. Dual mode: extract the code graph via MCP tools, then run the semantic audit on the extracted graph. Any userpod may invoke this skill."
+description: "Unified graph analysis skill with three modes. Code mode: query, traverse, and analyze the code graph via the hkask-mcp-codegraph MCP server. Semantic mode: dependency graph health analysis. Dual mode: extract then audit."
 ---
 
 # Graph Audit
@@ -80,12 +80,10 @@ The skill delegates to the `hkask-mcp-codegraph` MCP server:
 | `code-query.j2` | `KnowAct` | Query the code graph for goal-relevant symbols (code mode step 2) |
 | `code-analyze.j2` | `KnowAct` | Traverse the dependency graph and run quality analysis (code mode step 3) |
 | `code-context.j2` | `KnowAct` | Assemble token-budgeted context for downstream LLM use (code mode step 4) |
-| `code-convergence-check.j2` | `KnowAct` | Compute coverage saturation convergence metric for code mode |
 | `semantic-classify.j2` | `KnowAct` | Force-classify every graph edge by pragmatic-semantics hierarchy (semantic mode step 1) |
 | `semantic-analyze.j2` | `KnowAct` | Evaluate graph health through four lenses (semantic mode step 2) |
 | `semantic-detect.j2` | `KnowAct` | Detect structural pathologies from graph topology (semantic mode step 3) |
 | `semantic-report.j2` | `KnowAct` | Synthesize graph-health convergence metric + markdown report (semantic mode step 4) |
-| `dual-convergence-check.j2` | `KnowAct` | Compute combined convergence metric for dual mode (code coverage + graph health) |
 | `symbol-summarize.j2` | `KnowAct` | Generate one-sentence summaries of code symbols (utility, used by MCP server) |
 | `analysis-complexity.j2` | `KnowAct` | SQL query for complexity analysis (utility, used by MCP server) |
 | `analysis-dead-code.j2` | `KnowAct` | SQL query for dead code detection (utility, used by MCP server) |

@@ -1,13 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- probe
-- challenge
-- discriminate
-- classify
-- evaluate
-- infer
-- detect
 contract:
   input:
     topic: string
@@ -21,7 +13,8 @@ contract:
     evaluations: array
     current_level: integer
     round_verdict: string
-energy_cap: 8000
+    all_answers: array
+    assessment: object
 visibility: Public
 ---
 {# Template: grill-me/grill-me-round.j2 #}

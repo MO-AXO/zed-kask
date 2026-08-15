@@ -242,7 +242,6 @@ pub struct ModelInputQuality {
 
 impl ModelInputQuality {
     /// Build from multi-year financial statement data.
-    #[allow(clippy::too_many_arguments)]
     pub fn from_historical_series(
         revenue: &[f64],
         cogs: &[f64],
@@ -334,7 +333,7 @@ impl ModelInputQuality {
                         .partial_cmp(&b.1.confidence)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
-                .unwrap();
+                .expect("dims is a non-empty static array of 6 elements");
             if worst.1.confidence < 0.6 {
                 Some(format!(
                     "Low confidence in {} (confidence={:.2}): {}",
@@ -464,19 +463,6 @@ pub fn emit_data_quality_span(symbol: &str, tool: &str, quality: &ModelInputQual
         data_points = %quality.revenue_growth.data_points,
         quality_warning = %quality.quality_warning.as_deref().unwrap_or("none"),
         "Financial data quality assessment for Regulation variety monitoring"
-    );
-}
-
-/// Emit a Regulation span for provider quality (normalization fidelity).
-pub fn emit_provider_quality_span(symbol: &str, tool: &str, pq: &ProviderQuality) {
-    tracing::debug!(
-        target: "hkask.mcp.companies.data_quality",
-        symbol = %symbol,
-        tool = %tool,
-        provider = %pq.provider,
-        provider_confidence = %pq.provider_confidence,
-        approximated_count = %pq.approximated_fields.len(),
-        "Provider data quality: normalization fidelity assessment"
     );
 }
 

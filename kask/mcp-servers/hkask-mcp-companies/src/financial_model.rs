@@ -664,416 +664,96 @@ pub fn project_model(
     }
 }
 
-// ── Gap decomposition ──────────────────────────────────────────────────────
+// ── Implied growth (reverse DCF) ───────────────────────────────────────────
 
-/// Result of decomposing a forecast-vs-actual return gap.
-#[derive(Debug, Clone, Serialize)]
-pub struct GapDecomposition {
-    pub total_return_gap: f64,
-    pub revenue_growth_contribution: f64,
-    pub gross_margin_contribution: f64,
-    pub da_contribution: f64,
-    pub capex_contribution: f64,
-    pub nwc_contribution: f64,
-    pub multiple_contribution: f64,
-    pub net_debt_contribution: f64,
-    pub residual: f64,
-}
+/// The growth-rate search bounds used by the reverse DCF. Callers verify the
+/// price is bracketed by these bounds before searching.
+pub const IMPLIED_GROWTH_LO: f64 = -0.50;
+pub const IMPLIED_GROWTH_HI: f64 = 1.00;
 
-/// Decompose the gap between projected and actual intrinsic value into
-/// 11-line-item drivers. Each contribution is computed by running the
-/// projection model with only that one assumption changed to the actual,
-/// and measuring the intrinsic value delta.
-pub fn decompose_gap(
-    projected: &ProjectedModel,
-    projected_assumptions: &ProjectionAssumptions,
-    actual_hist: &HistoricalSnapshot,
-    actual_price: f64,
-    actual_multiple: f64,
-    _projected_intrinsic: f64,
-    projected_price: f64,
-) -> GapDecomposition {
-    // Baseline: the original projection gives projected_intrinsic_per_share
-    let base_intrinsic = projected.intrinsic_per_share;
-    let base_price = projected_price;
-
-    // Total return gap: actual price change - projected price change
-    // (if we had projected price and actual price)
-    let projected_return = if base_price > 0.0 {
-        (base_intrinsic - base_price) / base_price
-    } else {
-        0.0
-    };
-    let actual_return = if actual_price > 0.0 && projected_price > 0.0 {
-        (actual_price - projected_price) / projected_price
-    } else {
-        0.0
-    };
-    let total_return_gap = actual_return - projected_return;
-
-    // Helper to compute what intrinsic would be with one parameter changed
-    let compute_delta = |assumptions: &ProjectionAssumptions| -> f64 {
-        let alt_model = project_model(actual_hist, assumptions, 0.0);
-        alt_model.intrinsic_per_share - base_intrinsic
-    };
-
-    // Revenue growth contribution: use actual CAGR vs projected CAGR
-    let mut growth_assumptions = projected_assumptions.clone();
-    growth_assumptions.revenue_growth = actual_hist.revenue_cagr();
-    let revenue_growth_delta = compute_delta(&growth_assumptions);
-
-    // Gross margin contribution
-    let mut gm_assumptions = projected_assumptions.clone();
-    gm_assumptions.gross_margin = actual_hist.gross_margin();
-    let gross_margin_delta = compute_delta(&gm_assumptions);
-
-    // D&A contribution
-    let mut da_assumptions = projected_assumptions.clone();
-    da_assumptions.da_to_revenue = actual_hist.da_to_revenue();
-    let da_delta = compute_delta(&da_assumptions);
-
-    // Capex contribution
-    let mut capex_assumptions = projected_assumptions.clone();
-    capex_assumptions.capex_to_revenue = actual_hist.capex_to_revenue();
-    let capex_delta = compute_delta(&capex_assumptions);
-
-    // NWC contribution
-    let mut nwc_assumptions = projected_assumptions.clone();
-    nwc_assumptions.nwc_to_revenue = actual_hist.nwc_to_revenue();
-    let nwc_delta = compute_delta(&nwc_assumptions);
-
-    // Multiple contribution: (actual multiple - projected multiple) * actual_fcf
-    let projected_multiple = if let Some(last) = projected.periods.last() {
-        if last.free_cash_flow > 0.0 {
-            projected.terminal_value / last.free_cash_flow
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
-    let multiple_delta = (actual_multiple - projected_multiple) * 10.0;
-
-    // Net debt contribution: change in net debt directly affects equity value
-    let projected_net_debt = projected.net_debt;
-    let actual_net_debt = actual_hist.net_debt();
-    let net_debt_delta =
-        (projected_net_debt - actual_net_debt) / actual_hist.shares_outstanding.max(1.0);
-
-    // Residual: total gap minus sum of contributions
-    let sum_contributions = revenue_growth_delta
-        + gross_margin_delta
-        + da_delta
-        + capex_delta
-        + nwc_delta
-        + multiple_delta
-        + net_debt_delta;
-    let residual =
-        (actual_return * base_price) - (projected_return * base_price) - sum_contributions;
-
-    GapDecomposition {
-        total_return_gap,
-        revenue_growth_contribution: revenue_growth_delta,
-        gross_margin_contribution: gross_margin_delta,
-        da_contribution: da_delta,
-        capex_contribution: capex_delta,
-        nwc_contribution: nwc_delta,
-        multiple_contribution: multiple_delta,
-        net_debt_contribution: net_debt_delta,
-        residual,
-    }
-}
-
-// ── Sensitivity analysis ────────────────────────────────────────────────────
-
-/// Result of varying one assumption and measuring intrinsic value delta.
-#[derive(Debug, Clone, Serialize)]
-pub struct SensitivityResult {
-    pub driver: String,
-    pub label: String,
-    pub base_value: f64,
-    pub low_value: f64,
-    pub high_value: f64,
-    pub intrinsic_low: f64,
-    pub intrinsic_high: f64,
-    pub delta_pct: f64,
-    pub fibo_concept: &'static str,
-}
-
-/// Run sensitivity analysis on all key DCF drivers.
-/// Varies each assumption by +/- range_pct and records intrinsic value impact.
-/// Returns results sorted by absolute delta (most impactful first).
-pub fn sensitivity_analysis(
+/// Solve for the revenue-growth rate at which the projected intrinsic value
+/// equals `current_price` (the Mauboussin reverse DCF).
+///
+/// Bisection is monotone in the right direction because intrinsic value is
+/// increasing in `revenue_growth`: when the model's intrinsic exceeds the
+/// price, the growth guess was too *high*, so the upper bound must shrink.
+/// Getting this comparison backwards makes the search diverge from the root
+/// while still returning a plausible-looking number, so it is expressed once
+/// here rather than at each call site.
+///
+/// Returns `None` when `current_price` is not positive, or when the price is
+/// not bracketed by `[IMPLIED_GROWTH_LO, IMPLIED_GROWTH_HI]` (the root lies
+/// outside the searchable range — never fabricate an in-range answer).
+pub fn implied_growth(
     hist: &HistoricalSnapshot,
-    base_assumptions: &ProjectionAssumptions,
-    range_pct: f64,
-) -> Vec<SensitivityResult> {
-    let base = project_model(hist, base_assumptions, 0.0);
-    let base_intrinsic = base.intrinsic_per_share;
-
-    #[allow(clippy::type_complexity)]
-    let drivers: [(
-        &str,
-        &str,
-        &dyn Fn(&ProjectionAssumptions) -> f64,
-        &dyn Fn(&mut ProjectionAssumptions, f64),
-        &str,
-    ); 6] = [
-        (
-            "revenue_growth",
-            "Revenue Growth",
-            &|a| a.revenue_growth,
-            &|a, v| a.revenue_growth = v.clamp(-0.50, 1.00),
-            "fibo-fbc-fct-ra:RevenueGrowthRate",
-        ),
-        (
-            "gross_margin",
-            "Gross Margin",
-            &|a| a.gross_margin,
-            &|a, v| a.gross_margin = v.clamp(0.05, 0.95),
-            "fibo-fbc-fct-ra:GrossProfitMargin",
-        ),
-        (
-            "da_to_revenue",
-            "D&A / Revenue",
-            &|a| a.da_to_revenue,
-            &|a, v| a.da_to_revenue = v.clamp(0.0, 0.20),
-            "fibo-fbc-fct-ra:DepreciationAndAmortization",
-        ),
-        (
-            "capex_to_revenue",
-            "Capex / Revenue",
-            &|a| a.capex_to_revenue,
-            &|a, v| a.capex_to_revenue = v.clamp(0.0, 0.30),
-            "fibo-fbc-fct-ra:CapitalExpenditure",
-        ),
-        (
-            "nwc_to_revenue",
-            "NWC / Revenue",
-            &|a| a.nwc_to_revenue,
-            &|a, v| a.nwc_to_revenue = v.clamp(-0.20, 0.50),
-            "fibo-fbc-fct-ra:NetWorkingCapital",
-        ),
-        (
-            "discount_rate",
-            "Discount Rate",
-            &|a| a.discount_rate,
-            &|a, v| a.discount_rate = v.clamp((a.terminal_growth + 0.0001).max(0.05), 0.30),
-            "fibo-fbc-fct-ra:DiscountRate",
-        ),
-    ];
-
-    let mut results = Vec::new();
-    for (key, label, getter, setter, fibo) in &drivers {
-        let base_val = getter(base_assumptions);
-        let low_val = base_val * (1.0 - range_pct);
-        let high_val = base_val * (1.0 + range_pct);
-
-        let mut low_a = base_assumptions.clone();
-        setter(&mut low_a, low_val);
-        let intrinsic_low = project_model(hist, &low_a, 0.0).intrinsic_per_share;
-
-        let mut high_a = base_assumptions.clone();
-        setter(&mut high_a, high_val);
-        let intrinsic_high = project_model(hist, &high_a, 0.0).intrinsic_per_share;
-
-        let delta_pct = if base_intrinsic > 0.0 {
-            (intrinsic_high - intrinsic_low) / base_intrinsic
-        } else {
-            0.0
-        };
-
-        results.push(SensitivityResult {
-            driver: key.to_string(),
-            label: label.to_string(),
-            base_value: base_val,
-            low_value: low_val,
-            high_value: high_val,
-            intrinsic_low,
-            intrinsic_high,
-            delta_pct,
-            fibo_concept: fibo,
-        });
-    }
-
-    results.sort_by(|a, b| {
-        b.delta_pct
-            .partial_cmp(&a.delta_pct)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    results
-}
-
-// ── Monte Carlo DCF ─────────────────────────────────────────────────────────
-
-/// Distribution of intrinsic values from Monte Carlo simulation.
-#[derive(Debug, Clone, Serialize)]
-pub struct MonteCarloResult {
-    pub simulations: usize,
-    pub base_intrinsic: f64,
-    pub mean_intrinsic: f64,
-    pub std_dev: f64,
-    pub min_intrinsic: f64,
-    pub p10: f64,
-    pub p25: f64,
-    pub median: f64,
-    pub p75: f64,
-    pub p90: f64,
-    pub max_intrinsic: f64,
-    /// Probability intrinsic exceeds current price (if price > 0)
-    pub prob_undervalued: f64,
-    /// Histogram buckets: [(label, count)]
-    pub histogram: Vec<(String, usize)>,
-}
-
-/// Range specification for one assumption in Monte Carlo simulation.
-pub struct McRange {
-    pub revenue_growth: f64,
-    pub gross_margin: f64,
-    pub da_to_revenue: f64,
-    pub capex_to_revenue: f64,
-    pub nwc_to_revenue: f64,
-    pub discount_rate: f64,
-}
-
-impl McRange {
-    /// Validate Monte Carlo perturbation widths before sampling.
-    pub fn validate(&self) -> Result<(), ProjectionAssumptionError> {
-        for (field, value) in [
-            ("range_revenue_growth", self.revenue_growth),
-            ("range_gross_margin", self.gross_margin),
-            ("range_da", self.da_to_revenue),
-            ("range_capex", self.capex_to_revenue),
-            ("range_nwc", self.nwc_to_revenue),
-            ("range_discount_rate", self.discount_rate),
-        ] {
-            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-                return Err(ProjectionAssumptionError::NotFiniteOrOutOfRange {
-                    field,
-                    min: 0.0,
-                    max: 1.0,
-                });
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Validate the relative sensitivity range before varying assumptions.
-pub fn validate_sensitivity_range(range_pct: f64) -> Result<(), ProjectionAssumptionError> {
-    if !range_pct.is_finite() || !(0.0..=1.0).contains(&range_pct) {
-        return Err(ProjectionAssumptionError::NotFiniteOrOutOfRange {
-            field: "range_pct",
-            min: 0.0,
-            max: 1.0,
-        });
-    }
-    Ok(())
-}
-
-impl Default for McRange {
-    fn default() -> Self {
-        Self {
-            revenue_growth: 0.03,
-            gross_margin: 0.03,
-            da_to_revenue: 0.01,
-            capex_to_revenue: 0.01,
-            nwc_to_revenue: 0.02,
-            discount_rate: 0.01,
-        }
-    }
-}
-
-/// Run N Monte Carlo simulations with randomized assumptions within +/- range.
-pub fn monte_carlo_dcf(
-    hist: &HistoricalSnapshot,
-    base_assumptions: &ProjectionAssumptions,
-    simulations: usize,
-    ranges: &McRange,
+    assumptions: &ProjectionAssumptions,
     current_price: f64,
-    rng: &mut impl rand::Rng,
-) -> MonteCarloResult {
-    let base = project_model(hist, base_assumptions, current_price);
-    let mut values: Vec<f64> = Vec::with_capacity(simulations);
-
-    for _ in 0..simulations {
-        let mut a = base_assumptions.clone();
-        a.revenue_growth =
-            sample_uniform(rng, a.revenue_growth, ranges.revenue_growth).clamp(-0.50, 1.00);
-        a.gross_margin = sample_uniform(rng, a.gross_margin, ranges.gross_margin).clamp(0.05, 0.95);
-        a.da_to_revenue =
-            sample_uniform(rng, a.da_to_revenue, ranges.da_to_revenue).clamp(0.0, 0.20);
-        a.capex_to_revenue =
-            sample_uniform(rng, a.capex_to_revenue, ranges.capex_to_revenue).clamp(0.0, 0.30);
-        a.nwc_to_revenue =
-            sample_uniform(rng, a.nwc_to_revenue, ranges.nwc_to_revenue).clamp(-0.20, 0.50);
-        a.discount_rate = sample_uniform(rng, a.discount_rate, ranges.discount_rate)
-            .clamp((a.terminal_growth + 0.0001).max(0.05), 0.30);
-        values.push(project_model(hist, &a, current_price).intrinsic_per_share);
+) -> Option<f64> {
+    if current_price <= 0.0 {
+        return None;
     }
 
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = values.len();
-    let mean = values.iter().sum::<f64>() / n as f64;
-    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n as f64;
-    let std_dev = variance.sqrt();
-
-    // Histogram with 10 buckets
-    let min_val = values[0];
-    let max_val = values[n - 1];
-    let bucket_width = (max_val - min_val) / 10.0;
-    let mut histogram: Vec<(String, usize)> = Vec::new();
-    if bucket_width > 0.0 {
-        for i in 0..10 {
-            let lo = min_val + i as f64 * bucket_width;
-            let hi = lo + bucket_width;
-            let count = values
-                .iter()
-                .filter(|&&v| v >= lo && (i == 9 || v < hi))
-                .count();
-            histogram.push((format!("{:.0}-{:.0}", lo, hi), count));
-        }
-    }
-
-    let prob_undervalued = if current_price > 0.0 {
-        values.iter().filter(|&&v| v > current_price).count() as f64 / n as f64
-    } else {
-        0.0
+    let at_growth = |growth: f64| {
+        project_model(
+            hist,
+            &ProjectionAssumptions {
+                revenue_growth: growth,
+                ..*assumptions
+            },
+            current_price,
+        )
+        .intrinsic_per_share
     };
 
-    MonteCarloResult {
-        simulations: n,
-        base_intrinsic: base.intrinsic_per_share,
-        mean_intrinsic: mean,
-        std_dev,
-        min_intrinsic: values[0],
-        p10: percentile(&values, 0.10),
-        p25: percentile(&values, 0.25),
-        median: percentile(&values, 0.50),
-        p75: percentile(&values, 0.75),
-        p90: percentile(&values, 0.90),
-        max_intrinsic: values[n - 1],
-        prob_undervalued,
-        histogram,
+    if at_growth(IMPLIED_GROWTH_LO) > current_price || at_growth(IMPLIED_GROWTH_HI) < current_price
+    {
+        return None;
     }
+
+    let mut lo = IMPLIED_GROWTH_LO;
+    let mut hi = IMPLIED_GROWTH_HI;
+    let mut implied = 0.0_f64;
+    for _ in 0..50 {
+        let mid = (lo + hi) / 2.0;
+        implied = mid;
+        let intrinsic = at_growth(mid);
+        if (intrinsic - current_price).abs() < 0.0001 {
+            break;
+        }
+        if intrinsic > current_price {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Some(implied)
 }
 
-fn sample_uniform(rng: &mut impl rand::Rng, center: f64, range: f64) -> f64 {
-    let lo = center - range;
-    let hi = center + range;
-    rng.random_range(lo..hi)
-}
+// ── Equity duration — extracted to `financial_model/equity_duration.rs`
+mod equity_duration;
+pub use equity_duration::equity_duration;
 
-fn percentile(sorted: &[f64], p: f64) -> f64 {
-    if sorted.is_empty() {
-        return 0.0;
-    }
-    let idx = (p * (sorted.len() - 1) as f64).round() as usize;
-    sorted[idx.min(sorted.len() - 1)]
-}
+// ── Gap decomposition — extracted to `financial_model/gap_decomposition.rs`
+mod gap_decomposition;
+pub use gap_decomposition::decompose_gap;
+
+// ── Sensitivity analysis — extracted to `financial_model/sensitivity.rs`
+mod sensitivity;
+pub use sensitivity::sensitivity_analysis;
+
+// ── Monte Carlo DCF — extracted to `financial_model/monte_carlo.rs`
+mod monte_carlo;
+pub use monte_carlo::{McRange, monte_carlo_dcf, validate_sensitivity_range};
+
+// ── Scenario impact valuation — extracted to `financial_model/scenario_impact.rs`
+mod scenario_impact;
+pub use scenario_impact::{
+    ScenarioImpactError, ScenarioNodeImpact, ScenarioTreeInput, scenario_impact_dcf,
+};
 
 #[cfg(test)]
 mod tests {
+    use super::monte_carlo::{MC_MAX_SIMULATIONS, MC_MIN_SIMULATIONS};
     use super::*;
 
     fn sample_hist() -> HistoricalSnapshot {
@@ -1107,6 +787,106 @@ mod tests {
             shares_outstanding: 1_000.0,
             tax_rate: 0.21,
         }
+    }
+
+    #[test]
+    fn monte_carlo_dcf_clamps_zero_simulations() {
+        // `simulations = 0` previously panicked on `values[0]` because the
+        // clamp lived at the tool call site, not in this public function.
+        let h = sample_hist();
+        let assumptions = ProjectionAssumptions::from_history(&h);
+        let ranges = McRange::default();
+        let mut rng = rand::rng();
+        let result = monte_carlo_dcf(&h, &assumptions, 0, &ranges, 100.0, &mut rng);
+        assert_eq!(
+            result.simulations, MC_MIN_SIMULATIONS,
+            "zero simulations must clamp up to the floor, not panic"
+        );
+        assert!(result.max_intrinsic >= result.min_intrinsic);
+    }
+
+    #[test]
+    fn monte_carlo_dcf_clamps_excessive_simulations() {
+        let h = sample_hist();
+        let assumptions = ProjectionAssumptions::from_history(&h);
+        let ranges = McRange::default();
+        let mut rng = rand::rng();
+        let result = monte_carlo_dcf(&h, &assumptions, usize::MAX, &ranges, 100.0, &mut rng);
+        assert_eq!(result.simulations, MC_MAX_SIMULATIONS);
+    }
+
+    #[test]
+    fn implied_growth_round_trips_through_project_model() {
+        // The defining property of the reverse DCF: projecting at the returned
+        // growth rate must reproduce the price it was solved for. This fails if
+        // the bisection comparison is inverted (the search then converges away
+        // from the root while still returning an in-range number).
+        let h = sample_hist();
+        let assumptions = ProjectionAssumptions::from_history(&h);
+        let base = project_model(&h, &assumptions, 0.0);
+        // Pick a price the bounds can bracket: the model's own intrinsic value.
+        let price = base.intrinsic_per_share;
+        assert!(price > 0.0, "sample must produce a positive intrinsic");
+
+        let implied = implied_growth(&h, &assumptions, price)
+            .expect("price from the model itself must be bracketed");
+
+        let round_trip = project_model(
+            &h,
+            &ProjectionAssumptions {
+                revenue_growth: implied,
+                ..assumptions
+            },
+            price,
+        )
+        .intrinsic_per_share;
+
+        let relative_error = ((round_trip - price) / price).abs();
+        assert!(
+            relative_error < 0.01,
+            "implied growth {implied} reproduced {round_trip} for price {price} (relative error {relative_error})"
+        );
+    }
+
+    #[test]
+    fn implied_growth_refuses_unbracketed_price() {
+        let h = sample_hist();
+        let assumptions = ProjectionAssumptions::from_history(&h);
+        // A price far above what +100% growth can justify is not bracketed.
+        let unreachable = project_model(
+            &h,
+            &ProjectionAssumptions {
+                revenue_growth: IMPLIED_GROWTH_HI,
+                ..assumptions
+            },
+            0.0,
+        )
+        .intrinsic_per_share
+            * 10.0;
+        assert!(
+            implied_growth(&h, &assumptions, unreachable).is_none(),
+            "an unbracketed price must refuse, not return an in-range growth rate"
+        );
+        assert!(
+            implied_growth(&h, &assumptions, 0.0).is_none(),
+            "a non-positive price must refuse"
+        );
+    }
+
+    #[test]
+    fn implied_growth_is_monotone_in_price() {
+        // Higher price ⇒ higher implied growth. An inverted bisection breaks
+        // this ordering even when the round-trip happens to land close.
+        let h = sample_hist();
+        let assumptions = ProjectionAssumptions::from_history(&h);
+        let base = project_model(&h, &assumptions, 0.0).intrinsic_per_share;
+
+        let low = implied_growth(&h, &assumptions, base * 0.8).expect("bracketed");
+        let high = implied_growth(&h, &assumptions, base * 1.2).expect("bracketed");
+        assert!(
+            high > low,
+            "implied growth must increase with price: got {low} at 0.8x and {high} at 1.2x"
+        );
     }
 
     #[test]

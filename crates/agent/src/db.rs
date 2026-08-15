@@ -93,9 +93,13 @@ pub struct DbThread {
 /// thread blob; round-trips with [`crate::sandboxing::ThreadSandboxGrants`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DbSandboxGrants {
-    /// Canonicalized paths granted write access; each covers its whole subtree.
+    /// Paths granted write access, each paired with the canonical
+    /// (symlink-resolved) target established when the grant was approved; each
+    /// covers its whole subtree. Legacy rows stored a bare path string per
+    /// entry, which still deserializes (as a grant with no resolved canonical)
+    /// via [`settings::GrantedWritePath`]'s string-or-object format.
     #[serde(default)]
-    pub write_paths: Vec<PathBuf>,
+    pub write_paths: Vec<settings::GrantedWritePath>,
     /// Host patterns granted network access, in canonical string form (e.g.
     /// `github.com`, `*.npmjs.org`). Parsed back into patterns on load.
     #[serde(default)]
@@ -424,13 +428,41 @@ impl ThreadsDatabase {
             // We use this to automatically create a database that will
             // be shared within the test (for the test_retrieve_old_thread)
             // but not with concurrent tests.
+            //
+            // zed-kask: D28 — in test builds the override is NOT checked
+            // here because the global `Mutex` would leak between concurrent
+            // tests (one test setting the override would redirect other
+            // tests' `ThreadsDatabase::new` to a file path they don't expect,
+            // causing SQLite schema-migration races). The override is
+            // exercised by `test_threads_db_resolves_kask_override_path`
+            // which calls `resolve_threads_db_path` directly.
             let thread = std::thread::current();
             let test_name = thread.name();
             Connection::open_memory(Some(&format!(
                 "THREAD_FALLBACK_{}",
                 test_name.unwrap_or_default()
             )))
+        } else if let Some(kask_path) = crate::threads_db_path_override() {
+            // zed-kask: D28 — Standardized Artifact Storage.
+            // Archived chat threads live under the kask data root
+            // (`{data_dir}/threads/threads.db`), resolved via the kask-side
+            // `threads_db_path_override` hook (set by `kask_bridge` at
+            // startup), NOT the upstream `paths::data_dir()` (which points at
+            // the zed-kask app data root `~/.local/share/zed-kask/`). This
+            // keeps all kask artifacts under one rooted tree per the
+            // standardized storage layout
+            // (kask/docs/architecture/standardized-artifact-storage.md).
+            //
+            // Pre-release: no back-compat. The override is always wired early
+            // in `main.rs` (user-independent), so this branch is the
+            // production path.
+            if let Some(parent) = kask_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            Connection::open_file(&kask_path.to_string_lossy())
         } else {
+            // Override not set — fall back to upstream path so the editor
+            // remains functional pre-kask-bridge wiring.
             let threads_dir = paths::data_dir().join("threads");
             std::fs::create_dir_all(&threads_dir)?;
             let sqlite_path = threads_dir.join("threads.db");
@@ -947,7 +979,16 @@ mod tests {
             Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
         );
         let grants = DbSandboxGrants {
-            write_paths: vec![PathBuf::from("/tmp/build")],
+            write_paths: vec![
+                // A legacy bare-string grant (no resolved canonical) and a grant
+                // carrying its resolved canonical, to exercise both forms of the
+                // string-or-object round-trip.
+                settings::GrantedWritePath::from_requested(PathBuf::from("/tmp/build")),
+                settings::GrantedWritePath::resolved(
+                    PathBuf::from("/tmp/link"),
+                    PathBuf::from("/tmp/real"),
+                ),
+            ],
             network_hosts: vec!["github.com".to_string(), "*.npmjs.org".to_string()],
             network_any_host: false,
             allow_fs_write_all: false,
@@ -1232,5 +1273,32 @@ mod tests {
             .expect("scroll_position should be restored");
         assert_eq!(scroll.item_ix, 42);
         assert!((scroll.offset_in_item - 13.5).abs() < f32::EPSILON);
+    }
+
+    // zed-kask: D28 — pins the canonical archived-threads DB path.
+    // Tests that `threads_db_path_override` returns the path set by
+    // `set_threads_db_path_override`, and that the override is `None` by
+    // default. Does NOT construct a `ThreadsDatabase` (which would race with
+    // concurrent tests via the global `Mutex`). The path-resolution logic in
+    // `ThreadsDatabase::new` is covered by the production wiring in
+    // `main.rs` + the `cfg!(test)` guard that skips the override in test
+    // builds to prevent cross-test contamination.
+    #[test]
+    fn test_threads_db_override_hook_round_trips() {
+        // Default: no override set (other tests may have reset it).
+        // We set it, verify, then reset.
+        let sentinel = std::path::PathBuf::from("/tmp/kask-test-threads.db");
+        crate::set_threads_db_path_override(Some(sentinel.clone()));
+        assert_eq!(
+            crate::threads_db_path_override(),
+            Some(sentinel),
+            "override hook must return the path set by set_threads_db_path_override"
+        );
+        crate::set_threads_db_path_override(None);
+        assert_eq!(
+            crate::threads_db_path_override(),
+            None,
+            "override hook must return None after reset"
+        );
     }
 }

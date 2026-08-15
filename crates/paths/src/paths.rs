@@ -148,6 +148,19 @@ pub fn data_dir() -> &'static PathBuf {
     CURRENT_DATA_DIR.get_or_init(|| {
         if let Some(custom_dir) = CUSTOM_DATA_DIR.get() {
             custom_dir.clone()
+        } else if cfg!(any(test, feature = "test-support")) {
+            // In test builds, derive from the pinned home_dir() so tests
+            // get a deterministic path. Without this, dirs::data_local_dir()
+            // reads the real XDG_DATA_HOME, making test paths non-deterministic.
+            if cfg!(target_os = "macos") {
+                home_dir()
+                    .join("Library/Application Support")
+                    .join(APP_NAME)
+            } else if cfg!(target_os = "windows") {
+                home_dir().join("AppData/Local").join(APP_NAME)
+            } else {
+                home_dir().join(".local/share").join(APP_NAME_LOWERCASE)
+            }
         } else if cfg!(target_os = "macos") {
             home_dir()
                 .join("Library/Application Support")
@@ -637,4 +650,19 @@ pub fn global_gitignore_path() -> Option<PathBuf> {
     GLOBAL_GITIGNORE_PATH
         .get_or_init(::ignore::gitignore::gitconfig_excludes_path)
         .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D7: App identity constants must be zed-kask, not upstream Zed.
+    /// An upstream merge that reverts these produces a silently broken
+    /// app identity (wrong bundle ID, wrong data dirs, wrong URL scheme).
+    #[test]
+    fn app_identity_constants_are_kask() {
+        assert_eq!(APP_NAME, "Zed-Kask");
+        assert_eq!(URL_SCHEME, "zed-kask");
+        assert_eq!(APP_NAME_LOWERCASE, "zed-kask");
+    }
 }

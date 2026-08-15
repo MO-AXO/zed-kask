@@ -12,10 +12,11 @@ use settings::{RegisterSetting, Settings};
 use settings_content::{
     KaskCodegraphSettingsContent, KaskCompaniesSettingsContent, KaskCondenserSettingsContent,
     KaskCorpusSettingsContent, KaskCuratorEmailSettingsContent, KaskCuratorSettingsContent,
-    KaskDataServiceSettingsContent, KaskFusionSettingsContent, KaskGuardSettingsContent,
-    KaskInferenceProvidersSettingsContent, KaskMcpSettingsContent, KaskMediaSettingsContent,
-    KaskMemorySettingsContent, KaskModelsSettingsContent, KaskScenariosSettingsContent,
-    KaskSettingsContent, KaskTrainingSettingsContent,
+    KaskDataServiceSettingsContent, KaskInferenceProvidersSettingsContent, KaskMcpSettingsContent,
+    KaskMediaSettingsContent, KaskMemorySettingsContent, KaskModelsSettingsContent,
+    KaskPredictionMarketsSettingsContent, KaskResearchSettingsContent,
+    KaskScenariosSettingsContent, KaskSettingsContent, KaskSwarmSettingsContent,
+    KaskToolRouterSettingsContent, KaskTrainingSettingsContent,
 };
 
 use collections::HashMap;
@@ -23,7 +24,7 @@ use collections::HashMap;
 /// Kask-specific settings (the `"kask"` section in settings.json).
 ///
 /// Non-secret configuration for hKask features: MCP server load set,
-/// data-service toggles, curator/regulation/guard/memory/condenser settings.
+/// data-service toggles, curator/regulation/memory/condenser settings.
 /// API keys are stored in the keychain via `CredentialsProvider` (D9b).
 ///
 /// `Default` is the single source of truth for every subsection's defaults.
@@ -33,7 +34,16 @@ use collections::HashMap;
 /// deserializes `SettingsContent` and converts via `From`).
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Default, RegisterSetting)]
 pub struct KaskSettings {
-    /// MCP server configuration — which of the 10 built-in servers to load.
+    /// Kask data directory — the root for all kask databases, agent state,
+    /// and file-based stores. When empty, `mcp_env()` resolves a default
+    /// via `hkask_types::agent_paths::resolve_data_dir()` (HKASK_DATA_DIR
+    /// env var → XDG_DATA_HOME/hkask → ~/.local/share/hkask) and injects
+    /// it as `HKASK_DATA_DIR` for every MCP server. This ensures servers
+    /// always receive a consistent data directory without requiring the
+    /// operator to set environment variables manually.
+    pub data_dir: String,
+
+    /// MCP server configuration — which of the 12 built-in servers to load.
     pub mcp: KaskMcpSettings,
 
     /// Data service toggles (non-secret — API keys are in the keychain).
@@ -42,14 +52,14 @@ pub struct KaskSettings {
     /// Curator configuration.
     pub curator: KaskCuratorSettings,
 
-    /// Guard / regulation configuration.
-    pub guard: KaskGuardSettings,
-
     /// Memory consolidation and recall configuration.
     pub memory: KaskMemorySettings,
 
     /// Condenser configuration for context management in inference threads.
     pub condenser: KaskCondenserSettings,
+
+    /// Research MCP server configuration.
+    pub research: KaskResearchSettings,
 
     /// Codegraph MCP server configuration.
     pub codegraph: KaskCodegraphSettings,
@@ -65,18 +75,30 @@ pub struct KaskSettings {
 
     /// Scenarios MCP server configuration.
     pub scenarios: KaskScenariosSettings,
+    /// Prediction-markets data-service configuration.
+    pub prediction_markets: KaskPredictionMarketsSettings,
+
+    /// Swarm (Agent Bestiary World) MCP server configuration.
+    pub swarm: KaskSwarmSettings,
 
     /// Training MCP server configuration.
     pub training: KaskTrainingSettings,
 
-    /// Multi-model fusion inference configuration.
-    pub fusion: KaskFusionSettings,
-
     /// Kask-wide model configuration: default, embedding, and classifier models.
     pub models: KaskModelsSettings,
 
+    /// Tool-router thresholds for narrowing the MCP tool set on complex or
+    /// tool-directed requests. Defaults match the historical
+    /// `LazyToolRouter::new()` hardcoded values (`0.30` / `40`).
+    pub tool_router: KaskToolRouterSettings,
+
     /// Inference provider toggles (non-secret — API keys are in the keychain).
     pub inference_providers: KaskInferenceProvidersSettings,
+
+    /// Local collab server configuration. When enabled, zed-kask launches a
+    /// local collab server at startup so the kask extensions panel can fetch
+    /// `/api/kask-skills` without depending on the deployed `zed.dev` server.
+    pub collab: KaskCollabSettings,
 }
 
 /// MCP server load configuration.
@@ -87,7 +109,7 @@ pub struct KaskSettings {
 /// system deserializes `SettingsContent` and converts via `From`).
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct KaskMcpSettings {
-    /// Whether to load the default MCP server set (10 servers).
+    /// Whether to load the default MCP server set (12 servers).
     /// Set to `false` to disable all kask MCP servers.
     pub load_default: bool,
 
@@ -135,39 +157,76 @@ pub struct KaskDataServiceSettings {
 /// `openai_compatible.<provider_id>` entry to settings.json so zed's
 /// OpenAI-compatible provider machinery registers it.
 ///
-/// `Default` auto-enables providers whose API key is present in the process
-/// environment, so a user with `DEEPINFRA_API_KEY` set gets DeepInfra enabled
-/// without an explicit `kask.inference_providers.deepinfra_enabled: true`.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+/// `Default` returns all-false (pure, no side effects). The env-var-based
+/// auto-enable logic lives in `From<KaskInferenceProvidersSettingsContent>`,
+/// which is the only production path. This keeps `Default` deterministic for
+/// tests and `KaskSettings::default()`.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Default)]
 pub struct KaskInferenceProvidersSettings {
     /// Enable DeepInfra (OpenAI-compatible inference).
     pub deepinfra_enabled: bool,
 
-    /// Enable fal.ai (OpenAI-compatible inference + media).
-    pub fal_enabled: bool,
-
-    /// Enable Together AI (OpenAI-compatible inference).
-    pub together_enabled: bool,
-
     /// Enable OpenRouter (unified API for 200+ models).
     pub openrouter_enabled: bool,
 
-    /// Enable KiloCode (unified API for 200+ models + tools).
-    pub kilocode_enabled: bool,
-
-    /// Enable Cline (open source unified API for models and tools).
-    pub cline_enabled: bool,
+    /// Enable AtlasCloud (task-based media + OpenAI-compatible LLM).
+    pub atlascloud_enabled: bool,
 }
 
-impl Default for KaskInferenceProvidersSettings {
-    fn default() -> Self {
+impl KaskInferenceProvidersSettings {
+    /// Construct from the process environment — auto-enables providers whose
+    /// API key env var is set. This is the same logic `From<Content>` uses
+    /// when the user hasn't explicitly set a toggle. Exposed as a public
+    /// method so the settings UI (which doesn't depend on `settings_content`)
+    /// can resolve the same defaults without constructing a `Content` struct.
+    #[must_use]
+    pub fn from_env() -> Self {
         Self {
             deepinfra_enabled: std::env::var("DEEPINFRA_API_KEY").is_ok(),
-            fal_enabled: std::env::var("FALAI_API_KEY").is_ok(),
-            together_enabled: std::env::var("TOGETHERAI_API_KEY").is_ok(),
             openrouter_enabled: std::env::var("OPENROUTER_API_KEY").is_ok(),
-            kilocode_enabled: std::env::var("KILOCODE_API_KEY").is_ok(),
-            cline_enabled: std::env::var("CLINE_API_KEY").is_ok(),
+            atlascloud_enabled: std::env::var("ATLASCLOUD_API_KEY").is_ok(),
+        }
+    }
+}
+
+/// Local collab server configuration.
+///
+/// When `enabled` is true, zed-kask launches a local `collab serve api`
+/// process at startup so the kask extensions panel can fetch
+/// `/api/kask-skills` without depending on the deployed `zed.dev` server
+/// having the kask route. The server uses SQLite for local dev; S3 is
+/// only required for publish/download/vote.
+///
+/// `Default` is the single source of truth — `From<Content>` reads from it
+/// via `unwrap_or(default.field)`. The defaults launch a server on
+/// `localhost:3000` with a `sqlite:./kask_marketplace.db` database.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct KaskCollabSettings {
+    /// Whether to auto-launch the local collab server at startup.
+    pub enabled: bool,
+
+    /// SQLite connection string (e.g. `sqlite:./kask_marketplace.db`).
+    pub database_url: String,
+
+    /// HTTP port the collab server listens on.
+    pub http_port: u16,
+
+    /// Zed environment (`development`, `staging`, `production`).
+    pub zed_environment: String,
+
+    /// Marketplace base URL the extensions panel uses. When set and non-empty,
+    /// overrides the `server_url`-based resolution in `kask_marketplace_base_url`.
+    pub marketplace_url: String,
+}
+
+impl Default for KaskCollabSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            database_url: "sqlite:kask_marketplace.db?mode=rwc".into(),
+            http_port: 3000,
+            zed_environment: "development".into(),
+            marketplace_url: "http://localhost:3000".into(),
         }
     }
 }
@@ -235,22 +294,6 @@ pub struct KaskCuratorEmailSettings {
     pub digest_interval_secs: u64,
 }
 
-/// Curator email configuration (non-secret fields).
-/// Guard / regulation configuration.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct KaskGuardSettings {
-    /// Direct-chat guard strategy: "buffer", "incremental", or "cascade_only".
-    pub direct_chat_strategy: String,
-}
-
-impl Default for KaskGuardSettings {
-    fn default() -> Self {
-        Self {
-            direct_chat_strategy: "cascade_only".to_string(),
-        }
-    }
-}
-
 /// Memory consolidation and recall configuration.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct KaskMemorySettings {
@@ -268,6 +311,27 @@ pub struct KaskMemorySettings {
 
     /// Whether to automatically inject recalled memories into prompts.
     pub auto_inject: bool,
+
+    /// Number of recent turns from the invoking thread to include as
+    /// short-term context for skill cascades. 0 disables short-term
+    /// injection (cascades run isolated, as before). Default: 6.
+    pub cascade_short_term_turns: u32,
+
+    /// Saliency floor for cascade memory recall. A memory chunk is injected
+    /// only if `relevance_score * confidence >= saliency_floor`. Default:
+    /// 0.3 (same as `recall_min_confidence`).
+    pub cascade_memory_saliency_floor: f64,
+
+    /// Maximum memory chunks to inject into a skill cascade, after merging
+    /// across all participant stores (user, curator, swarm). Default: 5.
+    pub cascade_memory_max_chunks: u32,
+
+    /// Maximum tokens per turn for cascade short-term context. Each turn
+    /// exceeding this budget is condensed via the local algorithmic
+    /// condenser (TF-IDF word-rank for conversation, flashrank for other
+    /// content), then truncated to the token cap if still over. 0 disables
+    /// condensation (raw turn text is passed verbatim). Default: 512.
+    pub cascade_turn_token_cap: u32,
 }
 
 impl Default for KaskMemorySettings {
@@ -278,6 +342,10 @@ impl Default for KaskMemorySettings {
             recall_limit: 5,
             recall_min_confidence: 0.3,
             auto_inject: true,
+            cascade_short_term_turns: 6,
+            cascade_memory_saliency_floor: 0.3,
+            cascade_memory_max_chunks: 5,
+            cascade_turn_token_cap: 512,
         }
     }
 }
@@ -313,7 +381,7 @@ impl Default for KaskCondenserSettings {
     fn default() -> Self {
         Self {
             profile: "normal".to_string(),
-            auto_compress_tool_results: true,
+            auto_compress_tool_results: false,
             persona_keywords: Vec::default(),
             saliency_window: 5,
         }
@@ -325,6 +393,14 @@ impl Default for KaskCondenserSettings {
 pub struct KaskCodegraphSettings {
     /// Database path for the codegraph store. When empty, uses in-memory.
     pub db_path: String,
+}
+
+/// Research MCP server configuration.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Default)]
+pub struct KaskResearchSettings {
+    /// RSS database path for persistent feed storage. When empty, the server
+    /// resolves a default path under the hKask data directory.
+    pub rss_db: String,
 }
 
 /// Companies MCP server configuration.
@@ -383,7 +459,7 @@ impl Default for KaskCorpusSettings {
             ocr_moderate_max: 0.15,
             ocr_sample_rate: 0.10,
             ocr_tuneable: true,
-            template_root: "registry".to_string(),
+            template_root: "kask/registry".to_string(),
         }
     }
 }
@@ -395,17 +471,28 @@ fn default_embedding_model() -> String {
 /// Media MCP server configuration.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Default)]
 pub struct KaskMediaSettings {
-    /// TTS model override (e.g., "fal.ai/qwen-3-tts").
+    /// TTS model override (e.g., "DeepInfra/hexgrad/Kokoro-82M").
     pub tts_model: String,
 
-    /// STT model override (e.g., "fal.ai/wizper").
+    /// STT model override (e.g., "DeepInfra/whisper-large-v3").
     pub stt_model: String,
 
-    /// Vision model override (e.g., "KiloCode/qwen/qwen3-vl-235b-a22b-instruct").
+    /// Vision model override (e.g., "OpenRouter/qwen/qwen3-vl-235b-a22b-instruct").
     pub vision_model: String,
 
-    /// Image generation model override (e.g., "fal.ai/flux-2").
+    /// Image generation model override (e.g., "DeepInfra/black-forest-labs/FLUX-2-klein-4b").
     pub image_gen_model: String,
+}
+
+/// Prediction-markets MCP server configuration.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Default)]
+pub struct KaskPredictionMarketsSettings {
+    /// Data directory for the calibration journal. When empty, in-memory.
+    pub data_dir: String,
+    /// Cache TTL in seconds for market-data responses (0 = server default).
+    pub cache_ttl_secs: u64,
+    /// Base-event registry: "domain:series,..." pairs for CMP construction.
+    pub base_events: String,
 }
 
 /// Scenarios MCP server configuration.
@@ -413,6 +500,133 @@ pub struct KaskMediaSettings {
 pub struct KaskScenariosSettings {
     /// Data directory for scenario persistence. When empty, uses in-memory.
     pub data_dir: String,
+}
+
+/// Swarm (Agent Bestiary World) MCP server configuration.
+///
+/// The API key is a secret — it lives in the keychain under
+/// `kask://credentials/hkask_abw_api_key`, injected as `HKASK_ABW_API_KEY`.
+/// Only non-secret config lives here.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct KaskSwarmSettings {
+    /// Which backend to route to (v2 §15). Default `Abw` (v1 behavior).
+    /// `Local` routes to zed-kask's local substrate crates.
+    pub mode: SwarmModeConfig,
+
+    /// ABW API base URL override. When empty, uses the default
+    /// (`https://agent-bestiary.world`).
+    pub api_url: String,
+
+    /// Per-dispatch credit ceiling for spend tools (the S3 budget gate).
+    /// Dispatches estimated above this are refused before any credit is spent.
+    pub max_credits_per_dispatch: u32,
+
+    /// Whether Xaman Ek curator calls may be initiated without a per-call
+    /// consent token (S5 policy). Default `false` — sending task content to
+    /// a third-party curator requires explicit opt-in per the plan's §3.7.
+    /// When `false`, `swarm_xaman` requires a `consent_token` (action "curate").
+    /// When `true`, the operator has globally opted in and the token is optional.
+    pub curator_consent_default: bool,
+
+    /// Directory containing local agent cards (`<id>/agent_card.json`),
+    /// read by `LocalAgentRegistry` in `Local` mode. When empty, uses the
+    /// default `agents/local/curated`.
+    pub local_agents_dir: String,
+
+    /// Directory containing local swarms (`<id>/swarm.json`), read/written by
+    /// `LocalSwarmRegistry` - the local replica of an ABW workspace roster.
+    /// When empty, uses the default `agents/local/swarms`.
+    pub local_swarms_dir: String,
+
+    /// Directory containing the zed-kask skill corpus (`.agents/skills/`),
+    /// read by `AgentExecutor::build_skill_catalog` to inject skill
+    /// descriptions into the local agent's system prompt (Slice 6 — local
+    /// agent skill-awareness). When empty, skill-awareness is disabled (the
+    /// agent runs skill-blind). Set from the project's `.agents/skills/`
+    /// directory.
+    pub skills_dir: String,
+
+    /// Default model id for newly created ABW agents when the caller omits
+    /// `model` (KA-05). When empty, uses the server default
+    /// (`claude-haiku-4-5-20251001`).
+    pub default_agent_model: String,
+
+    /// Whether to start the A2A HTTP gateway (loopback JSON-RPC server that
+    /// exposes local agents to external A2A clients). Default `false`
+    /// (opt-in — it opens a loopback port).
+    pub a2a_http_enabled: bool,
+
+    /// SQLCipher passphrase for the local swarm semantic-memory store. Must
+    /// be >=8 chars. When empty, uses the pre-release default `"allostery"`.
+    pub memory_passphrase: String,
+
+    /// On-disk path for the local swarm semantic-memory DB. When empty, uses
+    /// the default `<hkask data dir>/swarm_memory.db`.
+    pub memory_db_path: String,
+
+    /// Embedding vector dimension for the semantic-memory embedding store.
+    /// Default 1024.
+    pub embedding_dim: usize,
+}
+
+/// Mirror of `SwarmMode` in the server crate, kept separate to avoid a
+/// circular dependency (the bridge crate does not depend on the server
+/// crate). The two enums MUST stay in sync — see the `Default` impl comment
+/// on `KaskSwarmSettings`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SwarmModeConfig {
+    /// Route to Agent Bestiary World (v1 behavior).
+    #[default]
+    Abw,
+    /// Route to local substrate crates (v2, §15).
+    Local,
+}
+
+impl std::fmt::Display for SwarmModeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Abw => write!(f, "abw"),
+            Self::Local => write!(f, "local"),
+        }
+    }
+}
+
+impl From<settings_content::SwarmModeContent> for SwarmModeConfig {
+    fn from(c: settings_content::SwarmModeContent) -> Self {
+        match c {
+            settings_content::SwarmModeContent::Abw => Self::Abw,
+            settings_content::SwarmModeContent::Local => Self::Local,
+        }
+    }
+}
+
+impl Default for KaskSwarmSettings {
+    fn default() -> Self {
+        // These defaults MUST stay in sync with `SwarmConfig::default()` in
+        // `kask/mcp-servers/hkask-mcp-swarm/src/config.rs`. The bridge emits
+        // env vars (`HKASK_ABW_*` / `HKASK_SWARM_*`) from this `Default` via
+        // `mcp_env()`; the server reads them in `SwarmConfig::from_env`. The
+        // two `Default` impls are deliberately separate (the server crate
+        // does not depend on the bridge crate) to avoid a circular dependency
+        // — the duplication is the seam between them. If you change a default
+        // here, change it there too, and update the
+        // `swarm_settings_default_emits_no_env` test below.
+        Self {
+            mode: SwarmModeConfig::default(),
+            api_url: String::new(),
+            max_credits_per_dispatch: 50,
+            curator_consent_default: false,
+            local_agents_dir: String::new(),
+            local_swarms_dir: String::new(),
+            skills_dir: String::new(),
+            default_agent_model: String::new(),
+            a2a_http_enabled: false,
+            memory_passphrase: String::new(),
+            memory_db_path: String::new(),
+            embedding_dim: 1024,
+        }
+    }
 }
 
 /// Training MCP server configuration.
@@ -427,94 +641,24 @@ pub struct KaskTrainingSettings {
     pub cache_dir: String,
 }
 
-/// Multi-model fusion inference configuration (the `"kask.fusion"` section).
-///
-/// When `enabled` is true, the Curator and the kask panel route inference
-/// through a panel of models judged by `judge_model` according to `mode`.
-/// Mirrors `hkask_types::FusionConfig` but lives in the non-secret settings
-/// layer so users can edit it in the settings UI.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-pub struct KaskFusionSettings {
-    /// Master toggle. When false, fusion is disabled.
-    pub enabled: bool,
-
-    /// Judge/fuser model (provider-prefixed, e.g. `"OpenRouter/z-ai/glm-5.2"`).
-    /// When empty, defers to `FusionConfig::kask_default()`.
-    pub judge_model: String,
-
-    /// Comma-separated panel models (provider-prefixed). When empty, defers
-    /// to `FusionConfig::kask_default()` or auto-discovery (Slice 4).
-    pub panel_models: String,
-
-    /// Judge deliberation mode: `"synthesis"` | `"best-of-n"` | `"critique"` |
-    /// `"deliberation"` | `"pi"` | `"algo"`. When empty, defaults to `"synthesis"`.
-    pub mode: String,
-
-    /// Algo merge strategy when `mode == "algo"`: `"merge"` | `"vote"`.
-    /// When empty, defaults to `"merge"`.
-    pub algo_method: String,
-
-    /// Comma-separated skill anchors (e.g. `"pragmatic-semantics,coding-guidelines"`).
-    /// Each must match a `FusionSkill` serde rename.
-    pub skills: String,
-
-    /// Max rounds for `deliberation` mode. Default 5.
-    pub max_rounds: u32,
-
-    /// OpenRouter auto-discovery max prompt price per million tokens (USD).
-    /// Default 1.0. Used by Slice 4 to filter candidate panel models.
-    pub openrouter_max_price: f64,
-
-    /// OpenRouter auto-discovery minimum intelligence index.
-    /// Default 40.0. Used by Slice 4 to filter candidate panel models.
-    pub openrouter_min_intelligence: f64,
-
-    /// Coherence threshold (0.0–1.0) for measured convergence in deliberation
-    /// mode. When set, the orchestrator computes epistemic tension ξ and
-    /// coherence Γ from panel response embeddings; if Γ exceeds this threshold,
-    /// an advisory "measured convergence" signal is emitted. Empty/disabled
-    /// by default — requires an embedding API key (`DEEPINFRA_API_KEY` or `OPENROUTER_API_KEY`).
-    pub coherence_threshold: Option<f64>,
-
-    /// Enable query-complexity-based panel sizing. When `true`, simple queries
-    /// dispatch fewer panel models (1 for Simple, 2 for Medium, all for Complex).
-    /// Default: `false`.
-    pub panel_sizing_enabled: bool,
-
-    /// Enable substrate-aware degradation. When `true`, panel size is reduced
-    /// under high latency pressure. Default: `false`.
-    pub pressure_adaptive_enabled: bool,
-}
-
-impl Default for KaskFusionSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            judge_model: String::default(),
-            panel_models: String::default(),
-            mode: "synthesis".to_string(),
-            algo_method: "merge".to_string(),
-            skills: String::default(),
-            max_rounds: 5,
-            openrouter_max_price: 1.0,
-            openrouter_min_intelligence: 40.0,
-            coherence_threshold: None,
-            panel_sizing_enabled: false,
-            pressure_adaptive_enabled: false,
-        }
-    }
-}
-
 /// Kask-wide model configuration.
 ///
 /// Provider-prefixed model names that override the kask built-in defaults.
 /// When a field is empty, kask falls back to its default model selection
-/// (typically the zed `agent.default_model` or the fusion judge model).
+/// (typically the zed `agent.default_model`).
+///
+/// **Two-layer default design (intentional):** `default_model`, `embedding_model`,
+/// and `classifier_model` default to empty strings in `Default`. When empty, the
+/// `effective_*` methods fall back to the `DEFAULT_*_MODEL` constants, which are
+/// themselves `const` references to the single source of truth in
+/// `hkask_inference::model_constants`. This lets users override individual models
+/// in settings.json while keeping the kask built-in defaults as the fallback.
+/// Do not duplicate the model ids anywhere else — `model_constants` is canonical.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, Default)]
 pub struct KaskModelsSettings {
     /// Default inference model (provider-prefixed, e.g. `"openrouter/z-ai/glm-5.2"`).
     /// When set, overrides the kask default for Curator, skill cascade, and
-    /// kask panel inference (unless fusion is enabled, which takes precedence).
+    /// kask panel inference.
     pub default_model: String,
 
     /// Embedding model for corpus indexing and memory semantic recall
@@ -525,17 +669,21 @@ pub struct KaskModelsSettings {
     /// Classifier model for guard/regulation classification tasks
     /// (provider-prefixed). When empty, falls back to the kask default.
     pub classifier_model: String,
+
+    /// OCR vision model for scanned document OCR (provider-prefixed).
+    /// When empty, falls back to the kask default.
+    pub ocr_model: String,
 }
 
 impl KaskModelsSettings {
     /// The kask default inference model.
-    pub const DEFAULT_INFERENCE_MODEL: &'static str = "openrouter/z-ai/glm-5.2";
-
-    /// The kask default embedding model.
-    pub const DEFAULT_EMBEDDING_MODEL: &'static str = "openrouter/z-ai/glm-5.2";
-
-    /// The kask default classifier model.
-    pub const DEFAULT_CLASSIFIER_MODEL: &'static str = "openrouter/z-ai/glm-5.2";
+    ///
+    /// Single source of truth: `hkask_inference::model_constants::DEFAULT_FALLBACK_MODEL`.
+    /// Re-exported here so callers within kask_bridge don't need a direct dep on
+    /// hkask-inference for this constant, but the value is not duplicated — it
+    /// is a `const` reference to the canonical definition.
+    pub const DEFAULT_INFERENCE_MODEL: &'static str =
+        hkask_inference::model_constants::DEFAULT_FALLBACK_MODEL;
 
     /// Resolve the effective default inference model, falling back to the
     /// kask default when the setting is empty.
@@ -548,23 +696,72 @@ impl KaskModelsSettings {
         }
     }
 
-    /// Resolve the effective embedding model, falling back to the kask default.
+    /// The kask default OCR model.
+    ///
+    /// Single source of truth: `hkask_inference::model_constants::DEFAULT_OCR_MODEL`.
+    pub const DEFAULT_OCR_MODEL: &'static str = hkask_inference::model_constants::DEFAULT_OCR_MODEL;
+
+    /// Resolve the effective OCR model, falling back to the kask default
+    /// when the setting is empty.
     #[must_use]
-    pub fn effective_embedding_model(&self) -> &str {
-        if self.embedding_model.trim().is_empty() {
-            Self::DEFAULT_EMBEDDING_MODEL
+    pub fn effective_ocr_model(&self) -> &str {
+        if self.ocr_model.trim().is_empty() {
+            Self::DEFAULT_OCR_MODEL
         } else {
-            &self.embedding_model
+            &self.ocr_model
         }
     }
+}
 
-    /// Resolve the effective classifier model, falling back to the kask default.
-    #[must_use]
-    pub fn effective_classifier_model(&self) -> &str {
-        if self.classifier_model.trim().is_empty() {
-            Self::DEFAULT_CLASSIFIER_MODEL
-        } else {
-            &self.classifier_model
+/// Tool-router thresholds for narrowing the MCP tool set on complex or
+/// tool-directed requests.
+///
+/// `Default` is the single source of truth — `From<Content>` reads from it
+/// via `unwrap_or(default.field)`.
+///
+/// `complex_word_threshold` was lowered 40 -> 9 -> 6 (2026-08-12). At 40 the
+/// router almost never activated: it is fail-open, so a sub-threshold message
+/// retains **all** MCP tool schemas (~15,000 tokens across 331 tools), and few
+/// real requests reach 40 words.
+///
+/// 6 rather than 9 because the 200-case eval set showed 82 of 215 graded
+/// requests never activating at all -- ordinary asks like "list all the kanban
+/// boards i own" sit at 6-8 words. Dropping to 6 cut mean retained tools from 170
+/// to 93 of 252 with recall unchanged at 1.000 on both the tuned and held-out
+/// splits. Going below 6 changed nothing further (the 4-word setting is identical
+/// to 6), so 6 is the floor of the useful range rather than an aggressive value.
+///
+/// Short vague messages stay safe because the confidence gate, not the word
+/// count, is what protects them: all 11 fail-open cases peak below 0.50 and fail
+/// open regardless of length.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct KaskToolRouterSettings {
+    /// Score threshold for tool inclusion (0.0–1.0). Messages scoring above
+    /// this threshold get the narrowed tool set.
+    pub threshold: f64,
+
+    /// Minimum word count for a message to be considered "complex" enough to
+    /// trigger routing.
+    pub complex_word_threshold: usize,
+}
+
+impl Default for KaskToolRouterSettings {
+    fn default() -> Self {
+        Self {
+            threshold: 0.30,
+            complex_word_threshold: 6,
+        }
+    }
+}
+
+impl From<KaskToolRouterSettingsContent> for KaskToolRouterSettings {
+    fn from(c: KaskToolRouterSettingsContent) -> Self {
+        let default = Self::default();
+        Self {
+            threshold: c.threshold.unwrap_or(default.threshold),
+            complex_word_threshold: c
+                .complex_word_threshold
+                .unwrap_or(default.complex_word_threshold),
         }
     }
 }
@@ -575,79 +772,56 @@ impl Settings for KaskSettings {
     }
 }
 
-impl KaskFusionSettings {
-    /// Convert the settings-layer representation into the runtime `FusionConfig`.
-    ///
-    /// Returns `None` when fusion is disabled (`enabled == false`) or when the
-    /// panel models string fails to parse into a non-empty panel.
-    ///
-    /// When `judge_model` or `panel_models` are empty, falls back to
-    /// `FusionConfig::kask_default()` so users can enable fusion with just the
-    /// master toggle and get sensible defaults.
-    #[must_use]
-    pub fn to_fusion_config(&self) -> Option<hkask_types::fusion::FusionConfig> {
-        if !self.enabled {
-            return None;
-        }
-
-        // Parse mode (fall back to synthesis on unknown values).
-        let mode = self
-            .mode
-            .parse::<hkask_types::fusion::FusionMode>()
-            .unwrap_or_default();
-
-        // Parse algo method (fall back to merge on unknown values).
-        let algo_method = self
-            .algo_method
-            .parse::<hkask_types::fusion::AlgoMethod>()
-            .unwrap_or_default();
-
-        // Parse skills — silently drop unknown anchors.
-        let skills: Vec<hkask_types::fusion::FusionSkill> = self
-            .skills
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse().ok())
-            .collect();
-
-        // Start from kask_default so empty judge/panel fields get sensible
-        // defaults rather than producing an invalid config.
-        let mut config = hkask_types::fusion::FusionConfig::kask_default();
-        if !self.judge_model.trim().is_empty() {
-            config.judge = self.judge_model.trim().to_string();
-        }
-        if !self.panel_models.trim().is_empty() {
-            let panel: Vec<String> = self
-                .panel_models
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            if let Some(non_empty) = hkask_types::fusion::NonEmptyVec::from_vec(panel) {
-                config.panel = non_empty;
-            }
-        }
-        config.mode = mode;
-        config.algo_method = algo_method;
-        config.skills = skills;
-        config.max_rounds = self.max_rounds;
-        config.coherence_threshold = self.coherence_threshold;
-        config.panel_sizing_enabled = self.panel_sizing_enabled;
-        config.pressure_adaptive_enabled = self.pressure_adaptive_enabled;
-        Some(config)
-    }
-}
-
 impl KaskSettings {
     /// Build the environment variable map for MCP server child processes.
     ///
     /// Translates all kask settings into the env vars that MCP servers read
-    /// at startup. Called by the composition root before `start_server_with_env`.
-    /// Only non-empty/non-default values are included — MCP servers have their
-    /// own fallback defaults for unset env vars.
+    /// at startup. Only non-empty/non-default values are included — MCP
+    /// servers have their own fallback defaults for unset env vars.
+    ///
+    /// This is the **config** half of the env map. The full env for a server
+    /// child process — config + keychain credentials + the inference socket —
+    /// is assembled by [`build_mcp_server_env`](crate::build_mcp_server_env)
+    /// in `mcp_servers`, the single canonical path. It composes this crate's
+    /// `mcp_env()` with the per-server credential/config allowlists. There
+    /// is no other env-construction path; do not re-introduce one.
     pub fn mcp_env(&self) -> std::collections::HashMap<String, String> {
         let mut env = std::collections::HashMap::new();
+
+        // Always inject HKASK_DATA_DIR so every MCP server can resolve
+        // paths consistently. Priority: settings field → env var → resolved
+        // platform default. Without this, servers that fall back to
+        // `resolve_under_data_dir` may get an empty HKASK_DATA_DIR and resolve
+        // to different paths depending on the launch context.
+        let data_dir = if !self.data_dir.is_empty() {
+            self.data_dir.clone()
+        } else {
+            std::env::var("HKASK_DATA_DIR").unwrap_or_else(|_| {
+                hkask_types::agent_paths::resolve_data_dir()
+                    .to_string_lossy()
+                    .to_string()
+            })
+        };
+        env.insert("HKASK_DATA_DIR".to_string(), data_dir);
+
+        // Map the curator's WebID (stashed in `HKASK_CURATOR_WEBID` by the
+        // deferred task) to `HKASK_WEBID` so the curator MCP server picks it
+        // up as its identity. The `config_env` allowlist filters this to the
+        // curator server only — other servers don't receive `HKASK_WEBID`
+        // from this mapping and fall through to their own identity resolution.
+        if let Ok(curator_webid) = std::env::var("HKASK_CURATOR_WEBID") {
+            env.insert("HKASK_WEBID".to_string(), curator_webid);
+        }
+
+        // Pass the governed server id set to the swarm server so it can
+        // filter cloned cards' declared `mcp_tools` to these servers (the
+        // provenance boundary for third-party ABW cards). Only the swarm
+        // server's `config_env` allowlist includes this var, so no other
+        // child receives it.
+        env.insert(
+            "HKASK_MCP_SERVER_IDS".to_string(),
+            crate::BUILT_IN_MCP_SERVERS_IDS.join(","),
+        );
 
         // Defaults are read from each subsection's `Default` impl so there's a
         // single source of truth — changing `Default` automatically updates
@@ -680,6 +854,11 @@ impl KaskSettings {
             );
         }
 
+        // ── Research ──
+        if !self.research.rss_db.is_empty() {
+            env.insert("HKASK_RSS_DB".to_string(), self.research.rss_db.clone());
+        }
+
         // ── Companies ──
         if self.companies.chronic_staleness_days > 0 {
             env.insert(
@@ -693,12 +872,19 @@ impl KaskSettings {
                 self.companies.fermi_defaults.clone(),
             );
         }
-        if !self.companies.transactions_dir.is_empty() {
-            env.insert(
-                "HKASK_TRANSACTIONS_DIR".to_string(),
-                self.companies.transactions_dir.clone(),
-            );
-        }
+        // D28 — Standardized Artifact Storage. Emit HKASK_TRANSACTIONS_DIR
+        // so the portfolio server can auto-load transaction files. Default
+        // is `mcp/portfolio/transactions/` under the kask data root.
+        let transactions_dir = if !self.companies.transactions_dir.is_empty() {
+            self.companies.transactions_dir.clone()
+        } else {
+            hkask_types::agent_paths::resolve_under_data_dir(std::path::Path::new(
+                "mcp/portfolio/transactions",
+            ))
+            .to_string_lossy()
+            .to_string()
+        };
+        env.insert("HKASK_TRANSACTIONS_DIR".to_string(), transactions_dir);
 
         // ── Corpus ──
         if self.corpus.embedding_dim != corpus_default.embedding_dim {
@@ -707,7 +893,7 @@ impl KaskSettings {
                 self.corpus.embedding_dim.to_string(),
             );
         }
-        if !self.corpus.embedding_model.is_empty() {
+        if self.corpus.embedding_model != corpus_default.embedding_model {
             env.insert(
                 "HKASK_EMBEDDING_MODEL".to_string(),
                 self.corpus.embedding_model.clone(),
@@ -781,6 +967,97 @@ impl KaskSettings {
             );
         }
 
+        // ── Prediction markets ──
+        if !self.prediction_markets.data_dir.is_empty() {
+            env.insert(
+                "HKASK_PREDICTION_MARKETS_DATA".to_string(),
+                self.prediction_markets.data_dir.clone(),
+            );
+        }
+        if self.prediction_markets.cache_ttl_secs > 0 {
+            env.insert(
+                "HKASK_PREDICTION_MARKETS_CACHE_TTL_SECS".to_string(),
+                self.prediction_markets.cache_ttl_secs.to_string(),
+            );
+        }
+        if !self.prediction_markets.base_events.is_empty() {
+            env.insert(
+                "HKASK_PREDICTION_MARKETS_BASE_EVENTS".to_string(),
+                self.prediction_markets.base_events.clone(),
+            );
+        }
+
+        // ── Swarm (ABW + Local) ──
+        // The API key is a credential (injected by `build_mcp_server_env`
+        // from the keychain), not config — only non-secret fields are here.
+        let swarm_default = KaskSwarmSettings::default();
+        if self.swarm.mode != swarm_default.mode {
+            env.insert("HKASK_SWARM_MODE".to_string(), self.swarm.mode.to_string());
+        }
+        if !self.swarm.api_url.is_empty() {
+            env.insert("HKASK_ABW_API_URL".to_string(), self.swarm.api_url.clone());
+        }
+        if self.swarm.max_credits_per_dispatch != swarm_default.max_credits_per_dispatch {
+            env.insert(
+                "HKASK_ABW_MAX_CREDITS".to_string(),
+                self.swarm.max_credits_per_dispatch.to_string(),
+            );
+        }
+        if self.swarm.curator_consent_default != swarm_default.curator_consent_default {
+            env.insert(
+                "HKASK_ABW_CURATOR_CONSENT_DEFAULT".to_string(),
+                self.swarm.curator_consent_default.to_string(),
+            );
+        }
+        if !self.swarm.local_agents_dir.is_empty() {
+            env.insert(
+                "HKASK_LOCAL_AGENTS_DIR".to_string(),
+                self.swarm.local_agents_dir.clone(),
+            );
+        }
+        if !self.swarm.local_swarms_dir.is_empty() {
+            env.insert(
+                "HKASK_LOCAL_SWARMS_DIR".to_string(),
+                self.swarm.local_swarms_dir.clone(),
+            );
+        }
+        if !self.swarm.skills_dir.is_empty() {
+            env.insert(
+                "HKASK_SKILLS_DIR".to_string(),
+                self.swarm.skills_dir.clone(),
+            );
+        }
+        if !self.swarm.default_agent_model.is_empty() {
+            env.insert(
+                "HKASK_ABW_DEFAULT_AGENT_MODEL".to_string(),
+                self.swarm.default_agent_model.clone(),
+            );
+        }
+        if self.swarm.a2a_http_enabled != swarm_default.a2a_http_enabled {
+            env.insert(
+                "HKASK_A2A_HTTP_ENABLE".to_string(),
+                self.swarm.a2a_http_enabled.to_string(),
+            );
+        }
+        if !self.swarm.memory_passphrase.is_empty() {
+            env.insert(
+                "HKASK_SWARM_MEMORY_PASSPHRASE".to_string(),
+                self.swarm.memory_passphrase.clone(),
+            );
+        }
+        if !self.swarm.memory_db_path.is_empty() {
+            env.insert(
+                "HKASK_SWARM_MEMORY_DB".to_string(),
+                self.swarm.memory_db_path.clone(),
+            );
+        }
+        if self.swarm.embedding_dim != swarm_default.embedding_dim {
+            env.insert(
+                "HKASK_SWARM_EMBEDDING_DIM".to_string(),
+                self.swarm.embedding_dim.to_string(),
+            );
+        }
+
         // ── Training ──
         if !self.training.host.is_empty() {
             env.insert(
@@ -815,9 +1092,12 @@ impl KaskSettings {
                 self.models.classifier_model.clone(),
             );
         }
+        if !self.models.ocr_model.is_empty() {
+            env.insert("HKASK_OCR_MODEL".to_string(), self.models.ocr_model.clone());
+        }
 
         // ── Curator email (non-secret) ──
-        // The SMTP password is injected separately by `mcp_env_with_credentials`
+        // The SMTP password is injected separately by `build_mcp_server_env`
         // from the keychain entry `kask://credentials/hkask_smtp_password`.
         if !self.curator.email.mxroute_server.is_empty() {
             env.insert(
@@ -866,42 +1146,6 @@ impl KaskSettings {
             );
         }
 
-        env
-    }
-
-    /// Build the environment variable map for MCP server child processes,
-    /// including API keys resolved from zed's `CredentialsProvider` keychain.
-    ///
-    /// This bridges the two keychain namespaces: the kask settings UI writes
-    /// keys via zed's `CredentialsProvider` (under `kask://credentials/<key>`),
-    /// while MCP servers read env vars / hKask's `Keychain` (service "hkask").
-    /// This function reads from zed's keychain and injects the values as env
-    /// vars so MCP servers find them via `std::env::var`.
-    ///
-    /// `credential_urls` is a list of `(env_var_name, keychain_url)` pairs to read.
-    /// The composition root builds this from the enabled data services and
-    /// inference providers via `credential_urls_for_mcp`.
-    pub async fn mcp_env_with_credentials(
-        &self,
-        credential_urls: &[(String, String)],
-        credentials_provider: &dyn credentials_provider::CredentialsProvider,
-        cx: &gpui::AsyncApp,
-    ) -> std::collections::HashMap<String, String> {
-        let mut env = self.mcp_env();
-        for (env_var, url) in credential_urls {
-            // Don't override env vars already set in the process environment —
-            // the operator's shell takes precedence.
-            if std::env::var(env_var).is_ok() {
-                continue;
-            }
-            if let Ok(Some((_username, password))) =
-                credentials_provider.read_credentials(url, cx).await
-                && let Ok(value) = String::from_utf8(password)
-                && !value.is_empty()
-            {
-                env.insert(env_var.clone(), value);
-            }
-        }
         env
     }
 }
@@ -968,17 +1212,6 @@ impl From<KaskCuratorSettingsContent> for KaskCuratorSettings {
     }
 }
 
-impl From<KaskGuardSettingsContent> for KaskGuardSettings {
-    fn from(c: KaskGuardSettingsContent) -> Self {
-        let default = Self::default();
-        Self {
-            direct_chat_strategy: c
-                .direct_chat_strategy
-                .unwrap_or(default.direct_chat_strategy),
-        }
-    }
-}
-
 impl From<KaskMemorySettingsContent> for KaskMemorySettings {
     fn from(c: KaskMemorySettingsContent) -> Self {
         let default = Self::default();
@@ -992,6 +1225,18 @@ impl From<KaskMemorySettingsContent> for KaskMemorySettings {
                 .recall_min_confidence
                 .unwrap_or(default.recall_min_confidence),
             auto_inject: c.auto_inject.unwrap_or(default.auto_inject),
+            cascade_short_term_turns: c
+                .cascade_short_term_turns
+                .unwrap_or(default.cascade_short_term_turns),
+            cascade_memory_saliency_floor: c
+                .cascade_memory_saliency_floor
+                .unwrap_or(default.cascade_memory_saliency_floor),
+            cascade_memory_max_chunks: c
+                .cascade_memory_max_chunks
+                .unwrap_or(default.cascade_memory_max_chunks),
+            cascade_turn_token_cap: c
+                .cascade_turn_token_cap
+                .unwrap_or(default.cascade_turn_token_cap),
         }
     }
 }
@@ -1015,6 +1260,15 @@ impl From<KaskCodegraphSettingsContent> for KaskCodegraphSettings {
         let default = Self::default();
         Self {
             db_path: c.db_path.unwrap_or(default.db_path),
+        }
+    }
+}
+
+impl From<KaskResearchSettingsContent> for KaskResearchSettings {
+    fn from(c: KaskResearchSettingsContent) -> Self {
+        let default = Self::default();
+        Self {
+            rss_db: c.rss_db.unwrap_or(default.rss_db),
         }
     }
 }
@@ -1046,7 +1300,12 @@ impl From<KaskCorpusSettingsContent> for KaskCorpusSettings {
                 .filter(|&d| d > 0)
                 .unwrap_or(default.embedding_dim),
             embedding_model: c.embedding_model.unwrap_or(default.embedding_model),
-            ocr_concurrency: c.ocr_concurrency.unwrap_or(default.ocr_concurrency),
+            // Treat 0 as "use default" — 0 concurrency would silently disable
+            // OCR (no pages processed in parallel).
+            ocr_concurrency: c
+                .ocr_concurrency
+                .filter(|&d| d > 0)
+                .unwrap_or(default.ocr_concurrency),
             ocr_simple_max: c.ocr_simple_max.unwrap_or(default.ocr_simple_max),
             ocr_moderate_max: c.ocr_moderate_max.unwrap_or(default.ocr_moderate_max),
             ocr_sample_rate: c.ocr_sample_rate.unwrap_or(default.ocr_sample_rate),
@@ -1068,11 +1327,46 @@ impl From<KaskMediaSettingsContent> for KaskMediaSettings {
     }
 }
 
+impl From<KaskPredictionMarketsSettingsContent> for KaskPredictionMarketsSettings {
+    fn from(c: KaskPredictionMarketsSettingsContent) -> Self {
+        let default = Self::default();
+        Self {
+            data_dir: c.data_dir.unwrap_or(default.data_dir),
+            cache_ttl_secs: c.cache_ttl_secs.unwrap_or(default.cache_ttl_secs),
+            base_events: c.base_events.unwrap_or(default.base_events),
+        }
+    }
+}
+
 impl From<KaskScenariosSettingsContent> for KaskScenariosSettings {
     fn from(c: KaskScenariosSettingsContent) -> Self {
         let default = Self::default();
         Self {
             data_dir: c.data_dir.unwrap_or(default.data_dir),
+        }
+    }
+}
+
+impl From<KaskSwarmSettingsContent> for KaskSwarmSettings {
+    fn from(c: KaskSwarmSettingsContent) -> Self {
+        let default = Self::default();
+        Self {
+            mode: c.mode.map(Into::into).unwrap_or(default.mode),
+            api_url: c.api_url.unwrap_or(default.api_url),
+            max_credits_per_dispatch: c
+                .max_credits_per_dispatch
+                .unwrap_or(default.max_credits_per_dispatch),
+            curator_consent_default: c
+                .curator_consent_default
+                .unwrap_or(default.curator_consent_default),
+            local_agents_dir: c.local_agents_dir.unwrap_or(default.local_agents_dir),
+            local_swarms_dir: c.local_swarms_dir.unwrap_or(default.local_swarms_dir),
+            skills_dir: c.skills_dir.unwrap_or(default.skills_dir),
+            default_agent_model: c.default_agent_model.unwrap_or(default.default_agent_model),
+            a2a_http_enabled: c.a2a_http_enabled.unwrap_or(default.a2a_http_enabled),
+            memory_passphrase: c.memory_passphrase.unwrap_or(default.memory_passphrase),
+            memory_db_path: c.memory_db_path.unwrap_or(default.memory_db_path),
+            embedding_dim: c.embedding_dim.unwrap_or(default.embedding_dim),
         }
     }
 }
@@ -1087,34 +1381,6 @@ impl From<KaskTrainingSettingsContent> for KaskTrainingSettings {
     }
 }
 
-impl From<KaskFusionSettingsContent> for KaskFusionSettings {
-    fn from(c: KaskFusionSettingsContent) -> Self {
-        let default = Self::default();
-        Self {
-            enabled: c.enabled.unwrap_or(default.enabled),
-            judge_model: c.judge_model.unwrap_or(default.judge_model),
-            panel_models: c.panel_models.unwrap_or(default.panel_models),
-            mode: c.mode.unwrap_or(default.mode),
-            algo_method: c.algo_method.unwrap_or(default.algo_method),
-            skills: c.skills.unwrap_or(default.skills),
-            max_rounds: c.max_rounds.unwrap_or(default.max_rounds),
-            openrouter_max_price: c
-                .openrouter_max_price
-                .unwrap_or(default.openrouter_max_price),
-            openrouter_min_intelligence: c
-                .openrouter_min_intelligence
-                .unwrap_or(default.openrouter_min_intelligence),
-            coherence_threshold: c.coherence_threshold,
-            panel_sizing_enabled: c
-                .panel_sizing_enabled
-                .unwrap_or(default.panel_sizing_enabled),
-            pressure_adaptive_enabled: c
-                .pressure_adaptive_enabled
-                .unwrap_or(default.pressure_adaptive_enabled),
-        }
-    }
-}
-
 impl From<KaskModelsSettingsContent> for KaskModelsSettings {
     fn from(c: KaskModelsSettingsContent) -> Self {
         let default = Self::default();
@@ -1122,20 +1388,36 @@ impl From<KaskModelsSettingsContent> for KaskModelsSettings {
             default_model: c.default_model.unwrap_or(default.default_model),
             embedding_model: c.embedding_model.unwrap_or(default.embedding_model),
             classifier_model: c.classifier_model.unwrap_or(default.classifier_model),
+            ocr_model: c.ocr_model.unwrap_or(default.ocr_model),
         }
     }
 }
 
 impl From<KaskInferenceProvidersSettingsContent> for KaskInferenceProvidersSettings {
     fn from(c: KaskInferenceProvidersSettingsContent) -> Self {
+        // When the user hasn't explicitly set a toggle (field is `None`),
+        // auto-enable the provider if its API key is present in the process
+        // environment. `from_env()` is the single source of truth for this
+        // logic — `Default` returns all-false so that `KaskSettings::default()`
+        // and tests remain deterministic and side-effect-free.
+        let from_env = Self::from_env();
+        Self {
+            deepinfra_enabled: c.deepinfra_enabled.unwrap_or(from_env.deepinfra_enabled),
+            openrouter_enabled: c.openrouter_enabled.unwrap_or(from_env.openrouter_enabled),
+            atlascloud_enabled: c.atlascloud_enabled.unwrap_or(from_env.atlascloud_enabled),
+        }
+    }
+}
+
+impl From<settings_content::KaskCollabSettingsContent> for KaskCollabSettings {
+    fn from(c: settings_content::KaskCollabSettingsContent) -> Self {
         let default = Self::default();
         Self {
-            deepinfra_enabled: c.deepinfra_enabled.unwrap_or(default.deepinfra_enabled),
-            fal_enabled: c.fal_enabled.unwrap_or(default.fal_enabled),
-            together_enabled: c.together_enabled.unwrap_or(default.together_enabled),
-            openrouter_enabled: c.openrouter_enabled.unwrap_or(default.openrouter_enabled),
-            kilocode_enabled: c.kilocode_enabled.unwrap_or(default.kilocode_enabled),
-            cline_enabled: c.cline_enabled.unwrap_or(default.cline_enabled),
+            enabled: c.enabled.unwrap_or(default.enabled),
+            database_url: c.database_url.unwrap_or(default.database_url),
+            http_port: c.http_port.unwrap_or(default.http_port),
+            zed_environment: c.zed_environment.unwrap_or(default.zed_environment),
+            marketplace_url: c.marketplace_url.unwrap_or(default.marketplace_url),
         }
     }
 }
@@ -1143,21 +1425,28 @@ impl From<KaskInferenceProvidersSettingsContent> for KaskInferenceProvidersSetti
 impl From<KaskSettingsContent> for KaskSettings {
     fn from(c: KaskSettingsContent) -> Self {
         Self {
+            data_dir: c.data_dir.unwrap_or_default(),
             mcp: c.mcp.map(Into::into).unwrap_or_default(),
             data_services: c.data_services.map(Into::into).unwrap_or_default(),
             curator: c.curator.map(Into::into).unwrap_or_default(),
-            guard: c.guard.map(Into::into).unwrap_or_default(),
             memory: c.memory.map(Into::into).unwrap_or_default(),
             condenser: c.condenser.map(Into::into).unwrap_or_default(),
             codegraph: c.codegraph.map(Into::into).unwrap_or_default(),
+            research: c.research.map(Into::into).unwrap_or_default(),
             companies: c.companies.map(Into::into).unwrap_or_default(),
             corpus: c.corpus.map(Into::into).unwrap_or_default(),
             media: c.media.map(Into::into).unwrap_or_default(),
             scenarios: c.scenarios.map(Into::into).unwrap_or_default(),
+            prediction_markets: c.prediction_markets.map(Into::into).unwrap_or_default(),
+            swarm: c.swarm.map(Into::into).unwrap_or_default(),
             training: c.training.map(Into::into).unwrap_or_default(),
-            fusion: c.fusion.map(Into::into).unwrap_or_default(),
             models: c.models.map(Into::into).unwrap_or_default(),
-            inference_providers: c.inference_providers.map(Into::into).unwrap_or_default(),
+            tool_router: c.tool_router.map(Into::into).unwrap_or_default(),
+            inference_providers: c
+                .inference_providers
+                .map(Into::into)
+                .unwrap_or_else(KaskInferenceProvidersSettings::from_env),
+            collab: c.collab.map(Into::into).unwrap_or_default(),
         }
     }
 }
@@ -1165,6 +1454,25 @@ impl From<KaskSettingsContent> for KaskSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pins the `kask_bridge` half of the tool-router default-sync contract.
+    /// `LazyToolRouter::new()` in the `agent` crate hardcodes the same pair as a
+    /// fallback for settings-free construction, and `agent` cannot depend on
+    /// this crate (that would invert the D8 seam), so the invariant is pinned
+    /// from both sides against literals. Change one, change the other:
+    /// `crates/agent/src/tool_router.rs::default_thresholds_are_the_documented_values`.
+    #[test]
+    fn tool_router_defaults_match_agent_side_fallback() {
+        let default = KaskToolRouterSettings::default();
+        assert_eq!(
+            default.complex_word_threshold, 6,
+            "word threshold changed — update LazyToolRouter::new() in crates/agent/src/tool_router.rs"
+        );
+        assert!(
+            (default.threshold - 0.30).abs() < f64::EPSILON,
+            "score threshold changed — update LazyToolRouter::new() in crates/agent/src/tool_router.rs"
+        );
+    }
 
     // Regression test for the silent `embedding_dim == 0` bug. A user
     // setting `embedding_dim: 0` in their settings file would construct a
@@ -1193,6 +1501,29 @@ mod tests {
             settings.corpus.embedding_dim, 1024,
             "embedding_dim: 0 should fall back to the default (1024), \
              not construct a zero-dimensional store"
+        );
+    }
+
+    #[test]
+    fn corpus_settings_treats_zero_ocr_concurrency_as_default() {
+        let content = KaskSettingsContent {
+            corpus: Some(KaskCorpusSettingsContent {
+                embedding_dim: None,
+                embedding_model: None,
+                ocr_concurrency: Some(0),
+                ocr_simple_max: None,
+                ocr_moderate_max: None,
+                ocr_sample_rate: None,
+                ocr_tuneable: None,
+                template_root: None,
+            }),
+            ..Default::default()
+        };
+        let settings = KaskSettings::from(content);
+        assert_eq!(
+            settings.corpus.ocr_concurrency, 4,
+            "ocr_concurrency: 0 should fall back to the default (4), \
+             not silently disable OCR"
         );
     }
 
@@ -1267,7 +1598,7 @@ mod tests {
     // deserialization, NOT for Default::default(). When the user had a `kask`
     // section but no `kask.mcp` subsection, From<KaskSettingsContent> fell back
     // to KaskMcpSettings::default() → load_default: false, and sync_kask_mcp_servers
-    // treated all 10 servers as disabled, registering nothing. The manual Default
+    // treated all 12 servers as disabled, registering nothing. The manual Default
     // impl above returns true, matching the serde default.
     #[test]
     fn mcp_settings_default_load_default_is_true() {
@@ -1321,28 +1652,10 @@ mod tests {
     }
 
     #[test]
-    fn condenser_settings_default_auto_compress_is_true() {
+    fn condenser_settings_default_auto_compress_is_false() {
         assert!(
-            KaskCondenserSettings::default().auto_compress_tool_results,
-            "KaskCondenserSettings::default() must return auto_compress_tool_results: true"
-        );
-    }
-
-    #[test]
-    fn fusion_settings_default_mode_and_algo_method() {
-        let default = KaskFusionSettings::default();
-        assert_eq!(default.mode, "synthesis");
-        assert_eq!(default.algo_method, "merge");
-        assert_eq!(default.max_rounds, 5);
-        assert_eq!(default.openrouter_max_price, 1.0);
-        assert_eq!(default.openrouter_min_intelligence, 40.0);
-    }
-
-    #[test]
-    fn guard_settings_default_strategy_is_cascade_only() {
-        assert_eq!(
-            KaskGuardSettings::default().direct_chat_strategy,
-            "cascade_only"
+            !KaskCondenserSettings::default().auto_compress_tool_results,
+            "KaskCondenserSettings::default() must return auto_compress_tool_results: false"
         );
     }
 
@@ -1355,14 +1668,11 @@ mod tests {
         assert!(settings.mcp.load_default);
         assert!(settings.curator.always_on);
         assert_eq!(settings.curator.algedonic_threshold, 0.8);
-        assert_eq!(settings.guard.direct_chat_strategy, "cascade_only");
         assert!(settings.memory.auto_inject);
         assert_eq!(settings.memory.consolidation_cadence_secs, 300);
-        assert!(settings.condenser.auto_compress_tool_results);
+        assert!(!settings.condenser.auto_compress_tool_results);
         assert_eq!(settings.condenser.profile, "normal");
         assert_eq!(settings.corpus.embedding_dim, 1024);
-        assert_eq!(settings.fusion.mode, "synthesis");
-        assert_eq!(settings.fusion.max_rounds, 5);
     }
 
     // The present-but-null-field path: when a subsection is present but a field
@@ -1386,6 +1696,10 @@ mod tests {
                 recall_limit: None,
                 recall_min_confidence: None,
                 auto_inject: None,
+                cascade_short_term_turns: None,
+                cascade_memory_saliency_floor: None,
+                cascade_memory_max_chunks: None,
+                cascade_turn_token_cap: None,
             }),
             ..Default::default()
         };
@@ -1397,13 +1711,84 @@ mod tests {
         assert_eq!(settings.memory.consolidation_cadence_secs, 300);
     }
 
+    // Collab server defaults: the local collab server is enabled by default
+    // with SQLite on port 3000. This pins the zero-config behavior — without
+    // these defaults, the kask extensions panel hits 404 on zed.dev because
+    // the deployed server doesn't have the /api/kask-skills route.
+    #[test]
+    fn collab_settings_default_is_enabled_with_sqlite() {
+        let default = KaskCollabSettings::default();
+        assert!(
+            default.enabled,
+            "KaskCollabSettings::default() must be enabled"
+        );
+        assert_eq!(default.database_url, "sqlite:kask_marketplace.db?mode=rwc");
+        assert_eq!(default.http_port, 3000);
+        assert_eq!(default.zed_environment, "development");
+        assert_eq!(default.marketplace_url, "http://localhost:3000");
+    }
+
+    #[test]
+    fn kask_settings_from_empty_content_uses_collab_defaults() {
+        let settings = KaskSettings::from(KaskSettingsContent::default());
+        assert!(settings.collab.enabled);
+        assert_eq!(settings.collab.http_port, 3000);
+        assert_eq!(settings.collab.marketplace_url, "http://localhost:3000");
+    }
+
+    #[test]
+    fn kask_settings_from_present_collab_subsection_with_null_fields_uses_defaults() {
+        let content = KaskSettingsContent {
+            collab: Some(settings_content::KaskCollabSettingsContent {
+                enabled: None,
+                database_url: None,
+                http_port: None,
+                zed_environment: None,
+                marketplace_url: None,
+            }),
+            ..Default::default()
+        };
+        let settings = KaskSettings::from(content);
+        assert!(settings.collab.enabled);
+        assert_eq!(settings.collab.http_port, 3000);
+        assert_eq!(
+            settings.collab.database_url,
+            "sqlite:kask_marketplace.db?mode=rwc"
+        );
+    }
+
+    #[test]
+    fn kask_settings_from_present_collab_subsection_preserves_explicit_overrides() {
+        let content = KaskSettingsContent {
+            collab: Some(settings_content::KaskCollabSettingsContent {
+                enabled: Some(false),
+                database_url: Some("sqlite:./custom.db".into()),
+                http_port: Some(4000),
+                zed_environment: Some("staging".into()),
+                marketplace_url: Some("https://market.example.com".into()),
+            }),
+            ..Default::default()
+        };
+        let settings = KaskSettings::from(content);
+        assert!(!settings.collab.enabled);
+        assert_eq!(settings.collab.database_url, "sqlite:./custom.db");
+        assert_eq!(settings.collab.http_port, 4000);
+        assert_eq!(settings.collab.zed_environment, "staging");
+        assert_eq!(
+            settings.collab.marketplace_url,
+            "https://market.example.com"
+        );
+    }
+
     // `mcp_env()` must not emit env vars for settings that match `Default`.
     // Previously `mcp_env()` compared against inlined magic numbers (1024, 4,
     // 0.05, 0.15, 0.10, "registry", 5) that duplicated `Default` values. If
     // `Default` changed, the comparison would drift and emit env vars for the
     // default case. Now `mcp_env()` reads from `Default::default()`, so changing
     // `Default` automatically updates the comparison. This test pins that: a
-    // `KaskSettings::default()` (all defaults) produces an empty `mcp_env()`.
+    // `KaskSettings::default()` (all defaults) does not emit per-server config
+    // vars. `HKASK_DATA_DIR` is always emitted (it is a kask-wide critical
+    // path, not a per-server toggle) — see `mcp_env_always_emits_data_dir`.
     #[test]
     fn mcp_env_emits_nothing_for_default_settings() {
         let settings = KaskSettings::default();
@@ -1428,8 +1813,46 @@ mod tests {
             "default template_root must not be emitted"
         );
         assert!(
+            !env.contains_key("HKASK_EMBEDDING_MODEL"),
+            "default embedding_model must not be emitted — the `is_empty()` check was a drift bug; the default is non-empty"
+        );
+        assert!(
             !env.contains_key("HKASK_CONDENSE_SALIENCY_WINDOW"),
             "default saliency_window must not be emitted"
+        );
+    }
+
+    // `HKASK_DATA_DIR` is a kask-wide critical path — it must ALWAYS be
+    // injected by `mcp_env()` so every MCP server can resolve databases
+    // consistently, even when the operator never set the env var or the
+    // settings field. The resolved default comes from
+    // `hkask_types::agent_paths::resolve_data_dir()`.
+    #[test]
+    fn mcp_env_always_emits_data_dir() {
+        let settings = KaskSettings::default();
+        let env = settings.mcp_env();
+        assert!(
+            env.contains_key("HKASK_DATA_DIR"),
+            "HKASK_DATA_DIR must always be emitted — without it, MCP servers \
+             cannot resolve database paths consistently"
+        );
+        let dir = env.get("HKASK_DATA_DIR").unwrap();
+        assert!(
+            !dir.is_empty(),
+            "HKASK_DATA_DIR must resolve to a non-empty path even for default settings"
+        );
+    }
+
+    // When the operator sets `data_dir` in settings, `mcp_env()` must use
+    // that value instead of the env var or resolved default.
+    #[test]
+    fn mcp_env_data_dir_setting_overrides_env() {
+        let mut settings = KaskSettings::default();
+        settings.data_dir = "/custom/kask/data".to_string();
+        let env = settings.mcp_env();
+        assert_eq!(
+            env.get("HKASK_DATA_DIR").map(String::as_str),
+            Some("/custom/kask/data")
         );
     }
 
@@ -1444,6 +1867,200 @@ mod tests {
         assert_eq!(
             env.get("HKASK_EMBEDDING_DIM").map(String::as_str),
             Some("2048")
+        );
+    }
+
+    // The `embedding_model` field has a non-empty `Default`
+    // (`DeepInfra/Qwen/Qwen3-Embedding-0.6B`), so the comparison must be
+    // against `Default`, not `is_empty()`. A user override must be emitted;
+    // the default must not.
+    #[test]
+    fn mcp_env_emits_embedding_model_when_overridden() {
+        let mut settings = KaskSettings::default();
+        settings.corpus.embedding_model = "OpenAI/text-embedding-3-large".to_string();
+        let env = settings.mcp_env();
+        assert_eq!(
+            env.get("HKASK_EMBEDDING_MODEL").map(String::as_str),
+            Some("OpenAI/text-embedding-3-large")
+        );
+    }
+
+    // Swarm settings: `Default` is the single source of truth — default
+    // settings emit no swarm env vars; a non-default credit ceiling emits
+    // `HKASK_ABW_MAX_CREDITS`; the API key is never in `mcp_env()` (it is a
+    // keychain credential, injected by `build_mcp_server_env`).
+    #[test]
+    fn swarm_settings_default_emits_no_env() {
+        let settings = KaskSettings::default();
+        let env = settings.mcp_env();
+        assert!(!env.contains_key("HKASK_ABW_API_URL"));
+        assert!(!env.contains_key("HKASK_ABW_MAX_CREDITS"));
+        assert!(!env.contains_key("HKASK_ABW_CURATOR_CONSENT_DEFAULT"));
+        assert!(!env.contains_key("HKASK_SWARM_MODE"));
+        assert!(!env.contains_key("HKASK_LOCAL_AGENTS_DIR"));
+        assert!(!env.contains_key("HKASK_LOCAL_SWARMS_DIR"));
+        assert!(!env.contains_key("HKASK_SKILLS_DIR"));
+        assert!(!env.contains_key("HKASK_ABW_DEFAULT_AGENT_MODEL"));
+        assert!(!env.contains_key("HKASK_A2A_HTTP_ENABLE"));
+        assert!(!env.contains_key("HKASK_SWARM_MEMORY_PASSPHRASE"));
+        assert!(!env.contains_key("HKASK_SWARM_MEMORY_DB"));
+        assert!(!env.contains_key("HKASK_SWARM_EMBEDDING_DIM"));
+        assert!(
+            !env.contains_key("HKASK_ABW_API_KEY"),
+            "the ABW API key is a credential, not config — it must never appear in mcp_env()"
+        );
+        assert_eq!(settings.swarm.max_credits_per_dispatch, 50);
+        assert!(!settings.swarm.curator_consent_default);
+        assert_eq!(settings.swarm.mode, SwarmModeConfig::Abw);
+        assert!(!settings.swarm.a2a_http_enabled);
+        assert_eq!(settings.swarm.embedding_dim, 1024);
+    }
+
+    #[test]
+    fn swarm_settings_non_default_emits_env() {
+        let mut settings = KaskSettings::default();
+        settings.swarm.mode = SwarmModeConfig::Local;
+        settings.swarm.max_credits_per_dispatch = 100;
+        settings.swarm.api_url = "https://staging.agent-bestiary.world".to_string();
+        settings.swarm.curator_consent_default = true;
+        settings.swarm.local_agents_dir = "/custom/agents/dir".to_string();
+        settings.swarm.local_swarms_dir = "/custom/swarms/dir".to_string();
+        settings.swarm.skills_dir = "/custom/skills/dir".to_string();
+        settings.swarm.default_agent_model = "claude-sonnet-4-6".to_string();
+        settings.swarm.a2a_http_enabled = true;
+        settings.swarm.memory_passphrase = "real-secret".to_string();
+        settings.swarm.memory_db_path = "/custom/memory.db".to_string();
+        settings.swarm.embedding_dim = 2048;
+        let env = settings.mcp_env();
+        assert_eq!(
+            env.get("HKASK_SWARM_MODE").map(String::as_str),
+            Some("local")
+        );
+        assert_eq!(
+            env.get("HKASK_ABW_MAX_CREDITS").map(String::as_str),
+            Some("100")
+        );
+        assert_eq!(
+            env.get("HKASK_ABW_API_URL").map(String::as_str),
+            Some("https://staging.agent-bestiary.world")
+        );
+        assert_eq!(
+            env.get("HKASK_ABW_CURATOR_CONSENT_DEFAULT")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            env.get("HKASK_LOCAL_AGENTS_DIR").map(String::as_str),
+            Some("/custom/agents/dir")
+        );
+        assert_eq!(
+            env.get("HKASK_LOCAL_SWARMS_DIR").map(String::as_str),
+            Some("/custom/swarms/dir")
+        );
+        assert_eq!(
+            env.get("HKASK_SKILLS_DIR").map(String::as_str),
+            Some("/custom/skills/dir")
+        );
+        assert_eq!(
+            env.get("HKASK_ABW_DEFAULT_AGENT_MODEL").map(String::as_str),
+            Some("claude-sonnet-4-6")
+        );
+        assert_eq!(
+            env.get("HKASK_A2A_HTTP_ENABLE").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            env.get("HKASK_SWARM_MEMORY_PASSPHRASE").map(String::as_str),
+            Some("real-secret")
+        );
+        assert_eq!(
+            env.get("HKASK_SWARM_MEMORY_DB").map(String::as_str),
+            Some("/custom/memory.db")
+        );
+        assert_eq!(
+            env.get("HKASK_SWARM_EMBEDDING_DIM").map(String::as_str),
+            Some("2048")
+        );
+    }
+
+    // `KaskInferenceProvidersSettings::default()` must be pure (all-false) —
+    // no env-var reads. This keeps `KaskSettings::default()` and tests
+    // deterministic. The env-var auto-enable logic lives in `from_env()` and
+    // `From<Content>`, not `Default`.
+    #[test]
+    fn inference_providers_default_is_all_false() {
+        let default = KaskInferenceProvidersSettings::default();
+        assert!(!default.deepinfra_enabled);
+        assert!(!default.openrouter_enabled);
+        assert!(!default.atlascloud_enabled);
+    }
+
+    // `KaskSettings::default()` must also have all-false inference providers,
+    // since it delegates to `KaskInferenceProvidersSettings::default()`.
+    #[test]
+    fn kask_settings_default_inference_providers_all_false() {
+        let settings = KaskSettings::default();
+        assert!(!settings.inference_providers.deepinfra_enabled);
+        assert!(!settings.inference_providers.openrouter_enabled);
+    }
+
+    // `from_env()` reads env vars — this test verifies it doesn't panic and
+    // returns a valid struct. We can't assert specific values because the
+    // test environment may or may not have API keys set.
+    #[test]
+    fn inference_providers_from_env_does_not_panic() {
+        let _ = KaskInferenceProvidersSettings::from_env();
+    }
+
+    // Regression test for the polarity inversion in the credential-injection
+    // path (now `build_mcp_server_env`). The skip check `std::env::var(env_var).is_ok()`
+    // treated an empty env var (`FOO=`) as "present" and suppressed keychain
+    // injection, leaving the child process with no key. The fix skips only
+    // non-empty parent env vars. This test pins the `From<Content>` resolution
+    // path that feeds `credential_urls_for_mcp`: when a toggle is explicitly
+    // `false`, no credential URL is produced for that provider, so the polarity
+    // bug cannot suppress a key that should never be injected in the first
+    // place. The toggle→credential-URL gate is the upstream guard.
+    #[test]
+    fn credential_urls_for_mcp_omits_disabled_inference_providers() {
+        let settings = KaskSettings::default();
+        // All inference toggles default to false → no inference credential URLs.
+        let urls = crate::inference_providers::credential_urls_for_mcp(&settings);
+        let has_inference_key = urls.iter().any(|(env_var, _)| {
+            matches!(
+                env_var.as_str(),
+                "DEEPINFRA_API_KEY" | "OPENROUTER_API_KEY" | "ATLASCLOUD_API_KEY"
+            )
+        });
+        assert!(
+            !has_inference_key,
+            "disabled inference providers must not produce credential URLs — \
+             this is the gate that prevents the polarity bug from suppressing \
+             keys that should be injected"
+        );
+    }
+
+    // When an inference provider is explicitly enabled, its credential URL
+    // must appear in the MCP credential list. This is the cascade root: the
+    // UI toggle writes `inference_providers.<provider>_enabled = true` →
+    // `credential_urls_for_mcp` includes the URL → `build_mcp_server_env`
+    // injects the keychain value as an env var → MCP server `resolve_api_key`
+    // Tier 1 finds it. If any link breaks, inference fails with "API key not
+    // configured".
+    #[test]
+    fn credential_urls_for_mcp_includes_enabled_inference_providers() {
+        let mut settings = KaskSettings::default();
+        settings.inference_providers.openrouter_enabled = true;
+        let urls = crate::inference_providers::credential_urls_for_mcp(&settings);
+        let openrouter_url = urls
+            .iter()
+            .find(|(env_var, _)| env_var == "OPENROUTER_API_KEY")
+            .map(|(_, url)| url.clone());
+        assert_eq!(
+            openrouter_url.as_deref(),
+            Some("kask://credentials/openrouter"),
+            "enabled OpenRouter must produce its credential URL so the bridge \
+             injects the keychain value into MCP server env"
         );
     }
 }

@@ -1486,6 +1486,11 @@ impl std::fmt::Display for DelayMs {
 /// The actual settings struct is `kask_bridge::KaskSettings` (D9a).
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct KaskSettingsContent {
+    /// Kask data directory — root for all kask databases and agent state.
+    /// When empty, the runtime resolves a platform default.
+    #[serde(default)]
+    pub data_dir: Option<String>,
+
     /// MCP server configuration.
     #[serde(default)]
     pub mcp: Option<KaskMcpSettingsContent>,
@@ -1498,10 +1503,6 @@ pub struct KaskSettingsContent {
     #[serde(default)]
     pub curator: Option<KaskCuratorSettingsContent>,
 
-    /// Guard / regulation configuration.
-    #[serde(default)]
-    pub guard: Option<KaskGuardSettingsContent>,
-
     /// Memory consolidation and recall configuration.
     #[serde(default)]
     pub memory: Option<KaskMemorySettingsContent>,
@@ -1513,6 +1514,10 @@ pub struct KaskSettingsContent {
     /// Codegraph MCP server configuration.
     #[serde(default)]
     pub codegraph: Option<KaskCodegraphSettingsContent>,
+
+    /// Research MCP server configuration.
+    #[serde(default)]
+    pub research: Option<KaskResearchSettingsContent>,
 
     /// Companies MCP server configuration.
     #[serde(default)]
@@ -1530,19 +1535,28 @@ pub struct KaskSettingsContent {
     #[serde(default)]
     pub scenarios: Option<KaskScenariosSettingsContent>,
 
+    /// Prediction-markets MCP server configuration.
+    #[serde(default)]
+    pub prediction_markets: Option<KaskPredictionMarketsSettingsContent>,
+
+    /// Swarm (Agent Bestiary World) MCP server configuration.
+    #[serde(default)]
+    pub swarm: Option<KaskSwarmSettingsContent>,
+
     /// Training MCP server configuration.
     #[serde(default)]
     pub training: Option<KaskTrainingSettingsContent>,
-
-    /// Multi-model fusion inference configuration.
-    #[serde(default)]
-    pub fusion: Option<KaskFusionSettingsContent>,
 
     /// Kask-wide model configuration: default inference model, embedding model,
     /// and classifier model. These are provider-prefixed strings (e.g.
     /// `"openrouter/z-ai/glm-5.2"`) that override the kask defaults.
     #[serde(default)]
     pub models: Option<KaskModelsSettingsContent>,
+
+    /// Tool-router thresholds for narrowing the MCP tool set on complex or
+    /// tool-directed requests.
+    #[serde(default)]
+    pub tool_router: Option<KaskToolRouterSettingsContent>,
 
     /// Inference provider toggles and API key configuration.
     ///
@@ -1551,6 +1565,30 @@ pub struct KaskSettingsContent {
     /// `kask://credentials/<env_var>` for MCP server env injection.
     #[serde(default)]
     pub inference_providers: Option<KaskInferenceProvidersSettingsContent>,
+
+    /// Local collab server configuration. When enabled, zed-kask launches a
+    /// local collab server (`collab serve api`) at startup so the kask
+    /// extensions panel can fetch `/api/kask-skills` without depending on
+    /// the deployed `zed.dev` server having the kask route.
+    #[serde(default)]
+    pub collab: Option<KaskCollabSettingsContent>,
+}
+
+/// Local collab server configuration (the `"kask.collab"` section in
+/// settings.json).
+#[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct KaskCollabSettingsContent {
+    /// Whether to auto-launch the local collab server at startup.
+    pub enabled: Option<bool>,
+    /// SQLite connection string (e.g. `sqlite:kask_marketplace.db?mode=rwc`).
+    pub database_url: Option<String>,
+    /// HTTP port the collab server listens on.
+    pub http_port: Option<u16>,
+    /// Zed environment (`development`, `staging`, `production`).
+    pub zed_environment: Option<String>,
+    /// Marketplace base URL the extensions panel uses. When set, overrides
+    /// the `server_url`-based resolution in `kask_marketplace_base_url`.
+    pub marketplace_url: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
@@ -1579,11 +1617,8 @@ pub struct KaskDataServiceSettingsContent {
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct KaskInferenceProvidersSettingsContent {
     pub deepinfra_enabled: Option<bool>,
-    pub fal_enabled: Option<bool>,
-    pub together_enabled: Option<bool>,
     pub openrouter_enabled: Option<bool>,
-    pub kilocode_enabled: Option<bool>,
-    pub cline_enabled: Option<bool>,
+    pub atlascloud_enabled: Option<bool>,
 }
 
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
@@ -1624,17 +1659,27 @@ pub struct KaskCuratorEmailSettingsContent {
 }
 
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
-pub struct KaskGuardSettingsContent {
-    pub direct_chat_strategy: Option<String>,
-}
-
-#[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct KaskMemorySettingsContent {
     pub consolidation_cadence_secs: Option<u64>,
     pub confidence_floor: Option<f64>,
     pub recall_limit: Option<u32>,
     pub recall_min_confidence: Option<f64>,
     pub auto_inject: Option<bool>,
+    /// Number of recent turns from the invoking thread to include as
+    /// short-term context for skill cascades. 0 disables short-term
+    /// injection.
+    pub cascade_short_term_turns: Option<u32>,
+    /// Saliency floor for cascade memory recall. A memory chunk is injected
+    /// only if `relevance_score * confidence >= saliency_floor`.
+    pub cascade_memory_saliency_floor: Option<f64>,
+    /// Maximum memory chunks to inject into a skill cascade, after merging
+    /// across all participant stores (user, curator, swarm).
+    pub cascade_memory_max_chunks: Option<u32>,
+    /// Maximum tokens per turn for cascade short-term context. Turns
+    /// exceeding this budget are condensed via the local algorithmic
+    /// condenser, then truncated to the token cap if still over. 0 disables
+    /// condensation.
+    pub cascade_turn_token_cap: Option<u32>,
 }
 
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
@@ -1648,6 +1693,13 @@ pub struct KaskCondenserSettingsContent {
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct KaskCodegraphSettingsContent {
     pub db_path: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct KaskResearchSettingsContent {
+    /// RSS database path for persistent feed storage. When empty, the server
+    /// resolves a default path under the hKask data directory.
+    pub rss_db: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
@@ -1683,43 +1735,85 @@ pub struct KaskScenariosSettingsContent {
 }
 
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct KaskPredictionMarketsSettingsContent {
+    /// Data directory for the calibration journal. When empty, in-memory.
+    pub data_dir: Option<String>,
+    /// Cache TTL in seconds for market-data responses.
+    pub cache_ttl_secs: Option<u64>,
+    /// Base-event registry: "domain:series,..." pairs for CMP construction.
+    pub base_events: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct KaskSwarmSettingsContent {
+    /// Which backend to route to. Default `abw` (v1). `local` routes to
+    /// zed-kask's local substrate crates (v2 §15).
+    pub mode: Option<SwarmModeContent>,
+    pub api_url: Option<String>,
+    pub max_credits_per_dispatch: Option<u32>,
+    /// When `true`, Xaman Ek curator calls do not require a per-call consent
+    /// token. Default `false` (opt-in per call).
+    pub curator_consent_default: Option<bool>,
+    /// Directory containing local agent cards (`<id>/agent_card.json`),
+    /// read in `local` mode. When empty, uses the default
+    /// `agents/local/curated`.
+    pub local_agents_dir: Option<String>,
+    /// Directory containing local swarms (`<id>/swarm.json`), the local
+    /// replica of an ABW workspace roster. When empty, uses the default
+    /// `agents/local/swarms`.
+    pub local_swarms_dir: Option<String>,
+    /// Directory containing the zed-kask skill corpus (`.agents/skills/`),
+    /// read by `AgentExecutor::build_skill_catalog` to inject skill
+    /// descriptions into the local agent's system prompt (Slice 6 — local
+    /// agent skill-awareness). When empty/None, skill-awareness is disabled.
+    pub skills_dir: Option<String>,
+    /// Default model id for newly created ABW agents when the caller omits
+    /// `model`. Operator-configurable so the default is not a code literal
+    /// that goes stale when the provider renames/deprecates the model
+    /// (KA-05). When empty, uses the server default
+    /// (`claude-haiku-4-5-20251001`).
+    pub default_agent_model: Option<String>,
+    /// Whether to start the A2A HTTP gateway (loopback JSON-RPC server that
+    /// exposes local agents to external A2A clients). Default `false`
+    /// (opt-in — it opens a loopback port). Security-relevant: only enable
+    /// when you need external A2A clients to reach your local agents.
+    pub a2a_http_enabled: Option<bool>,
+    /// SQLCipher passphrase for the local swarm semantic-memory store (the
+    /// `hkask-memory` `MemoryStore` backing the local knowledge tools). Must
+    /// be >=8 chars. When empty, uses the pre-release default `"allostery"`
+    /// — override with a real secret for production use.
+    pub memory_passphrase: Option<String>,
+    /// On-disk path for the local swarm semantic-memory DB. When empty, uses
+    /// the default `<hkask data dir>/swarm_memory.db`.
+    pub memory_db_path: Option<String>,
+    /// Embedding vector dimension for the semantic-memory embedding store.
+    /// Default 1024. Only relevant if the embedding-search path is used.
+    pub embedding_dim: Option<usize>,
+}
+
+/// Mirror of `SwarmModeConfig` in the bridge crate, kept separate to avoid a
+/// circular dependency. The two enums MUST stay in sync.
+#[derive(Debug, PartialEq, Eq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
+#[serde(rename_all = "lowercase")]
+pub enum SwarmModeContent {
+    /// Route to Agent Bestiary World (v1 behavior).
+    #[default]
+    Abw,
+    /// Route to local substrate crates (v2, §15).
+    Local,
+}
+
+#[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct KaskTrainingSettingsContent {
     pub host: Option<String>,
     pub cache_dir: Option<String>,
 }
 
-/// Multi-model fusion inference configuration (the `"kask.fusion"` section).
-///
-/// When enabled, the Curator and the kask panel route inference through a
-/// panel of models judged by `judge_model` according to `mode`. See
-/// `hkask_types::fusion::FusionConfig` for the runtime type.
+/// Tool-router thresholds (the `"kask.tool_router"` section in settings.json).
 #[derive(Debug, PartialEq, Default, Clone, Serialize, Deserialize, JsonSchema, MergeFrom)]
-pub struct KaskFusionSettingsContent {
-    /// Master toggle. When `false`, fusion is disabled even if other fields are set.
-    pub enabled: Option<bool>,
-    /// Judge/fuser model (provider-prefixed, e.g. `"OpenRouter/z-ai/glm-5.2"`).
-    pub judge_model: Option<String>,
-    /// Comma-separated panel models (provider-prefixed). Empty defers to defaults.
-    pub panel_models: Option<String>,
-    /// Judge deliberation mode: `"synthesis"` | `"best-of-n"` | `"critique"` |
-    /// `"deliberation"` | `"pi"` | `"algo"`.
-    pub mode: Option<String>,
-    /// Algo merge strategy when `mode == "algo"`: `"merge"` | `"vote"`.
-    pub algo_method: Option<String>,
-    /// Comma-separated skill anchors (e.g. `"pragmatic-semantics,coding-guidelines"`).
-    pub skills: Option<String>,
-    /// Max rounds for `deliberation` mode.
-    pub max_rounds: Option<u32>,
-    /// OpenRouter auto-discovery max prompt price per million tokens (USD).
-    pub openrouter_max_price: Option<f64>,
-    /// OpenRouter auto-discovery minimum intelligence index.
-    pub openrouter_min_intelligence: Option<f64>,
-    /// Coherence threshold (0.0–1.0) for measured convergence in deliberation mode.
-    pub coherence_threshold: Option<f64>,
-    /// Enable query-complexity-based panel sizing.
-    pub panel_sizing_enabled: Option<bool>,
-    /// Enable substrate-aware degradation under high latency pressure.
-    pub pressure_adaptive_enabled: Option<bool>,
+pub struct KaskToolRouterSettingsContent {
+    pub threshold: Option<f64>,
+    pub complex_word_threshold: Option<usize>,
 }
 
 /// Kask-wide model configuration (the `"kask.models"` section in settings.json).
@@ -1733,7 +1827,7 @@ pub struct KaskFusionSettingsContent {
 pub struct KaskModelsSettingsContent {
     /// Default inference model for kask subsystems (provider-prefixed).
     /// When set, overrides the kask default for the Curator, skill cascade,
-    /// and kask panel inference (unless fusion is enabled, which takes precedence).
+    /// and kask panel inference.
     pub default_model: Option<String>,
     /// Embedding model for corpus indexing and memory semantic recall
     /// (provider-prefixed). When empty, falls back to the corpus MCP server's
@@ -1742,4 +1836,7 @@ pub struct KaskModelsSettingsContent {
     /// Classifier model for guard/regulation classification tasks
     /// (provider-prefixed). When empty, falls back to the kask default.
     pub classifier_model: Option<String>,
+    /// OCR vision model for scanned document OCR (provider-prefixed).
+    /// When empty, falls back to the kask default (`RunPod/kask-ocr`).
+    pub ocr_model: Option<String>,
 }

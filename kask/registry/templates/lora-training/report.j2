@@ -1,13 +1,6 @@
 {# goal: Report phase-aware training findings without changing their schema or classification. Preserve the operator-selected method, separate recommendations from readiness, propose evidence-backed regressions, emit reg.lora.report (P9), and require userpod_host (P12). #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- synthesize
-- report
-- regression
-- severity
-- gate
-- training
 contract:
   input:
     findings: array
@@ -20,7 +13,6 @@ contract:
     verdict: string
     contract_gaps: array
     reg_span_emitted: boolean
-energy_cap: 6144
 visibility: Public
 ---
 {# Template: lora-training/report.j2 #}
@@ -183,7 +175,7 @@ Emit `reg.lora.report` with exact counts by phase, state, severity, and
 verdict; contract-gap count; userpod_host; latency_ms. Namespace remains
 registered in `CANONICAL_NAMESPACES`. Emit no anonymous action.
 
-OCAP BOUNDARY (P4)
+CAPABILITY BOUNDARY (P4)
 This report consumes supplied audit artifacts only. It does not read outside
 declared workspace paths, load models, execute initializers, run
 forward/backward/merge checks, train, evaluate, download artifacts, or call

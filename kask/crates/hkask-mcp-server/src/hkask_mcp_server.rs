@@ -1,4 +1,5 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
+#![warn(clippy::let_underscore_future)]
 //! hKask MCP Server — MCP server utilities and startup verification.
 //!
 //! Provides the lightweight layer that all hKask MCP servers depend on:
@@ -16,11 +17,20 @@ pub mod server;
 // `"kata-kanban"`, and the two contradicted each other silently).
 
 pub use server::{
-    CapabilityTier, CredentialRequirement, ExperienceCallback, McpError, ServerContext,
-    ToolContext, api_get, api_put, execute_tool, load_dotenv, resolve_credential, run_stdio_server,
-    run_stdio_server_with_preloaded, tool_internal_error, validate_identifier, validate_path,
-    validate_tool_url, validate_tool_url_permissive,
+    CapabilityTier, CredentialRequirement, McpError, ServerContext, ToolContext, execute_tool,
+    load_dotenv, resolve_credential, run_stdio_server, run_stdio_server_with_preloaded,
+    validate_identifier, validate_path, validate_tool_url_permissive, validate_tool_url_with_dns,
 };
+pub use server::{
+    MAX_READ_BYTES, contain_for_read, contain_for_write, map_infra_error, map_io_error,
+    map_join_error, map_memory_store_error, read_capped,
+};
+
+pub use tool_schema::AnyJsonValue;
+pub use tool_schema::find_boolean_schema_positions;
+
+/// Tool input schema helpers for MCP servers.
+pub mod tool_schema;
 
 /// Run an MCP server with stdio transport.
 ///
@@ -96,14 +106,6 @@ macro_rules! impl_tool_context {
             fn webid(&self) -> &hkask_types::WebID {
                 &self.webid
             }
-            fn record_tool_outcome(&self, tool: &str, outcome: &str) {
-                tracing::debug!(
-                    target: "reg.memory",
-                    tool = %tool,
-                    outcome = %outcome,
-                    "Tool outcome recorded (in-process only)",
-                );
-            }
         }
     };
 }
@@ -146,7 +148,6 @@ macro_rules! mcp_server {
         }
 
         impl $name {
-            #[allow(clippy::too_many_arguments)]
             pub fn new(
                 webid: hkask_types::WebID,
                 $($field : $ty),*

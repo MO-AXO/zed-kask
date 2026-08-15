@@ -1,11 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- report
-- rank
-- prioritize
-- document
-- act
 contract:
   input:
     gradients: array
@@ -16,7 +10,7 @@ contract:
     priority_ranking: array
     lessons_learned: array
     pattern_signatures: array
-energy_cap: 4096
+    next_prior_focus: string
 visibility: Public
 ---
 {# Template: gradient-hunter/gradient-report.j2 #}

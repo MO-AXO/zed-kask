@@ -4,19 +4,12 @@
 //! file, sorted by salience descending. Used by `corpus_dedup_chunks` and
 //! `corpus_consolidate_chunks` in `mod.rs`.
 
-use crate::*;
+use crate::{McpToolError, read_jsonl_lenient};
 use hkask_types::corpus::TaggedChunk;
 
 /// Read tagged chunks from a JSONL file. Malformed lines are silently dropped.
 pub(crate) fn read_tagged_chunks(path: &str) -> Result<Vec<TaggedChunk>, McpToolError> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        McpToolError::invalid_argument(format!("Cannot read tagged_jsonl '{path}': {e}"))
-    })?;
-    let chunks: Vec<TaggedChunk> = content
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
+    let (chunks, _dropped) = read_jsonl_lenient::<TaggedChunk>(path, "tagged_jsonl")?;
     Ok(chunks)
 }
 

@@ -1,26 +1,20 @@
 [inference]
+max_tokens = 2048
 template_type: WordAct
-lexicon_terms:
-- bayesian
-- update
-- evidence
-- likelihood
-- prior
-- posterior
-- revision
 contract:
   input:
     forecasting_question: string
     prior_probability: float
     hypothesis_analysis: object
     new_evidence: array|null
+    market_context: array
+    expert_prior: array
   output:
     evidence_items: array
     likelihood_ratios: array
     evidence_likelihood: float
     evidence_base_rate: float
     updated_probability: float
-energy_cap: 4096
 visibility: Public
 ---
 {# hKask v0.31.0 — A Minimal Viable Container for UserPods #}
@@ -46,6 +40,37 @@ Hypothesis Probability: {{ hypothesis_analysis.primary_probability }}
 {% endfor %}
 {% else %}
 [No new evidence provided - evaluate based on existing hypothesis analysis]
+{% endif %}
+
+{% if market_context %}
+## Prediction-Market Price Moves as Evidence
+For each market record below, treat a *move* in the market-implied
+probability as evidence with a volume/spread-scaled likelihood ratio
+(arXiv:2601.18815's inverse-problem framing): a large move on high volume
+with tight spread is strong evidence; the same move on thin volume or wide
+spread is weak. A market at `low` reliability_tier or `stale` calibration is
+context, not evidence — do not update on it.
+{% for m in market_context %}
+- [{{ m.source }}] {{ m.question }} — p={{ m.probability }} (tier: {{ m.reliability_tier }}, spread: {{ m.spread }}, volume: {{ m.volume }}, deadline: {{ m.deadline }})
+{% endfor %}
+{% endif %}
+
+{% if expert_prior %}
+## Expert-Judgment Rationales as Evidence
+The following expert-judgment rationale excerpts were extracted from LEAP
+reports. Only the rationale text is rendered here — the probability fields
+(`median_probability`, `superforecaster_median`, `public_median`) are
+deliberately omitted from this section because they were already consumed
+as outside-view anchors in stage 2. Treating the median as evidence here
+would double-count it. Treat each rendered rationale as a qualitative
+evidence item with `source: "LEAP-rationale"`, `strength: "moderate"`
+(expert judgment is evidence, not ground truth), and `direction` derived
+from whether the rationale supports or contradicts the current posterior.
+{% for ep in expert_prior %}
+{% if ep.rationale_excerpt %}
+- [LEAP-rationale/{{ ep.wave | default("unknown") }}] {{ ep.question }} — scenario: {{ ep.scenario | default("unconditional") }}, horizon: {{ ep.time_horizon | default("n/a") }} — rationale: {{ ep.rationale_excerpt }}
+{% endif %}
+{% endfor %}
 {% endif %}
 
 ## Bayesian Updating Methodology

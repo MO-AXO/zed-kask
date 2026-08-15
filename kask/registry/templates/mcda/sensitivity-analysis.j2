@@ -1,13 +1,6 @@
 {# goal: Perform sensitivity analysis on decision rankings by perturbing weights. Identifies rank reversals, critical weights, and classifies overall decision robustness. #}
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- sensitivity
-- perturbation
-- robustness
-- reversal
-- stability
-- tornado
 contract:
   input:
     decision_question: string
@@ -20,7 +13,6 @@ contract:
     decision_robustness: string
     critical_weights: array
     recommendation: string
-energy_cap: 8192
 visibility: Public
 ---
 {# Template: mcda/sensitivity-analysis.j2 #}

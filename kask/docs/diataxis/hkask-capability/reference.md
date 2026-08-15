@@ -1,8 +1,8 @@
 ---
 title: "hkask-capability — Reference"
 audience: [developers, architects, agents]
-last_updated: 2026-07-27
-version: "0.1.0"
+last_updated: 2026-08-13
+version: "1.0.0"
 status: "Active"
 domain: "Sovereignty"
 mds_categories: [domain, trust]
@@ -10,185 +10,259 @@ mds_categories: [domain, trust]
 
 # hkask-capability — Reference
 
-`hkask-capability` implements the Object Capability (OCAP) layer for hKask. It
-defines `DelegationToken`, the `ToolPort` trait, and the `CapabilityChecker`
-that verifies tokens before tool invocation. Every tool call in the governed
-dispatch path requires a valid `DelegationToken` proving authorization.
+`hkask-capability` defines the tool dispatch port: the `ToolPort` trait, its
+`ToolInfo` metadata, the `ToolFuture` alias, the `ToolPortError` taxonomy, and
+the `SYSTEM_MAX_RECURSION` structural bound. That is the entire surface. It
+contains **no capability tokens, no per-call authorization check, and no
+information-flow labels**. Tool authority is enforced outside this crate, at
+the allowlist boundaries listed under [Where authority is enforced](#where-authority-is-enforced).
 
 ## Source citations
 
-| Symbol | Location |
-|--------|----------|
-| `DelegationToken` struct | `kask/crates/hkask-capability/src/token_types.rs:58` |
-| `DelegationTokenBuilder` | `kask/crates/hkask-capability/src/token_types.rs:90` |
-| `TokenSignature` newtype | `kask/crates/hkask-capability/src/token_types.rs:50` |
-| `Caveat` struct | `kask/crates/hkask-capability/src/token_types.rs:40` |
-| `CapabilityError` enum | `kask/crates/hkask-capability/src/token_types.rs:15` |
-| `TokenRegistry` trait | `kask/crates/hkask-capability/src/token_types.rs:574` |
-| `NoOpTokenRegistry` | `kask/crates/hkask-capability/src/token_types.rs:613` |
-| `ToolPort` trait | `kask/crates/hkask-capability/src/tool_port.rs:47` |
-| `ToolPortError` enum | `kask/crates/hkask-capability/src/tool_port.rs:9` |
-| `ToolInfo` struct | `kask/crates/hkask-capability/src/tool_port.rs:73` |
-| `CapabilityChecker` struct | `kask/crates/hkask-capability/src/verification/checker.rs:20` |
-| `verify_delegation_token_now` | `kask/crates/hkask-capability/src/verification/verify.rs:22` |
-| `verify_delegation_token` | `kask/crates/hkask-capability/src/verification/verify.rs:63` |
-| `require_write_access` | `kask/crates/hkask-capability/src/verification/verify.rs:114` |
-| `require_read_access` | `kask/crates/hkask-capability/src/verification/verify.rs:140` |
-| `VerificationOutcome` enum | `kask/crates/hkask-capability/src/verification/types.rs:22` |
-| `CapabilitySpec` struct | `kask/crates/hkask-capability/src/resources.rs:8` |
-| `DelegationResource` enum | `kask/crates/hkask-capability/src/resources.rs:51` |
-| `DelegationAction` enum | `kask/crates/hkask-capability/src/resources.rs:80` |
-| `capabilities_match` fn | `kask/crates/hkask-capability/src/resources.rs:131` |
+| Symbol                       | Location                                                                                       |
+| ---------------------------- | ---------------------------------------------------------------------------------------------- |
+| `ToolPort` trait             | `kask/crates/hkask-capability/src/tool_port.rs:89-115`                                         |
+| `ToolPortError` enum         | `kask/crates/hkask-capability/src/tool_port.rs:8-38`                                           |
+| `ToolPortError::is_retryable`| `kask/crates/hkask-capability/src/tool_port.rs:40-53`                                          |
+| `ToolFuture` type alias      | `kask/crates/hkask-capability/src/tool_port.rs:62`                                            |
+| `ToolInfo` struct            | `kask/crates/hkask-capability/src/tool_port.rs:118-124`                                       |
+| `SYSTEM_MAX_RECURSION` const | `kask/crates/hkask-capability/src/token_types.rs:7`                                            |
+| Crate lib root               | `kask/crates/hkask-capability/src/hkask_capability.rs:1-27`                                    |
+| `ToolPort` implementor      | `kask/crates/hkask-mcp/src/runtime.rs:969-1067` (`impl hkask_capability::ToolPort for McpRuntime`) |
+| `McpRuntime::invoke` body    | `kask/crates/hkask-mcp/src/runtime.rs:969-1057`                                                |
+| `McpRuntime::with_governance`| `kask/crates/hkask-mcp/src/runtime.rs:271-280`                                                 |
+| `CallMeterOutcome` enum      | `kask/crates/hkask-regulation/src/energy.rs:35-45`                                             |
+| `CallCapManager::charge_metered` | `kask/crates/hkask-regulation/src/energy.rs:217-243`                                       |
+| `DEFAULT_RUNAWAY_CALL_CEILING` | `kask/crates/hkask-regulation/src/energy.rs:29`                                              |
+| `CyberneticsLoop::charge_call_metered` | `kask/crates/hkask-regulation/src/cybernetics_loop.rs:617-621`                       |
+| Per-request `tool_allowlist` gate | `kask/crates/kask_bridge/src/inference_ipc_server.rs:724-747`                              |
+| Per-agent `mcp_tools` allowlist | `kask/mcp-servers/hkask-mcp-swarm/src/agent_executor.rs:236-346`                            |
+| Per-server credential allowlist | `kask/crates/kask_bridge/src/mcp_servers.rs:26-43` (`BuiltinMcpServer.credentials`)         |
+| `CapabilityTier::detect`     | `kask/crates/hkask-mcp-server/src/server/context.rs:94-104`                                   |
 
-## Token and verification model
+The crate's `src/` directory holds exactly three files: `hkask_capability.rs`
+(lib root), `token_types.rs`, and `tool_port.rs`.
 
-The `DelegationToken` (`token_types.rs:58`) is the core capability object. It
-carries a resource, an action, a delegation chain (from/to WebIDs), an Ed25519
-signature, an attenuation level, and a list of caveats. The
-`DelegationTokenBuilder` (`token_types.rs:90`) constructs tokens with the
-required fields and signs them with an Ed25519 key.
-
-The `CapabilityChecker` (`verification/checker.rs:20`) verifies tokens. It
-holds a set of trusted root public keys and an `enforce_roots` flag. When
-`enforce_roots` is true, a token is accepted only if its embedded public key
-is in the trusted set. When false, the checker verifies only the
-self-signature, which is the mode used by pod-internal checkers where tokens
-are constructed locally.
+## Type surface
 
 ```mermaid
 classDiagram
-    class DelegationToken {
-        +id: String
-        +resource: DelegationResource
-        +resource_id: String
-        +action: DelegationAction
-        +delegated_from: WebID
-        +delegated_to: WebID
-        +signature: TokenSignature
-        +public_key: Ed25519PublicKey
-        +expires_at: Option~i64~
-        +attenuation_level: u8
-        +max_attenuation: u8
-        +caveats: Vec~Caveat~
-    }
-    class DelegationTokenBuilder {
-        +build() DelegationToken
-    }
-    class TokenSignature {
-        <<newtype>>
-        +[u8; 64]
-    }
-    class Caveat {
-        +constraint
-    }
-    class CapabilityChecker {
-        -signing_key: Option~SigningKey~
-        -trusted_roots: Vec~Ed25519PublicKey~
-        -enforce_roots: bool
-        +verify(token) VerificationOutcome
-        +grant_tool(...) DelegationToken
-    }
     class ToolPort {
         <<interface>>
-        +invoke(server, tool, args, token) Result
-        +discover_tools() Vec~String~
+        +invoke(server, tool, args, agent) ToolFuture
+        +discover_tools() ToolFuture~Vec~String~~
+        +get_tool_info(name) ToolFuture~Option~ToolInfo~~
     }
-    class VerificationOutcome {
-        <<enumeration>>
-        Valid
-        InvalidSignature
-        Expired
-        InsufficientAccess
-        NoChecker
+    class ToolInfo {
+        +name: String
+        +description: String
+        +input_schema: Value
+        +server_id: String
     }
-    class DelegationResource {
+    class ToolPortError {
         <<enumeration>>
-        Tool
-        Template
-        Registry
-        Key
+        EnergyBudgetExceeded(String)
+        NotFound(NotFound)
+        Unavailable(String)
+        Interrupted(String)
+        InvocationFailed(String)
+        +is_retryable() bool
     }
-    class DelegationAction {
-        <<enumeration>>
-        Read
-        Write
-        Execute
+    class ToolFuture {
+        <<type alias>>
+        Pin~Box~dyn Future + Send + '_~~
+    }
+    class McpRuntime {
+        -servers: HashMap
+        -tool_registry: HashMap
+        -connections: HashMap
+        -governance: Option
     }
 
-    DelegationToken --> TokenSignature
-    DelegationToken --> Caveat
-    DelegationToken --> DelegationResource
-    DelegationToken --> DelegationAction
-    DelegationTokenBuilder ..> DelegationToken : creates
-    CapabilityChecker --> DelegationToken : verifies
-    CapabilityChecker ..> VerificationOutcome : returns
-    ToolPort --> DelegationToken : requires
+    ToolPort ..> ToolInfo : returns
+    ToolPort ..> ToolPortError : returns
+    ToolPort ..> ToolFuture : via
+    McpRuntime ..|> ToolPort : implements
 ```
 
 <!-- DIAGRAM_ALIGNMENT
-id: DIAG-DIA-CAP-001
-verified_date: 2026-07-27
-verified_against: kask/crates/hkask-capability/src/token_types.rs:58,90,50,40; kask/crates/hkask-capability/src/tool_port.rs:47; kask/crates/hkask-capability/src/verification/checker.rs:20; kask/crates/hkask-capability/src/verification/types.rs:22; kask/crates/hkask-capability/src/resources.rs:51,80
+id: DIAG-CAP-002
+verified_date: 2026-08-13
+verified_against: kask/crates/hkask-capability/src/tool_port.rs:62-124 (ToolFuture, ToolPort, ToolInfo); kask/crates/hkask-capability/src/tool_port.rs:8-53 (ToolPortError); kask/crates/hkask-mcp/src/runtime.rs:969-1067 (impl ToolPort for McpRuntime)
 status: VERIFIED
 -->
 
-## ToolPort trait
+## `ToolPort` trait
 
-The `ToolPort` trait (`tool_port.rs:47`) is the actuator boundary for governed
-tool dispatch. The `invoke` method requires a `DelegationToken` as a parameter.
-The `discover_tools` method returns public tool metadata and requires no
-token, because tool schemas are public per the MCP protocol design.
+`ToolPort` is the dispatch boundary for MCP tool invocation. Every method
+returns `ToolFuture` (`Pin<Box<dyn Future + Send + '_>>`), so the trait is
+object-safe and `Arc<dyn ToolPort>` works — this is why no adapter layer wraps
+`McpRuntime` any more.
 
-The trait returns `ToolFuture`, a pinned boxed future, because tool invocation
-is asynchronous. The `ToolPortError` enum (`tool_port.rs:9`) includes
-`CapabilityDenied` for insufficient-token failures.
+| Method            | Signature                                                                                     |
+| ----------------- | --------------------------------------------------------------------------------------------- |
+| `invoke`          | `(&self, server: &str, tool: &str, args: Value, agent: WebID) -> Result<Value, ToolPortError>` |
+| `discover_tools`  | `(&self) -> Vec<String>`                                                                       |
+| `get_tool_info`   | `(&self, tool_name: &str) -> Option<ToolInfo>`                                                 |
 
-Implementor: `BridgeToolPort` in `kask/crates/kask_bridge/src/tool_port.rs:25`,
-which wraps zed's `McpRuntime` and enforces OCAP, gas, and span emission.
+`agent` is the accounting identity for the call meter. `discover_tools` and
+`get_tool_info` take no identity at all, because tool schemas are public per
+the MCP protocol design (`tools/list` is an unauthenticated handshake).
 
-## Verification functions
+## `ToolPortError` taxonomy
 
-Four public functions in `verification/verify.rs` perform token verification:
+Five variants and one predicate, `is_retryable`, which is true only for
+`Unavailable` — the call provably never reached the tool, so a retry cannot
+duplicate a side effect.
 
-- `verify_delegation_token_now` (`verify.rs:22`) verifies a token against the
-  current time, checking signature, expiry, and capability.
-- `verify_delegation_token` (`verify.rs:63`) verifies a token against a
-  caller-provided timestamp, used in tests and replay scenarios.
-- `require_write_access` (`verify.rs:114`) returns an error string if the
-  token does not grant `DelegationAction::Write` on the given resource.
-- `require_read_access` (`verify.rs:140`) returns an error string if the
-  token does not grant `DelegationAction::Read` on the given resource.
+| Variant                  | Meaning                                                                                       | Retryable |
+| ------------------------ | --------------------------------------------------------------------------------------------- | --------- |
+| `EnergyBudgetExceeded`   | The runaway-loop breaker tripped: the agent exhausted its per-tick call ceiling.             | No — needs a new regulation tick |
+| `NotFound`               | The tool is not registered.                                                                    | No — would fail identically |
+| `Unavailable`            | No live connection accepted the request; the tool provably never ran.                         | **Yes** |
+| `Interrupted`            | A live peer accepted the request and the connection then dropped. The outcome is unknown.   | No — a retry could duplicate a side effect |
+| `InvocationFailed`       | The call reached the tool and the tool failed.                                                | No — repeats the failure |
 
-The `VerificationOutcome` enum (`verification/types.rs:22`) has five variants:
-`Valid`, `InvalidSignature`, `Expired`, `InsufficientAccess`, and `NoChecker`.
-The `NoChecker` variant indicates that no `CapabilityChecker` was provided,
-which denies access by default.
+The `Unavailable` / `Interrupted` split is forced by `rmcp`, which reports both
+a failed send and a dropped response channel as the same
+`ServiceError::TransportClosed`. Once a request has reached a live peer, a
+transport loss cannot be read as proof of non-delivery, so `Interrupted` is
+never auto-retried at any layer.
 
-## Resource and action model
+## `ToolInfo` struct
 
-The `DelegationResource` enum (`resources.rs:51`) has four variants: `Tool`,
-`Template`, `Registry`, and `Key`. The `DelegationAction` enum
-(`resources.rs:80`) has three variants: `Read`, `Write`, and `Execute`.
+Canonical tool metadata. Four descriptive fields, nothing that decides
+anything:
 
-The `capabilities_match` function (`resources.rs:131`) compares a token's
-declared capability against a required capability. The
-`capability_from_server_id` function (`resources.rs:117`) maps an MCP server
-ID to a capability string, used when constructing tokens for server-scoped
-access.
+```rust
+pub struct ToolInfo {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    pub server_id: String,
+}
+```
+
+`server_id` is how the manifest executor's `invoke_tool` resolves which server
+to dispatch to.
+
+## `SYSTEM_MAX_RECURSION` structural bound
+
+`SYSTEM_MAX_RECURSION` (7) is the shared bound for cascade depth and subgoal
+nesting, consulted by the manifest executor and the registry bootstrap. It is a
+runaway-recursion breaker, not an authorization limit — the same distinction
+the call meter draws.
+
+## What `invoke` does
+
+`McpRuntime::invoke` performs, in order:
+
+1. **Call metering** — when governance is wired (`with_governance`), charge one
+   call against the agent's per-tick ceiling via
+   `CyberneticsLoop::charge_call_metered`, which delegates to
+   `CallCapManager::charge_metered`. Without governance, dispatch unmetered.
+2. **Dispatch** — `call_tool_inner` checks for a live connection, reconnects
+   once if the transport closed, and issues the JSON-RPC call.
+3. **Span emission** — persist a `reg.gas.settled` `RegulationRecord` (target
+   `reg.mcp`) carrying server, tool, call count, and success/failure status,
+   through the wired `RegulationSink`.
+
+There is no authorization step. The only way `invoke` returns an error before
+dispatch is `EnergyBudgetExceeded`.
+
+## Call metering
+
+The meter is a runaway-loop breaker and a usage recorder, not a permission
+check. `CallCapManager::charge_metered` returns `CallMeterOutcome`:
+
+| Outcome                        | Behavior                                                                                    |
+| ------------------------------ | ------------------------------------------------------------------------------------------- |
+| `Charged`                      | Headroom remained; the call proceeds.                                                       |
+| `AutoRegistered`               | The agent had no registered ceiling: register at `DEFAULT_RUNAWAY_CALL_CEILING` (10 000), charge, proceed, and log the wiring gap. |
+| `CeilingReached { ceiling }`   | The per-tick ceiling is exhausted: refuse with `ToolPortError::EnergyBudgetExceeded`. Resets on the next regulation tick. |
+
+Fail-open on an unregistered agent is deliberate: a missing registration is a
+composition-root wiring omission, and refusing it fails live paths without
+protecting anything.
+
+## Where authority is enforced
+
+A capability check is only a gate when the authority list is not chosen by the
+caller being checked. Three boundaries satisfy that:
+
+| Boundary                                                        | Location                                                       | Note                                        |
+| --------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------- |
+| Per-request delegated-tool `tool_allowlist` (fail-closed on missing/empty) | `kask/crates/kask_bridge/src/inference_ipc_server.rs:724-747` `tool_invoke` dispatch | Enforced before dispatch; pinned by `dispatch_tool_invoke_rejects_unallowed_tool` |
+| Per-agent declared `mcp_tools` allowlist                        | `kask/mcp-servers/hkask-mcp-swarm/src/agent_executor.rs:236-346` | Restricts which tools a swarm agent may call |
+| Per-server MCP env / credential allowlists                      | `kask/crates/kask_bridge/src/mcp_servers.rs:26-43`              | Scopes credentials per server (`BuiltinMcpServer.credentials`) |
+
+There is no fourth gate. A FIDES `Source`→`Sink` information-flow check used to
+be listed here; it was deleted — see [Information flow](#information-flow-absent-by-decision).
+
+## Information flow: absent by decision
+
+Nothing in this crate or on the invoke path inspects information flow. Defense
+**Layer 5 (information flow control) is absent by decision**, recorded in the
+same register as Layer 3 (instruction hierarchy): de-advertised rather than
+deployed.
+
+The FIDES lattice that once lived in a `src/tool_taint.rs` file labelled each
+tool `Source` / `Sink` / `Pure` / `Endorser` and blocked `Source → Sink`. It was
+deleted rather than repaired because the gate consuming it could not decide
+anything: `McpRuntime::get_tool_info` hardcoded `Pure` at the only `ToolInfo`
+construction site, so the `Sink` arm never matched. An inert gate is worse than
+no gate — it invites reliance on a protection that does not exist.
+
+Governing entry: `kask/security/regressions/RR-0053.yaml`, rewritten as an
+absence check that forbids re-adding the machinery in inert form and states the
+bar a real IFC gate must clear. Full rationale:
+[`DIVERGENCE.md`](../../../DIVERGENCE.md) D4 and
+`kask/security/regressions/RR-0053.yaml`.
+
+## CapabilityTier (sibling crate)
+
+`CapabilityTier` lives in the sibling `hkask-mcp-server` crate, not here. It is
+the per-server startup probe that distinguishes **embedded** mode (launched by
+the hKask runtime, non-anonymous WebID, keystore reachable, persistence
+available) from **standalone** mode (anonymous WebID, keystore may be
+unavailable, persistence unavailable). Detection compares the resolved WebID
+against the anonymous persona (`WebID::from_persona(b"anonymous")`) — not the
+credential map, because `HKASK_WEBID` is an identity injected via `config_env`,
+not a credential.
+
+```mermaid
+classDiagram
+    class CapabilityTier {
+        +embedded: bool
+        +keystore_available: bool
+        +persistence_available: bool
+        +detect(webid, resolved_credentials) CapabilityTier
+        +reg_available() bool
+    }
+    class WebID {
+        +from_persona(bytes) WebID
+    }
+    CapabilityTier ..> WebID : compares against anonymous
+```
+
+<!-- DIAGRAM_ALIGNMENT
+id: DIAG-CAP-003
+verified_date: 2026-08-13
+verified_against: kask/crates/hkask-mcp-server/src/server/context.rs:76-104 (CapabilityTier::detect); kask/crates/hkask-mcp-server/src/server/context.rs:108-118 (reg_available)
+status: VERIFIED
+-->
 
 ## See also
 
-- [hkask-capability Explanation](./explanation.md): state diagram of token
-  verification outcomes and the OCAP rationale.
-- [hkask-types Reference](../hkask-types/reference.md): the `ToolPort` trait
-  appears in both crates; this crate defines it, `hkask-types` re-exports it.
+- [hkask-capability Explanation](./explanation.md): why per-call gating was
+  removed and separation kept.
+- [hkask-capability Tutorial](./tutorial.md): dispatching through the seam.
 - [`kask/docs/architecture/core/PRINCIPLES.md`](../../architecture/core/PRINCIPLES.md):
-  P4 (Clear Boundaries) and P4.1 (Pod Boundary as OCAP Enforcement Perimeter).
-- [`kask/docs/architecture/core/magna-carta.md`](../../architecture/core/magna-carta.md):
-  sovereignty principles P1 through P4.
+  P4 (Clear Boundaries).
+- `kask/security/regressions/RR-0053.yaml`, `RR-0056.yaml`, `RR-0057.yaml`.
 
 ---
 
-[^miller-ocap]: Miller, M. S. (2006). *Robust Composition: Towards a Unified Approach to Access Control and Concurrency Control.* Johns Hopkins University. <https://www.erights.org/talks/thesis/markm-thesis.pdf>. The Object Capability model: access is granted by possession of an unforgeable capability token, not by ambient authority.
+[^fides-cap]: Microsoft Research. (2025). _FIDES: Information flow control for LLM agents_ (arXiv:2505.23643). The Source/Sink/Pure/Endorser lattice and the Source→Sink endorsement rule. Retained as the academic source for a design this crate no longer implements — the lattice was deleted (RR-0053). Citing it is not a claim that information flow control is deployed.
 
-[^ed25519]: Bernstein, D. J., Duif, N., Lange, T., Schwabe, P., & Yang, B. Y. (2012). *High-speed high-security signatures.* Journal of Cryptographic Engineering, 2(2), 77-89. <https://ed25519.cr.yp.to/>. The Ed25519 signature scheme used for `TokenSignature`.
+[^miller-ocap]: Miller, M. S. (2006). _Robust Composition: Towards a Unified Approach to Access Control and Concurrency Control._ Johns Hopkins University. <https://www.erights.org/talks/thesis/markm-thesis.pdf>. The Object Capability model, retained here as the source of the principle that survived: authority must be *separated* by a list the caller cannot choose. The in-process token *matching* that once cited this reference was removed as vacuous.

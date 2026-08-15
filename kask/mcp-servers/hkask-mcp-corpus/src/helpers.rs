@@ -1,4 +1,217 @@
-//! Shared math and text helpers used across docproc tool modules.
+//! Shared utilities used across corpus tool modules.
+
+use crate::{HkaskSettings, json};
+use hkask_mcp_server::server::McpToolError;
+use serde::de::DeserializeOwned;
+
+/// Classify a `std::io::Error` from a caller-facing file operation into the
+/// appropriate `McpToolError` kind. Alias of the canonical
+/// `hkask_mcp_server::server::map_io_error` (NotFound/PermissionDenied are
+/// caller-fixable; others remain internal) kept under the corpus-local name
+/// so existing call sites stay readable.
+pub(crate) use hkask_mcp_server::server::map_io_error as map_corpus_io_error;
+
+/// Classify a `MemoryStoreError` from a memory-DB operation into the
+/// appropriate `McpToolError` kind. Alias of the canonical
+/// `hkask_mcp_server::server::map_memory_store_error` (shared with the
+/// training server) kept under the corpus-local name so existing call sites
+/// stay readable.
+pub(crate) use hkask_mcp_server::server::map_memory_store_error;
+
+/// Classify a `TriageError` from the PDF triage pipeline into the appropriate
+/// `McpToolError` kind: an invalid page spec is caller input
+/// (`invalid_argument`); `pdftotext`/`pdfimages` failures include spawn
+/// failures (binary missing — operator-fixable, `unavailable`); a page-count
+/// mismatch between the two tools is an internal inconsistency (`internal`).
+pub(crate) fn map_triage_error(error: crate::ocr::triage::TriageError) -> McpToolError {
+    use crate::ocr::triage::TriageError;
+    let message = format!("triage failed: {error}");
+    match error {
+        TriageError::InvalidPageSpec(_) => McpToolError::invalid_argument(message),
+        TriageError::PdftotextFailed(_) | TriageError::PdfimagesFailed(_) => {
+            McpToolError::unavailable(message)
+        }
+        TriageError::PageCountMismatch { .. } => McpToolError::internal(message), // rr0044-ok: mapper-fallback-arm
+    }
+}
+
+/// Classify a `DatabaseError` from opening a memory DB into the appropriate
+/// `McpToolError` kind: a passphrase mismatch is an auth failure
+/// (`permission_denied`); a corrupted DB file is a caller-fixable data
+/// problem (`invalid_argument`); SQLite/SQLCipher/key-derivation failures
+/// are infrastructure (`internal`).
+pub(crate) fn map_database_error(
+    error: hkask_storage::DatabaseError,
+    context: &str,
+) -> McpToolError {
+    use hkask_storage::DatabaseError;
+    let message = format!("{context}: {error}");
+    match error {
+        DatabaseError::PassphraseMismatch(_) => McpToolError::permission_denied(message),
+        DatabaseError::Corrupted(_) => McpToolError::invalid_argument(message),
+        DatabaseError::Sqlite(_)
+        | DatabaseError::SqlCipher(_)
+        | DatabaseError::KeyDerivation(_) => McpToolError::internal(message), // rr0044-ok: infra-db-failure
+        // Non-exhaustive enum: future variants stay internal (conservative).
+        _ => McpToolError::internal(message), // rr0044-ok: non-exhaustive-fallback
+    }
+}
+
+/// Classify an `EmbeddingError` from an embedding-store operation into the
+/// appropriate `McpToolError` kind: missing refs → `not_found`, dimension
+/// mismatches → `invalid_argument` (caller stored vectors with a different
+/// model), infrastructure → shared `map_infra_error`, storage/decode →
+/// `internal`.
+pub(crate) fn map_embedding_error(
+    error: hkask_storage::EmbeddingError,
+    context: &str,
+) -> McpToolError {
+    use hkask_storage::EmbeddingError;
+    let message = format!("{context}: {error}");
+    match error {
+        EmbeddingError::NotFound(_) => McpToolError::not_found(message),
+        EmbeddingError::DimensionMismatch { .. } => McpToolError::invalid_argument(message),
+        EmbeddingError::Infrastructure(ref infra) => {
+            hkask_mcp_server::server::map_infra_error(infra, context)
+        }
+        EmbeddingError::Storage(_) | EmbeddingError::Decode(_) => McpToolError::internal(message), // rr0044-ok: storage-decode-failure
+    }
+}
+
+/// Classify a `ServiceError` from the compose pipeline into the appropriate
+/// `McpToolError` kind via its semantic `ErrorKind`: `NotFound` → `not_found`,
+/// `Forbidden` → `permission_denied`, `BadRequest` → `invalid_argument`,
+/// `Conflict` → `failed_precondition`, `ServiceUnavailable` → `unavailable`.
+pub(crate) fn map_service_error(
+    error: hkask_services_core::ServiceError,
+    context: &str,
+) -> McpToolError {
+    use hkask_services_core::ErrorKind;
+    let message = format!("{context}: {error}");
+    match error.kind() {
+        ErrorKind::NotFound => McpToolError::not_found(message),
+        ErrorKind::Forbidden => McpToolError::permission_denied(message),
+        ErrorKind::BadRequest => McpToolError::invalid_argument(message),
+        ErrorKind::Conflict => McpToolError::failed_precondition(message),
+        ErrorKind::ServiceUnavailable => McpToolError::unavailable(message),
+    }
+}
+
+/// Contained, size-capped read of a caller-supplied text file as UTF-8.
+///
+/// Single enforcement point for caller-supplied `*_jsonl` tool-argument paths
+/// (CWE-22/200/400): the path is resolved through
+/// `crate::path_safety::contain_for_read` and read with the shared
+/// `MAX_READ_BYTES` cap (via `read_capped`), so an escaping path
+/// (`/etc/passwd`, `../../escape`) or an oversized file is rejected with
+/// `invalid_argument` before any bytes reach a tool. `label` is the
+/// parameter-name context used in error messages.
+pub(crate) fn read_text_capped(path: &str, label: &str) -> Result<String, McpToolError> {
+    let bytes = crate::path_safety::read_capped(path, crate::path_safety::MAX_READ_BYTES)?;
+    String::from_utf8(bytes).map_err(|e| {
+        McpToolError::invalid_argument(format!("{label} '{path}' is not valid UTF-8: {e}"))
+    })
+}
+
+/// Stream a JSONL file line-by-line, parsing each non-empty line into `T`.
+///
+/// Unlike [`read_jsonl`], this does NOT read the entire file into memory —
+/// it opens the file with `BufReader` and reads line-by-line, making it
+/// suitable for files that exceed `MAX_READ_BYTES` (e.g. 71.8 MB
+/// `chunks.jsonl`). Path containment is still enforced via
+/// `contain_for_read`, but the `MAX_READ_BYTES` cap is NOT applied — the
+/// file can be arbitrarily large. The caller is responsible for batching
+/// the returned iterator if memory is a concern.
+///
+/// Lines are trimmed and empty lines are skipped. Parse errors are
+/// propagated with the 1-based file line number.
+pub(crate) fn read_jsonl_stream<T: DeserializeOwned>(
+    path: &str,
+    label: &str,
+) -> Result<Vec<T>, McpToolError> {
+    let resolved = crate::path_safety::contain_for_read(path)?;
+    let file = std::fs::File::open(&resolved).map_err(|e| {
+        McpToolError::invalid_argument(format!("{label} '{path}' cannot be opened: {e}"))
+    })?;
+    let reader = std::io::BufReader::new(file);
+    let mut out = Vec::new();
+    for (i, line_result) in std::io::BufRead::lines(reader).enumerate() {
+        let line = line_result.map_err(|e| {
+            McpToolError::invalid_argument(format!(
+                "{label} '{path}' line {} read error: {e}",
+                i + 1
+            ))
+        })?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: T = serde_json::from_str(line).map_err(|e| {
+            McpToolError::invalid_argument(format!("{label} line {} is not valid JSON: {e}", i + 1))
+        })?;
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// Read a JSONL file and parse each non-empty line into `T`.
+///
+/// Path containment and the `MAX_READ_BYTES` size cap are enforced here (via
+/// [`read_text_capped`]) — callers pass raw MCP tool-argument paths and this
+/// helper is the enforcement point. Cannot-read failures (escape, unresolvable
+/// path, oversized file) classify as `invalid_argument` (caller-supplied path).
+///
+/// Lines are split on newlines, trimmed, and empty lines are skipped. Parse errors
+/// are propagated with the 1-based file line number (counting all lines,
+/// including empty ones, to match the original per-site error messages).
+/// `label` is the parameter-name context used in error messages (e.g.
+/// `"chunks_jsonl"`, `"prompts_jsonl"`, `"tagged_jsonl"`).
+pub(crate) fn read_jsonl<T: DeserializeOwned>(
+    path: &str,
+    label: &str,
+) -> Result<Vec<T>, McpToolError> {
+    let content = read_text_capped(path, label)?;
+    let mut out = Vec::new();
+    for (i, line) in content.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let v: T = serde_json::from_str(line).map_err(|e| {
+            McpToolError::invalid_argument(format!("{label} line {} is not valid JSON: {e}", i + 1))
+        })?;
+        out.push(v);
+    }
+    Ok(out)
+}
+
+/// Read a JSONL file, dropping malformed lines and returning the count dropped.
+///
+/// Path containment and the `MAX_READ_BYTES` size cap are enforced here (via
+/// [`read_text_capped`]), same as [`read_jsonl`].
+///
+/// Like [`read_jsonl`] but lenient: lines that fail to parse are silently
+/// dropped (no error propagated), and the number of dropped lines is returned
+/// so callers can warn or report. Empty lines are not counted as dropped.
+pub(crate) fn read_jsonl_lenient<T: DeserializeOwned>(
+    path: &str,
+    label: &str,
+) -> Result<(Vec<T>, usize), McpToolError> {
+    let content = read_text_capped(path, label)?;
+    let mut out = Vec::new();
+    let mut dropped = 0usize;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<T>(line) {
+            Ok(v) => out.push(v),
+            Err(_) => dropped += 1,
+        }
+    }
+    Ok((out, dropped))
+}
 
 /// Cosine similarity between two vectors. Consolidated from ocr/semantic.rs (C4).
 /// Returns 0.0 if either vector is empty or dimensions mismatch.
@@ -13,6 +226,28 @@ pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         return 0.0;
     }
     (dot / (norm_a * norm_b)).clamp(0.0, 1.0)
+}
+
+/// Approximate token-to-word conversion: 1 word ≈ 1.33 tokens.
+/// Returns 0.0 for identical, 1.0 for orthogonal, 2.0 for opposite or degenerate.
+#[must_use]
+pub fn cosine_distance(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 2.0;
+    }
+    let dot: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| (*x as f64) * (*y as f64))
+        .sum();
+    let norm_a: f64 = a.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+    let norm_b: f64 = b.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 2.0;
+    }
+    let similarity = dot / (norm_a * norm_b);
+    let distance = 1.0 - similarity;
+    distance.clamp(0.0, 2.0)
 }
 
 /// Approximate token-to-word conversion: 1 word ≈ 1.33 tokens.
@@ -46,7 +281,7 @@ pub(crate) fn serialize_passages(passages: &[(String, String)]) -> Vec<serde_jso
 /// Chunk a `DocStructure` into passages, respecting heading boundaries.
 ///
 /// Groups blocks under their nearest preceding heading. Each group becomes
-/// one or more passages via `SemanticMemory::chunk_text`. When a group exceeds
+/// one or more passages via `crate::text::chunk_text`. When a group exceeds
 /// `max_words`, it is split at sentence boundaries within the group. When a
 /// group is smaller than `min_words`, it is merged with the next group if
 /// possible (to avoid tiny chunks).
@@ -68,7 +303,7 @@ pub(crate) fn chunk_structure(
     let has_headings = blocks.iter().any(|b| b.is_heading());
     if !has_headings {
         let flat_text = structure.text();
-        return SemanticMemory::chunk_text(
+        return crate::text::chunk_text(
             &flat_text,
             entity_ref_prefix,
             min_words,
@@ -103,7 +338,7 @@ pub(crate) fn chunk_structure(
     }
     // Flush final section
     if !current_body.trim().is_empty() || !current_heading.is_empty() {
-        sections.push((current_heading.clone(), current_body.clone()));
+        sections.push((current_heading, current_body));
     }
 
     // Chunk each section, prepending the heading as context.
@@ -120,13 +355,11 @@ pub(crate) fn chunk_structure(
         };
         let section_ref = format!("{entity_ref_prefix}:sec{idx}");
         let section_passages =
-            SemanticMemory::chunk_text(&section_text, &section_ref, min_words, max_words, boundary);
+            crate::text::chunk_text(&section_text, &section_ref, min_words, max_words, boundary);
         passages.extend(section_passages);
     }
     passages
 }
-
-use crate::*;
 
 #[cfg(test)]
 mod tests {
@@ -153,6 +386,31 @@ mod tests {
     fn tokens_to_words_approximate() {
         assert_eq!(tokens_to_words(133), 100);
         assert_eq!(tokens_to_words(0), 0);
+    }
+
+    #[test]
+    fn read_jsonl_rejects_absolute_escape() {
+        // /etc/passwd is outside any plausible cargo-test cwd (the crate dir).
+        let result = read_jsonl::<serde_json::Value>("/etc/passwd", "chunks_jsonl");
+        assert!(result.is_err(), "read of /etc/passwd must be rejected");
+    }
+
+    #[test]
+    fn read_jsonl_lenient_rejects_traversal_escape() {
+        let result = read_jsonl_lenient::<serde_json::Value>("../../escape.jsonl", "tagged_jsonl");
+        assert!(result.is_err(), "read via ../.. must be rejected");
+    }
+
+    #[test]
+    fn read_jsonl_accepts_file_inside_cwd() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let file_path = cwd.join("hkask-helpers-read-jsonl-test.jsonl");
+        std::fs::write(&file_path, "{\"a\":1}\n\n{\"a\":2}\n").expect("write fixture");
+        let result =
+            read_jsonl::<serde_json::Value>(file_path.to_str().expect("utf8 path"), "chunks_jsonl");
+        let _cleanup = std::fs::remove_file(&file_path);
+        let values = result.expect("read inside cwd accepted");
+        assert_eq!(values.len(), 2);
     }
 
     fn sample_structure_with_headings() -> DocStructure {
@@ -209,5 +467,27 @@ mod tests {
         let structure = DocStructure::from_plain_text("Just a paragraph. With text.", "plain");
         let passages = chunk_structure(&structure, "doc", 1, 1000, ".!?");
         assert!(!passages.is_empty());
+    }
+
+    #[test]
+    fn read_jsonl_stream_reads_file_line_by_line() {
+        let cwd = std::env::current_dir().expect("cwd");
+        let path = cwd.join("hkask-stream-jsonl-test.jsonl");
+        std::fs::write(&path, "{\"n\":1}\n{\"n\":2}\n\n{\"n\":3}\n").expect("write fixture");
+        let path_str = path.to_str().expect("utf8 path");
+        let values: Vec<serde_json::Value> =
+            super::read_jsonl_stream(path_str, "test").expect("should read");
+        assert_eq!(values.len(), 3, "should parse 3 non-empty lines");
+        assert_eq!(values[0]["n"], 1);
+        assert_eq!(values[1]["n"], 2);
+        assert_eq!(values[2]["n"], 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_jsonl_stream_rejects_traversal_escape() {
+        let result: Result<Vec<serde_json::Value>, _> =
+            super::read_jsonl_stream("../../etc/passwd", "test");
+        assert!(result.is_err(), "traversal path must be rejected");
     }
 }

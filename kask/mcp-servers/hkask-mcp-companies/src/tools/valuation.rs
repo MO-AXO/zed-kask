@@ -1,10 +1,11 @@
 //! Valuation and forecasting tools.
+use super::portfolio::run_portfolio;
 use crate::{
     CompaniesServer, Provider, StoredForecast, current_price_from_multiple, fibo, financial_model,
     parse_symbol_from_query, portfolio::PersistedForecast, projected_terminal_multiple, scenarios,
     superforecast, types, validate_symbol,
 };
-use hkask_mcp_server::server::{McpToolError, execute_tool};
+use hkask_mcp_server::server::{McpToolError, execute_tool_semantic};
 use hkask_types::time::now_rfc3339;
 use rmcp::{handler::server::wrapper::Parameters, tool, tool_router};
 use uuid::Uuid;
@@ -19,6 +20,12 @@ fn validate_finite(name: &str, value: f64) -> Result<(), McpToolError> {
     }
 }
 
+/// Classify ScenarioImpactError per variant, not blanket `internal`.
+/// All variants are invalid-argument (malformed input tree/mappings).
+fn map_scenario_impact_error(err: financial_model::ScenarioImpactError) -> McpToolError {
+    McpToolError::invalid_argument(err.to_string())
+}
+
 fn validate_unit_interval(name: &str, value: f64) -> Result<(), McpToolError> {
     validate_finite(name, value)?;
     if (0.0..=1.0).contains(&value) {
@@ -30,6 +37,37 @@ fn validate_unit_interval(name: &str, value: f64) -> Result<(), McpToolError> {
     }
 }
 
+/// Extract non-empty financial statement arrays and the profile object from
+/// the raw provider responses. Returns `None` if any required array is empty
+/// or missing, so callers can surface an "insufficient data" error without
+/// panicky `unwrap()` calls on guarded `Option<&[Value]>`.
+fn extract_historical_arrays<'a>(
+    income: &'a serde_json::Value,
+    balance: &'a serde_json::Value,
+    cf: &'a serde_json::Value,
+    metrics: &'a serde_json::Value,
+    profile: &'a serde_json::Value,
+) -> Option<(
+    &'a [serde_json::Value],
+    &'a [serde_json::Value],
+    &'a [serde_json::Value],
+    &'a [serde_json::Value],
+    &'a serde_json::Value,
+)> {
+    let income_data = income.as_array().filter(|a| !a.is_empty())?;
+    let balance_data = balance.as_array().filter(|a| !a.is_empty())?;
+    let cf_data = cf.as_array().filter(|a| !a.is_empty())?;
+    let metrics_data: &[serde_json::Value] = metrics.as_array().map_or(&[], |v| v);
+    let profile_data = profile.as_array().and_then(|a| a.first())?;
+    Some((
+        income_data,
+        balance_data,
+        cf_data,
+        metrics_data,
+        profile_data,
+    ))
+}
+
 #[tool_router(router = valuation_router, vis = "pub")]
 impl CompaniesServer {
     #[tool(
@@ -39,7 +77,7 @@ impl CompaniesServer {
         &self,
         Parameters(req): Parameters<types::ComparableAnalysisRequest>,
     ) -> String {
-        execute_tool(self, "comparable_analysis", async {
+        execute_tool_semantic(self, "comparable_analysis", Self::ontology_anchor("comparable_analysis"), async {
             validate_symbol(&req.symbol)?;
 
             // 1. Fetch target company profile and key_metrics
@@ -158,82 +196,7 @@ impl CompaniesServer {
             }
 
             // 5. DCF overlay on target
-            let dcf_overlay = {
-                let inc_res = self
-                    .fetch("income_statement", &req.symbol, &[("limit", "5")])
-                    .await;
-                let bal_res = self
-                    .fetch("balance_sheet", &req.symbol, &[("limit", "5")])
-                    .await;
-                let cf_res = self
-                    .fetch("cash_flow_statement", &req.symbol, &[("limit", "5")])
-                    .await;
-                let km_res = self
-                    .fetch("key_metrics", &req.symbol, &[("limit", "5")])
-                    .await;
-
-                match (inc_res, bal_res, cf_res, km_res) {
-                    (Ok(inc), Ok(bal), Ok(cf), Ok(km)) => {
-                        let income_arr = inc.as_array();
-                        let balance_arr = bal.as_array();
-                        let cf_arr = cf.as_array();
-                        let metrics_arr = km.as_array();
-
-                        if income_arr.is_none_or(|a| a.is_empty())
-                            || balance_arr.is_none_or(|a| a.is_empty())
-                            || cf_arr.is_none_or(|a| a.is_empty())
-                        {
-                            serde_json::json!({"error": "insufficient data for DCF"})
-                        } else {
-                            let income_data = income_arr.unwrap();
-                            let balance_data = balance_arr.unwrap();
-                            let cf_data = cf_arr.unwrap();
-                            let metrics_data: &[serde_json::Value] =
-                                metrics_arr.map_or(&[], |v| v);
-
-                            let hist = financial_model::HistoricalSnapshot::from_api_json(
-                                income_data,
-                                balance_data,
-                                cf_data,
-                                metrics_data,
-                                profile_data,
-                            );
-
-                            if hist.revenue.len() < 2 {
-                                serde_json::json!({"error": "insufficient historical data"})
-                            } else {
-                                let assumptions = financial_model::ProjectionAssumptions::from_history_with_overrides(
-                                    &hist,
-                                    types::ProjectionAssumptionOverrides::from(&req),
-                                )
-                                .map_err(|err| McpToolError::invalid_argument(err.to_string()))?;
-                                let current_price = profile_data
-                                    .get("price")
-                                    .and_then(|v| v.as_f64())
-                                    .unwrap_or(0.0);
-                                let model = financial_model::project_model(
-                                    &hist,
-                                    &assumptions,
-                                    current_price,
-                                );
-                                let margin_of_safety =
-                                    if current_price > 0.0 {
-                                        (model.intrinsic_per_share - current_price)
-                                            / current_price
-                                    } else {
-                                        0.0
-                                    };
-                                serde_json::json!({
-                                    "intrinsic_per_share": model.intrinsic_per_share,
-                                    "current_price": current_price,
-                                    "margin_of_safety": margin_of_safety,
-                                })
-                            }
-                        }
-                    }
-                    _ => serde_json::json!({"error": "DCF overlay unavailable"}),
-                }
-            };
+            let dcf_overlay = self.build_dcf_overlay(&req, profile_data).await?;
 
             let company_name = profile_data
                 .get("companyName")
@@ -273,6 +236,70 @@ impl CompaniesServer {
         .await
     }
 
+    async fn build_dcf_overlay(
+        &self,
+        req: &types::ComparableAnalysisRequest,
+        profile_data: &serde_json::Value,
+    ) -> Result<serde_json::Value, McpToolError> {
+        let inc_res = self
+            .fetch("income_statement", &req.symbol, &[("limit", "5")])
+            .await;
+        let bal_res = self
+            .fetch("balance_sheet", &req.symbol, &[("limit", "5")])
+            .await;
+        let cf_res = self
+            .fetch("cash_flow_statement", &req.symbol, &[("limit", "5")])
+            .await;
+        let km_res = self
+            .fetch("key_metrics", &req.symbol, &[("limit", "5")])
+            .await;
+
+        match (inc_res, bal_res, cf_res, km_res) {
+            (Ok(inc), Ok(bal), Ok(cf), Ok(km)) => {
+                if let Some((income_data, balance_data, cf_data, metrics_data, profile_data)) =
+                    extract_historical_arrays(&inc, &bal, &cf, &km, profile_data)
+                {
+                    let hist = financial_model::HistoricalSnapshot::from_api_json(
+                        income_data,
+                        balance_data,
+                        cf_data,
+                        metrics_data,
+                        profile_data,
+                    );
+
+                    if hist.revenue.len() < 2 {
+                        return Ok(serde_json::json!({"error": "insufficient historical data"}));
+                    }
+
+                    let assumptions =
+                        financial_model::ProjectionAssumptions::from_history_with_overrides(
+                            &hist,
+                            types::ProjectionAssumptionOverrides::from(req),
+                        )
+                        .map_err(|err| McpToolError::invalid_argument(err.to_string()))?;
+                    let current_price = profile_data
+                        .get("price")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let model = financial_model::project_model(&hist, &assumptions, current_price);
+                    let margin_of_safety = if current_price > 0.0 {
+                        (model.intrinsic_per_share - current_price) / current_price
+                    } else {
+                        0.0
+                    };
+                    Ok(serde_json::json!({
+                        "intrinsic_per_share": model.intrinsic_per_share,
+                        "current_price": current_price,
+                        "margin_of_safety": margin_of_safety,
+                    }))
+                } else {
+                    Ok(serde_json::json!({"error": "insufficient data for DCF"}))
+                }
+            }
+            _ => Ok(serde_json::json!({"error": "DCF overlay unavailable"})),
+        }
+    }
+
     #[tool(
         description = "Tornado chart sensitivity analysis. Varies each DCF driver (revenue growth, gross margin, D&A, capex, NWC, discount rate) by +/- range_pct (default 10%) while holding others constant. Returns drivers ranked by impact on intrinsic value per share. Identifies which assumptions most affect the valuation."
     )]
@@ -280,7 +307,7 @@ impl CompaniesServer {
         &self,
         Parameters(req): Parameters<types::SensitivityAnalysisRequest>,
     ) -> String {
-        execute_tool(self, "sensitivity_analysis", async {
+        execute_tool_semantic(self, "sensitivity_analysis", Self::ontology_anchor("sensitivity_analysis"), async {
             validate_symbol(&req.symbol)?;
 
             let income_result = self.fetch("income_statement", &req.symbol, &[("limit", "5")]).await;
@@ -301,25 +328,11 @@ impl CompaniesServer {
                     }
                 };
 
-            let income_arr = income.as_array();
-            let balance_arr = balance.as_array();
-            let cf_arr = cf.as_array();
-            let metrics_arr = metrics.as_array();
-            let profile_obj = profile.as_array().and_then(|a| a.first());
-
-            if income_arr.is_none_or(|a| a.is_empty())
-                || balance_arr.is_none_or(|a| a.is_empty())
-                || cf_arr.is_none_or(|a| a.is_empty())
-                || profile_obj.is_none()
-            {
-                return Ok(serde_json::json!({"symbol": req.symbol, "error": "insufficient data"}));
-            }
-
-            let income_data = income_arr.unwrap();
-            let balance_data = balance_arr.unwrap();
-            let cf_data = cf_arr.unwrap();
-            let metrics_data: &[serde_json::Value] = metrics_arr.map_or(&[], |v| v);
-            let profile_data = profile_obj.unwrap();
+            let Some((income_data, balance_data, cf_data, metrics_data, profile_data)) =
+                extract_historical_arrays(&income, &balance, &cf, &metrics, &profile)
+            else {
+                return Ok(serde_json::json!({"symbol": req.symbol, "error": "insufficient data for sensitivity analysis"}));
+            };
 
             let hist = financial_model::HistoricalSnapshot::from_api_json(
                 income_data, balance_data, cf_data, metrics_data, profile_data,
@@ -387,13 +400,13 @@ impl CompaniesServer {
     }
 
     #[tool(
-        description = "Monte Carlo DCF simulation. Runs N simulations (default 1000, clamped 100-10000) with each DCF assumption randomized uniformly within its +/- configured range. Returns intrinsic value distribution (percentiles p10/p25/median/p75/p90, histogram), probability of undervaluation, and base case comparison. Quantifies valuation uncertainty from assumption ranges."
+        description = "Equity duration (Macaulay-style, years) of a company's projected free cash flows: D = Σ t·PV(CF_t) / Σ PV(CF_t) over the projection plus the terminal value timed at the horizon year. Also reports terminal/stage-1/stage-2 PV shares — the maturity profile of the equity claim. Pair with prediction-market time_to_maturity (hkask-mcp-prediction-markets) for duration-matching across horizons."
     )]
-    pub async fn monte_carlo_dcf(
+    pub async fn equity_duration(
         &self,
-        Parameters(req): Parameters<types::MonteCarloDcfRequest>,
+        Parameters(req): Parameters<types::EquityDurationRequest>,
     ) -> String {
-        execute_tool(self, "monte_carlo_dcf", async {
+        execute_tool_semantic(self, "equity_duration", Self::ontology_anchor("equity_duration"), async {
             validate_symbol(&req.symbol)?;
 
             let income_result = self.fetch("income_statement", &req.symbol, &[("limit", "5")]).await;
@@ -414,25 +427,11 @@ impl CompaniesServer {
                     }
                 };
 
-            let income_arr = income.as_array();
-            let balance_arr = balance.as_array();
-            let cf_arr = cf.as_array();
-            let metrics_arr = metrics.as_array();
-            let profile_obj = profile.as_array().and_then(|a| a.first());
-
-            if income_arr.is_none_or(|a| a.is_empty())
-                || balance_arr.is_none_or(|a| a.is_empty())
-                || cf_arr.is_none_or(|a| a.is_empty())
-                || profile_obj.is_none()
-            {
+            let Some((income_data, balance_data, cf_data, metrics_data, profile_data)) =
+                extract_historical_arrays(&income, &balance, &cf, &metrics, &profile)
+            else {
                 return Ok(serde_json::json!({"symbol": req.symbol, "error": "insufficient data"}));
-            }
-
-            let income_data = income_arr.unwrap();
-            let balance_data = balance_arr.unwrap();
-            let cf_data = cf_arr.unwrap();
-            let metrics_data: &[serde_json::Value] = metrics_arr.map_or(&[], |v| v);
-            let profile_data = profile_obj.unwrap();
+            };
 
             let hist = financial_model::HistoricalSnapshot::from_api_json(
                 income_data, balance_data, cf_data, metrics_data, profile_data,
@@ -447,9 +446,91 @@ impl CompaniesServer {
                 types::ProjectionAssumptionOverrides::from(&req),
             )
             .map_err(|err| McpToolError::invalid_argument(err.to_string()))?;
+            let current_price = profile_data
+                .get("price")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let model = financial_model::project_model(&hist, &assumptions, current_price);
+
+            let stage1_years = req.stage1_years.unwrap_or(3);
+            let duration = financial_model::equity_duration(&model, stage1_years);
+
+            let output = match duration {
+                Some(d) => serde_json::json!({
+                    "symbol": req.symbol,
+                    "macaulay_duration_years": d.macaulay_duration_years,
+                    "terminal_pv_share": d.terminal_pv_share,
+                    "stage1_pv_share": d.stage1_pv_share,
+                    "stage2_pv_share": d.stage2_pv_share,
+                    "total_pv": d.total_pv,
+                    "horizon_years": d.horizon_years,
+                    "interpretation": format!(
+                        "Equity duration {:.1}y — {:.0}% of value sits in the terminal value at year {}.",
+                        d.macaulay_duration_years,
+                        d.terminal_pv_share * 100.0,
+                        d.horizon_years
+                    ),
+                    "framework": "Macaulay-style equity duration over projected FCF (terminal value timed at the horizon year). Compare against prediction-market time_to_maturity for maturity-transformation analysis.",
+                }),
+                None => serde_json::json!({
+                    "symbol": req.symbol,
+                    "error": "total PV is zero — equity duration undefined (never fabricated)",
+                }),
+            };
+
+            Ok(output)
+        }).await
+    }
+
+    #[tool(
+        description = "Monte Carlo DCF simulation. Runs N simulations (default 1000, clamped 100-10000) with each DCF assumption randomized uniformly within its +/- configured range. Returns intrinsic value distribution (percentiles p10/p25/median/p75/p90, histogram), probability of undervaluation, and base case comparison. Quantifies valuation uncertainty from assumption ranges."
+    )]
+    pub async fn monte_carlo_dcf(
+        &self,
+        Parameters(req): Parameters<types::MonteCarloDcfRequest>,
+    ) -> String {
+        execute_tool_semantic(self, "monte_carlo_dcf", Self::ontology_anchor("monte_carlo_dcf"), async {
+            validate_symbol(&req.symbol)?;
+
+            let income_result = self.fetch("income_statement", &req.symbol, &[("limit", "5")]).await;
+            let balance_result = self.fetch("balance_sheet", &req.symbol, &[("limit", "5")]).await;
+            let cf_result = self.fetch("cash_flow_statement", &req.symbol, &[("limit", "5")]).await;
+            let metrics_result = self.fetch("key_metrics", &req.symbol, &[("limit", "5")]).await;
+            let profile_result = self.fetch("company_profile", &req.symbol, &[]).await;
+
+            let (income, balance, cf, metrics, profile) =
+                match (income_result, balance_result, cf_result, metrics_result, profile_result) {
+                    (Ok(inc), Ok(bal), Ok(cf), Ok(m), Ok(p)) => (inc, bal, cf, m, p),
+                    (Err(e), _, _, _, _)
+                    | (_, Err(e), _, _, _)
+                    | (_, _, Err(e), _, _)
+                    | (_, _, _, Err(e), _)
+                    | (_, _, _, _, Err(e)) => {
+                        return Err(e);
+                    }
+                };
+
+            let Some((income_data, balance_data, cf_data, metrics_data, profile_data)) =
+                extract_historical_arrays(&income, &balance, &cf, &metrics, &profile)
+            else {
+                return Ok(serde_json::json!({"symbol": req.symbol, "error": "insufficient data"}));
+            };
+
+            let hist = financial_model::HistoricalSnapshot::from_api_json(
+                income_data, balance_data, cf_data, metrics_data, profile_data,
+            );
+
+            if hist.revenue.len() < 2 {
+                return Ok(serde_json::json!({"symbol": req.symbol, "error": "insufficient historical data — need at least 2 years of revenue"}));
+            }
 
             let current_price = profile_data.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
+            let assumptions = financial_model::ProjectionAssumptions::from_history_with_overrides(
+                &hist,
+                types::ProjectionAssumptionOverrides::from(&req),
+            )
+            .map_err(|err| McpToolError::invalid_argument(err.to_string()))?;
             let ranges = financial_model::McRange {
                 revenue_growth: req.range_revenue_growth,
                 gross_margin: req.range_gross_margin,
@@ -501,18 +582,161 @@ impl CompaniesServer {
     }
 
     #[tool(
+        description = "Scenario impact valuation. Takes a resolved scenario event tree (from hkask-mcp-scenarios `scenario_quantify`) and per-node impact mappings, then runs DCF under each scenario path. For each scenario node, the user maps how its Yes/No outcome additively changes the company's DCF assumptions (revenue growth, gross margin, capex, etc.). Enumerates all 2^N leaf paths, computes each path's probability from the conditional probability tables, applies stacked deltas, runs DCF, and weights by path probability. Returns probability-weighted intrinsic value, per-node sensitivity (which scenario nodes drive the most valuation variance), and the intrinsic value distribution (percentiles, prob-undervalued). Max 12 scenario nodes. This is the scenario scenario events drive the company's financial forecast, not the other way around."
+    )]
+    pub async fn scenario_impact_valuation(
+        &self,
+        Parameters(req): Parameters<types::ScenarioImpactValuationRequest>,
+    ) -> String {
+        execute_tool_semantic(self, "scenario_impact_valuation", Self::ontology_anchor("scenario_impact_valuation"), async {
+            validate_symbol(&req.symbol)?;
+
+            let income_result = self.fetch("income_statement", &req.symbol, &[("limit", "5")]).await;
+            let balance_result = self.fetch("balance_sheet", &req.symbol, &[("limit", "5")]).await;
+            let cf_result = self.fetch("cash_flow_statement", &req.symbol, &[("limit", "5")]).await;
+            let metrics_result = self.fetch("key_metrics", &req.symbol, &[("limit", "5")]).await;
+            let profile_result = self.fetch("company_profile", &req.symbol, &[]).await;
+
+            let (income, balance, cf, metrics, profile) =
+                match (income_result, balance_result, cf_result, metrics_result, profile_result) {
+                    (Ok(inc), Ok(bal), Ok(cf), Ok(m), Ok(p)) => (inc, bal, cf, m, p),
+                    (Err(e), _, _, _, _)
+                    | (_, Err(e), _, _, _)
+                    | (_, _, Err(e), _, _)
+                    | (_, _, _, Err(e), _)
+                    | (_, _, _, _, Err(e)) => {
+                        return Err(e);
+                    }
+                };
+
+            let Some((income_data, balance_data, cf_data, metrics_data, profile_data)) =
+                extract_historical_arrays(&income, &balance, &cf, &metrics, &profile)
+            else {
+                return Ok(serde_json::json!({"symbol": req.symbol, "error": "insufficient data"}));
+            };
+
+            let hist = financial_model::HistoricalSnapshot::from_api_json(
+                income_data, balance_data, cf_data, metrics_data, profile_data,
+            );
+
+            if hist.revenue.len() < 2 {
+                return Ok(serde_json::json!({"symbol": req.symbol, "error": "insufficient historical data — need at least 2 years of revenue"}));
+            }
+
+            let current_price = profile_data.get("price").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+            let assumptions = financial_model::ProjectionAssumptions::from_history_with_overrides(
+                &hist,
+                types::ProjectionAssumptionOverrides::from(&req),
+            )
+            .map_err(|err| McpToolError::invalid_argument(err.to_string()))?;
+
+            // Parse the scenario tree JSON from scenario_quantify.
+            let tree: financial_model::ScenarioTreeInput = serde_json::from_str(&req.scenario_tree)
+                .map_err(|e| McpToolError::invalid_argument(format!("invalid scenario_tree JSON: {e}")))?;
+
+            // Parse the per-node impact mappings.
+            let impacts: Vec<financial_model::ScenarioNodeImpact> =
+                serde_json::from_str(&req.impact_mappings)
+                    .map_err(|e| McpToolError::invalid_argument(format!("invalid impact_mappings JSON: {e}")))?;
+
+            let result = financial_model::scenario_impact_dcf(
+                &hist, &assumptions, &tree, &impacts, current_price,
+            )
+            .map_err(map_scenario_impact_error)?;
+
+            let node_sensitivities: Vec<serde_json::Value> = result.node_sensitivities.iter()
+                .map(|s| serde_json::json!({
+                    "node_id": s.node_id,
+                    "node_name": s.node_name,
+                    "intrinsic_if_yes": s.intrinsic_if_yes,
+                    "intrinsic_if_no": s.intrinsic_if_no,
+                    "sensitivity": s.sensitivity,
+                    "marginal_probability": s.marginal_probability,
+                }))
+                .collect();
+
+            let max_output_paths = 50;
+            let paths_truncated = result.paths.len() > max_output_paths;
+            let mut sorted_paths = result.paths.clone();
+            sorted_paths.sort_by(|a, b| {
+                b.probability
+                    .partial_cmp(&a.probability)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let output_paths: Vec<serde_json::Value> = sorted_paths.iter()
+                .take(max_output_paths)
+                .map(|p| {
+                    let outcomes: Vec<serde_json::Value> = p.outcomes.iter()
+                        .map(|o| serde_json::json!({
+                            "node_id": o.node_id,
+                            "outcome": o.outcome,
+                        }))
+                        .collect();
+                    serde_json::json!({
+                        "probability": p.probability,
+                        "intrinsic_per_share": p.intrinsic_per_share,
+                        "applied_growth": p.applied_growth,
+                        "applied_margin": p.applied_margin,
+                        "outcomes": outcomes,
+                    })
+                })
+                .collect();
+
+            let output = serde_json::json!({
+                "symbol": req.symbol,
+                "current_price": current_price,
+                "base_intrinsic": result.base_intrinsic,
+                "probability_weighted_intrinsic": result.probability_weighted_intrinsic,
+                "path_count": result.path_count,
+                "total_probability": result.total_probability,
+                "paths_truncated": paths_truncated,
+                "distribution": {
+                    "min": result.distribution.min,
+                    "p10": result.distribution.p10,
+                    "p25": result.distribution.p25,
+                    "median": result.distribution.median,
+                    "p75": result.distribution.p75,
+                    "p90": result.distribution.p90,
+                    "max": result.distribution.max,
+                    "prob_undervalued": result.distribution.prob_undervalued,
+                },
+                "node_sensitivities": node_sensitivities,
+                "paths": output_paths,
+                "bridge_note": "Scenario scenario events (from hkask-mcp-scenarios scenario_quantify) drive the company financial forecast. Each scenario node Yes/No outcome maps to additive deltas on DCF assumptions. The tool enumerates all 2^N leaf paths, computes path probabilities from the CPTs, applies stacked deltas, runs DCF under each path, and weights by path probability.",
+                "pipeline": [
+                    "1. scenario_quantify (hkask-mcp-scenarios) → resolved event tree",
+                    "2. User authors per-node impact mappings (node_id → yes_deltas, no_deltas)",
+                    "3. scenario_impact_valuation (this tool) → probability-weighted DCF",
+                    "4. Compare probability_weighted_intrinsic vs base_intrinsic vs current_price",
+                ],
+                "fibo": {
+                    "scenario_probability": fibo::SCENARIO_PROBABILITY,
+                    "intrinsic_value": fibo::INTRINSIC_VALUE_PER_SHARE,
+                },
+                "framework": "Scenario impact valuation. Exogenous scenario events drive the company's financial forecast via per-node additive deltas on DCF assumptions. Enumerates all 2^N leaf paths through the event tree, computes each path's probability from the conditional probability tables, applies stacked deltas, runs DCF under each modified assumption set, and weights by path probability. Returns probability-weighted intrinsic value, per-node sensitivity, and intrinsic value distribution.",
+            });
+
+            Ok(fibo::enrich_with_ontology(output, "scenario_impact_valuation"))
+        }).await
+    }
+
+    #[tool(
         description = "Calibrated superforecast. Runs Fermi decomposition on growth and margin estimates, applies outside view (base rate) and inside view adjustments, then distributes probabilities across the four Schwartz scenarios. Produces a probability-weighted intrinsic value and compares it to the market price. Anchored to Tetlock's GJP methodology. Collaborative — you provide base rates and reference counts; the tool computes calibrations."
     )]
     pub async fn calibrate_forecast(
         &self,
         Parameters(req): Parameters<types::CalibrateForecastRequest>,
     ) -> String {
-        execute_tool(self, "calibrate_forecast", async {
+        execute_tool_semantic(self, "calibrate_forecast", Self::ontology_anchor("calibrate_forecast"), async {
             validate_symbol(&req.symbol)?;
             if let Some(ref revision_of) = req.revision_of {
-                self.portfolio
-                    .validate_forecast_revision(revision_of, &req.symbol)
-                    .map_err(crate::map_portfolio_error)?;
+                let revision_of = revision_of.clone();
+                let symbol = req.symbol.clone();
+                run_portfolio(self.portfolio.clone(), move |portfolio| {
+                    portfolio.validate_forecast_revision(&revision_of, &symbol)
+                })
+                .await?;
             }
             for (name, value) in [
                 ("growth_estimate", req.growth_estimate),
@@ -551,25 +775,11 @@ impl CompaniesServer {
                     | (_, _, _, _, Err(e)) => { return Err(e); }
                 };
 
-            let income_arr = income.as_array();
-            let balance_arr = balance.as_array();
-            let cf_arr = cf.as_array();
-            let metrics_arr = metrics.as_array();
-            let profile_obj = profile.as_array().and_then(|a| a.first());
-
-            if income_arr.is_none_or(|a| a.is_empty())
-                || balance_arr.is_none_or(|a| a.is_empty())
-                || cf_arr.is_none_or(|a| a.is_empty())
-                || profile_obj.is_none()
-            {
+            let Some((income_data, balance_data, cf_data, metrics_data, profile_data)) =
+                extract_historical_arrays(&income, &balance, &cf, &metrics, &profile)
+            else {
                 return Ok(serde_json::json!({"symbol": req.symbol, "error": "insufficient data"}));
-            }
-
-            let income_data = income_arr.unwrap();
-            let balance_data = balance_arr.unwrap();
-            let cf_data = cf_arr.unwrap();
-            let metrics_data: &[serde_json::Value] = metrics_arr.map_or(&[], |v| v);
-            let profile_data = profile_obj.unwrap();
+            };
 
             let hist = financial_model::HistoricalSnapshot::from_api_json(
                 income_data, balance_data, cf_data, metrics_data, profile_data,
@@ -703,15 +913,20 @@ impl CompaniesServer {
         &self,
         Parameters(req): Parameters<types::ForecastGetRequest>,
     ) -> String {
-        execute_tool(self, "forecast_get", async {
-            let forecast = self
-                .get_persisted_forecast(req.forecast_id)
-                .await?
-                .ok_or_else(|| {
-                    McpToolError::invalid_argument("forecast not found for this owner")
-                })?;
-            Ok(serde_json::json!(forecast))
-        })
+        execute_tool_semantic(
+            self,
+            "forecast_get",
+            Self::ontology_anchor("forecast_get"),
+            async {
+                let forecast = self
+                    .get_persisted_forecast(req.forecast_id)
+                    .await?
+                    .ok_or_else(|| {
+                        McpToolError::invalid_argument("forecast not found for this owner")
+                    })?;
+                Ok(serde_json::json!(forecast))
+            },
+        )
         .await
     }
 
@@ -722,11 +937,16 @@ impl CompaniesServer {
         &self,
         Parameters(req): Parameters<types::ForecastListRequest>,
     ) -> String {
-        execute_tool(self, "forecast_list", async {
-            validate_symbol(&req.symbol)?;
-            let forecasts = self.list_persisted_forecasts(req.symbol.clone()).await?;
-            Ok(serde_json::json!({"symbol": req.symbol, "forecasts": forecasts}))
-        })
+        execute_tool_semantic(
+            self,
+            "forecast_list",
+            Self::ontology_anchor("forecast_list"),
+            async {
+                validate_symbol(&req.symbol)?;
+                let forecasts = self.list_persisted_forecasts(req.symbol.clone()).await?;
+                Ok(serde_json::json!({"symbol": req.symbol, "forecasts": forecasts}))
+            },
+        )
         .await
     }
 
@@ -737,7 +957,7 @@ impl CompaniesServer {
         &self,
         Parameters(req): Parameters<types::ForecastRecordRequest>,
     ) -> String {
-        execute_tool(self, "forecast_record", async {
+        execute_tool_semantic(self, "forecast_record", Self::ontology_anchor("forecast_record"), async {
             validate_symbol(&req.symbol)?;
             for (name, value) in [
                 ("forecast_multiple", req.forecast_multiple),
@@ -749,18 +969,15 @@ impl CompaniesServer {
             }
 
             // Brier scores on binary outcomes
-            // Multiple: was actual multiple >= forecast? (binary direction)
-            let multiple_higher = req.actual_multiple >= req.forecast_multiple;
-            let p_multiple_up = 0.5;
-            let multiple_brier = hkask_forecast::brier_score(p_multiple_up, multiple_higher);
-
+            // Multiple direction: the multiple probability is not modeled, so a
+            // coin-flip prior (p=0.5) would always yield 0.25 — uninformative.
+            // Excluded from the combined score; reported as null below.
             // Price change: was actual return within 20% tolerance of forecast?
             let return_accurate = superforecast::within_tolerance(
                 req.forecast_price_change, req.actual_price_change, 0.20,
             );
             let return_brier = hkask_forecast::brier_score(0.7, return_accurate);
-
-            let combined = (multiple_brier + return_brier) / 2.0;
+            let combined = return_brier;
 
             // Gap decomposition: use the owner's durable forecast model if requested.
             let stored_forecast = if let Some(ref forecast_id) = req.forecast_id {
@@ -776,7 +993,7 @@ impl CompaniesServer {
                 }
                 Some(
                     StoredForecast::from_snapshot(&persisted.snapshot)
-                        .map_err(|e| McpToolError::internal(e.to_string()))?,
+                        .map_err(|e| McpToolError::internal(e.to_string()))?, // rr0044-ok: own-struct-deserialize
                 )
             } else {
                 None
@@ -793,22 +1010,15 @@ impl CompaniesServer {
                     if let (Ok(inc), Ok(bal), Ok(cf), Ok(metrics), Ok(prof)) =
                         (&actual_income, &actual_balance, &actual_cf, &actual_metrics, &actual_profile)
                     {
-                        let inc_arr = inc.as_array();
-                        let bal_arr = bal.as_array();
-                        let cf_arr = cf.as_array();
-                        let met_arr = metrics.as_array();
-                        let prof_obj = prof.as_array().and_then(|a| a.first());
-
-                        if inc_arr.is_some_and(|a| !a.is_empty())
-                            && bal_arr.is_some_and(|a| !a.is_empty())
-                            && cf_arr.is_some_and(|a| !a.is_empty())
+                        if let Some((inc_data, bal_data, cf_data, met_data, prof_data)) =
+                            extract_historical_arrays(inc, bal, cf, metrics, prof)
                         {
                             let actual_hist = financial_model::HistoricalSnapshot::from_api_json(
-                                inc_arr.unwrap(),
-                                bal_arr.unwrap(),
-                                cf_arr.unwrap(),
-                                met_arr.map_or(&[] as &[serde_json::Value], |v| v),
-                                prof_obj.unwrap_or(&serde_json::Value::Null),
+                                inc_data,
+                                bal_data,
+                                cf_data,
+                                met_data,
+                                prof_data,
                             );
 
                             // Run decomposition
@@ -893,7 +1103,7 @@ impl CompaniesServer {
                         "outcome_date": req.outcome_date,
                         "actual_multiple": req.actual_multiple,
                         "actual_price_change": req.actual_price_change,
-                        "multiple_brier": multiple_brier,
+                        "multiple_brier": serde_json::Value::Null,
                         "return_brier": return_brier,
                         "combined_brier": combined,
                         "decomposition": decomposition,
@@ -922,7 +1132,7 @@ impl CompaniesServer {
                     "narrative": gap_narrative,
                 },
                 "brier": {
-                    "multiple_direction": multiple_brier,
+                    "multiple_direction": serde_json::Value::Null,
                     "return_accuracy": return_brier,
                     "combined": combined,
                     "interpretation": hkask_forecast::brier_interpretation(combined),
@@ -942,7 +1152,7 @@ impl CompaniesServer {
     }
 
     #[tool(
-        description = "Rate a previous tool result on a 1–5 scale with optional comments. Score: 5 = exceeded expectations, 3 = met expectations, 1 = completely missed. Both score and comments are optional — provide either, both, or neither to acknowledge you saw the result. Feeds the learning loop."
+        description = "Rate a previous tool result on a 1–5 scale with optional comments. Score: 5 = exceeded expectations, 3 = met expectations, 1 = completely missed. Both score and comments are optional — provide either, both, or neither to acknowledge you saw the result. Optional `provider` field explicitly names the data provider (e.g. \"fmp\", \"eodhd\") that produced the result; when omitted, the provider is inferred from the symbol/query. Feeds the learning loop."
     )]
     pub async fn result_feedback(
         &self,
@@ -951,57 +1161,80 @@ impl CompaniesServer {
             query,
             score,
             comments,
+            provider,
         }): Parameters<types::ResultFeedbackRequest>,
     ) -> String {
-        execute_tool(self, "result_feedback", async {
-            // Validate score range if provided
-            if let Some(s) = score
-                && !(1..=5).contains(&s)
-            {
-                return Err(McpToolError::invalid_argument(format!(
-                    "score must be 1–5, got {s}"
-                )));
-            }
-
-            // Accept empty feedback as an acknowledgment (no score, no comments = "I saw it")
-            let has_feedback = score.is_some() || !comments.is_empty();
-
-            // Record feedback as an experience linked to the original tool.
-
-            // Kanban-style learning: feedback updates in-process state.
-            // Extracts symbol from query to track per-symbol provider quality.
-            if let Some(sym) = parse_symbol_from_query(&query)
-                && let Ok(mut state) = self.learning.lock()
-            {
-                let prov = if comments.contains("provider=eodhd") {
-                    Provider::Eodhd
-                } else if comments.contains("provider=fmp") {
-                    Provider::Fmp
-                } else if sym.contains('.') {
-                    Provider::Eodhd
-                } else {
-                    Provider::Fmp
-                };
-                state.record(&sym, prov, score);
-            }
-
-            let summary = if has_feedback {
-                if let Some(s) = score {
-                    format!("score {s}/5")
-                } else {
-                    "comments only".to_string()
+        execute_tool_semantic(
+            self,
+            "result_feedback",
+            Self::ontology_anchor("result_feedback"),
+            async {
+                // Validate score range if provided
+                if let Some(s) = score
+                    && !(1..=5).contains(&s)
+                {
+                    return Err(McpToolError::invalid_argument(format!(
+                        "score must be 1–5, got {s}"
+                    )));
                 }
-            } else {
-                "acknowledged".to_string()
-            };
 
-            Ok(serde_json::json!({
-                "status": "recorded",
-                "tool": tool,
-                "query": query,
-                "summary": summary,
-            }))
-        })
+                // Accept empty feedback as an acknowledgment (no score, no comments = "I saw it")
+                let has_feedback = score.is_some() || !comments.is_empty();
+
+                // Record feedback as an experience linked to the original tool.
+
+                // Kanban-style learning: feedback updates in-process state.
+                // Extracts symbol from query to track per-symbol provider quality.
+                if let Some(sym) = parse_symbol_from_query(&query)
+                    && let Ok(mut state) = self.learning.lock()
+                {
+                    let prov = if let Some(ref p) = provider {
+                        match p.to_ascii_lowercase().as_str() {
+                            "eodhd" => Provider::Eodhd,
+                            "fmp" => Provider::Fmp,
+                            _ => {
+                                // Unknown explicit provider: fall back to heuristic.
+                                if comments.contains("provider=eodhd") {
+                                    Provider::Eodhd
+                                } else if comments.contains("provider=fmp") {
+                                    Provider::Fmp
+                                } else if sym.contains('.') {
+                                    Provider::Eodhd
+                                } else {
+                                    Provider::Fmp
+                                }
+                            }
+                        }
+                    } else if comments.contains("provider=eodhd") {
+                        Provider::Eodhd
+                    } else if comments.contains("provider=fmp") {
+                        Provider::Fmp
+                    } else if sym.contains('.') {
+                        Provider::Eodhd
+                    } else {
+                        Provider::Fmp
+                    };
+                    state.record(&sym, prov, score);
+                }
+
+                let summary = if has_feedback {
+                    if let Some(s) = score {
+                        format!("score {s}/5")
+                    } else {
+                        "comments only".to_string()
+                    }
+                } else {
+                    "acknowledged".to_string()
+                };
+
+                Ok(serde_json::json!({
+                    "status": "recorded",
+                    "tool": tool,
+                    "query": query,
+                    "summary": summary,
+                }))
+            },
+        )
         .await
     }
 }

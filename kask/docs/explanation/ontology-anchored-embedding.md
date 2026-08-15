@@ -1,8 +1,8 @@
 ---
 title: "Ontology-Anchored Embedding Pipeline"
 audience: [developers, architects]
-last_updated: 2026-07-24
-version: "0.31.0"
+last_updated: 2026-08-04
+version: "0.33.1"
 status: "Active"
 domain: "Cross-cutting"
 mds_categories: [domain, composition]
@@ -21,7 +21,7 @@ the embedding vector.
 
 This follows the INSTRUCTOR paradigm (Su et al., NeurIPS 2023): task-specific
 instructions prepended to text produce task-conditioned embeddings that
-outperform generic raw-text embeddings.
+outperform generic raw-text embeddings.[^instructor-paper]
 
 ## Pipeline Order
 
@@ -47,9 +47,12 @@ outperform generic raw-text embeddings.
                                                           assemble → train
 ```
 
+The tag-before-embed ordering means the embedding step already has ontology
+context, so all downstream KNN lookups are domain-aware.[^instructor-pipeline]
+
 ## How Ontology-Anchored Embedding Works
 
-### Step 1: Tag (classification from text alone)
+### Step 1: Tag (classification from text alone)[^instructor-tag]
 
 `corpus_tag_chunks` reads `chunks.jsonl` and classifies each chunk against
 multiple ontologies:
@@ -96,24 +99,32 @@ This produces an embedding vector that encodes both:
 | OntoKG (2024) | Ontology schemas guide LLM extraction → higher quality | Ontology templates guide triple extraction |
 | RAG with ontology-guided KGs (2024) | One-time ontology learning reduces LLM cost | Tag once, all downstream steps benefit |
 
-## Bridge Crates
+## Bridge Crate
 
-Three ontology bridge crates provide canonical predicate constants:
+The single shared `hkask-bridge-ontology` crate provides canonical concept
+constants for all ontologies. No ontology vocabulary lives inside any MCP
+server.
 
-| Crate | Ontology | Constants |
-|-------|----------|-----------|
-| `hkask-mcp-corpus::bridge::golem` | Narrative/literary | 16 predicates (hasCharacter, illustrates, metaphorFor, ...) |
-| `hkask-mcp-corpus::bridge::fibo` | Financial/business | 12 concepts (competitiveAdvantage, returnOnCapital, ...) |
-| `hkask-mcp-corpus::bridge::eso` | Epistemic/scientific | 16 predicates (hasHypothesis, falsifiedBy, implies, ...) |
+| Module | Ontology | Constants |
+|-------|----------|------------|
+| `hkask_bridge_ontology::golem` | Narrative/literary | 16 predicates (hasCharacter, illustrates, metaphorFor, ...) |
+| `hkask_bridge_ontology::fibo` | Financial/business | union of the former companies + corpus subsets (competitiveAdvantage, returnOnCapital, ROIC, DCF, ...) |
+| `hkask_bridge_ontology::eso` | Epistemic/scientific | 16 predicates (hasHypothesis, falsifiedBy, implies, ...) |
+| `hkask_bridge_ontology::omc` | Media creation | scene, sequence, creative work, asset, version |
+| `hkask_bridge_ontology::mlschema` | ML training | model, run, data, hyperparameter, evaluation |
+| `hkask_bridge_ontology::dc_bibo` | Dublin Core + BIBO + CiTO | title, creator, subject, identifier, Article, Document, cites, supports |
+| `hkask_bridge_ontology::pko` | Procedural Knowledge | procedure, step, step_execution, verification |
 
-These follow the pattern of `hkask-bridge-dublincore`:
-type alias + const strings, no dependencies, no reasoners.
+The crate also owns the domain-selection logic (`axis` module):
+`select_ontology_anchor(domain)` maps a domain hint to its axis anchoring,
+with the invariant that one axis is always DC or PKO. See the
+[Ontology Bridge API Reference](../reference/ontology-bridge.md) for the full API.
 
 ## Why Not Embed → Tag?
 
 Running embed before tag produces raw-text embeddings that are
 ontology-agnostic. The tagging step would need KNN context from these
-"dumb" embeddings to inform classification — but:
+"dumb" embeddings to inform classification — but:[^rag-lewis]
 
 1. **Tagging is classification, not generation** — the RAG paradigm
    (retrieve-then-generate) applies to generation, not classification
@@ -126,3 +137,23 @@ ontology-agnostic. The tagging step would need KNN context from these
 
 See [ADR-050](../architecture/ADRs/ADR-050-ontology-anchored-embedding.md) for the full
 design decision record.
+
+## Footnotes
+
+[^instructor-paper]: Su, W., Casper, M., Absar, S., Lo, K., Wang, Y., & Yang, Y. (2023). One Embedder, Any Task: Instruction-Finetuned Text Embeddings. arXiv. https://arxiv.org/abs/2212.09741
+    Cited as the direct source for the tag-before-embed paradigm — task instructions prepended to text produce task-conditioned embeddings.
+
+[^instructor-pipeline]: Su, W., Casper, M., Absar, S., Lo, K., Wang, Y., & Yang, Y. (2023). One Embedder, Any Task: Instruction-Finetuned Text Embeddings. arXiv. https://arxiv.org/abs/2212.09741
+    Cited for the instruction-conditional embedding quality that the tag-before-embed pipeline ordering exploits.
+
+[^instructor-tag]: Su, W., Casper, M., Absar, S., Lo, K., Wang, Y., & Yang, Y. (2023). One Embedder, Any Task: Instruction-Finetuned Text Embeddings. arXiv. https://arxiv.org/abs/2212.09741
+    Cited for the instruction-prefix mechanism the embed step uses — ontology tags are prepended as task instructions.
+
+[^dublin-core]: DCMI. (2020). *Dublin Core Metadata Element Set, Version 1.1*. Dublin Core Metadata Initiative. https://www.dublincore.org/specifications/dublin-core/dces/
+    Cited as the pattern the bridge crates follow — lightweight constant definitions with no reasoner dependency.
+
+[^fibo-spec]: EDM Council. (2024). *Financial Industry Business Ontology (FIBO) Specification*. Enterprise Data Management Council. https://spec.edmcouncil.org/fibo/
+    Cited for the FIBO ontology the bridge crate exposes as canonical predicate constants.
+
+[^rag-lewis]: Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Goyal, V., Küttler, H., Lewis, M., Yih, W., Rocktäschel, T., Riedel, S., & Kiela, D. (2020). Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks. arXiv. https://arxiv.org/abs/2005.11401
+    Cited for the RAG (retrieve-then-generate) paradigm the design rationale invokes to distinguish tagging-as-classification from generation.

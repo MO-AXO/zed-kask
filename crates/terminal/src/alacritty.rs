@@ -17,7 +17,7 @@ use alacritty_terminal::{
     },
     sync::FairMutex,
     term::{
-        Config, Osc52, RenderableCursor, Term, TermMode,
+        Config, Osc52, RenderableCursor, SEMANTIC_ESCAPE_CHARS, Term, TermMode,
         cell::{Cell as AlacCell, Flags, Hyperlink as AlacHyperlink},
         search::{Match, RegexIter, RegexSearch},
     },
@@ -91,15 +91,17 @@ impl PtySender {
     }
 
     pub(super) fn resize(&self, bounds: TerminalBounds) {
-        if let Err(error) = self
+        if let Err(_error) = self
             .notifier
             .0
             .send(Msg::Resize(window_size_from_terminal_bounds(bounds)))
         {
-            // The IO thread has exited (PTY process gone, terminal being
-            // torn down). Closed-channel here is expected during shutdown,
-            // not actionable — matches `shutdown`'s severity below.
-            log::debug!("alacritty pty resize dropped (channel closed): {error}");
+            // The PTY event loop exits before the Terminal entity is dropped
+            // (child exit, EOF, drain_on_exit), closing the channel. Subsequent
+            // resize ticks hit a dead channel — expected post-exit noise, not an
+            // error. The term-grid resize (terminal.rs) runs unconditionally and
+            // is the only resize that matters once the PTY is gone.
+            log::debug!("skipped resize on closed alacritty pty channel");
         }
     }
 
@@ -126,6 +128,7 @@ pub(super) fn display_only_term_config(
     Config {
         scrolling_history,
         default_cursor_style: alacritty_cursor_style(cursor_shape),
+        semantic_escape_chars: format!("{SEMANTIC_ESCAPE_CHARS}─"),
         osc52: Osc52::Disabled,
         ..Config::default()
     }
@@ -138,6 +141,7 @@ pub(super) fn pty_term_config(
     Config {
         scrolling_history,
         default_cursor_style: alacritty_cursor_style(cursor_shape),
+        semantic_escape_chars: format!("{SEMANTIC_ESCAPE_CHARS}─"),
         ..Config::default()
     }
 }
@@ -1103,5 +1107,24 @@ mod tests {
                 is_block: true,
             }
         );
+    }
+
+    #[test]
+    fn semantic_selection_stops_at_tree_branch() {
+        let config = pty_term_config(1000, SettingsCursorShape::default());
+        let (events_tx, _events_rx) = futures::channel::mpsc::unbounded();
+        let mut term = Term::new(config, &TerminalBounds::default(), ZedListener(events_tx));
+        for character in "└─zms-demo.target".chars() {
+            term.input(character);
+        }
+
+        let selection = Selection::new(
+            SelectionType::Semantic,
+            Point::new(0, 2),
+            SelectionSide::Left,
+        );
+        set_selection(&mut term, Some(&selection));
+
+        assert_eq!(selection_text(&term).as_deref(), Some("zms-demo.target"));
     }
 }

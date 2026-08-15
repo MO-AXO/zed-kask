@@ -1,12 +1,14 @@
 use crate::TrainingServer;
 use crate::adapters::AdapterMetrics;
 use crate::providers::TrainingJobStatus;
+use crate::tools::error_mapping::{map_adapter_store_error, map_host_provider_error};
 use crate::types::TrainStatusRequest;
-use hkask_mcp_server::server::{McpToolError, execute_tool};
+use hkask_mcp_server::server::execute_tool_semantic;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::tool;
+use rmcp::{tool, tool_router};
 use serde_json::json;
 
+#[tool_router(router = status_router, vis = "pub")]
 impl TrainingServer {
     #[tool(
         description = "Check the status of a training job. Returns pod status, SSH connection info, uptime, GPU type, and recent log lines. When training completes (detected via HuggingFace completion manifest), automatically registers the adapter with metadata from the manifest."
@@ -15,7 +17,7 @@ impl TrainingServer {
         &self,
         Parameters(TrainStatusRequest { job_id }): Parameters<TrainStatusRequest>,
     ) -> String {
-        execute_tool(self, "training_status", async {
+        execute_tool_semantic(self, "training_status", Self::ontology_anchor("training_status"), async {
             match self.host.status(&job_id).await {
                 Ok(pod_status) => {
                     // The pod stays RUNNING (exec sleep infinity for SSH
@@ -126,7 +128,7 @@ impl TrainingServer {
                         let adapter: crate::adapter::TrainedLoRAAdapter = match self
                             .adapter_store
                             .get_by_id(uuid::Uuid::parse_str(&job_id).unwrap_or_default())
-                            .map_err(|e| McpToolError::internal(format!("Adapter store error: {e}")))?
+                            .map_err(map_adapter_store_error)?
                         {
                             Some(existing) => {
                                 result["adapter_registered"] = json!(true);
@@ -136,7 +138,7 @@ impl TrainingServer {
                             None => {
                                 if let Some(ref manifest) = manifest {
                                     let base_model = manifest.base_model.clone().unwrap_or_default();
-                                    let adapter_name = format!("adapter-{}", &job_id[..8]);
+                                    let adapter_name = format!("adapter-{}", &job_id[..8.min(job_id.len())]);
                                     let weight_path = manifest.adapter.repository.clone();
                                     let adapter = Self::build_trained_adapter(
                                         job_id.clone(),
@@ -157,7 +159,7 @@ impl TrainingServer {
                                         Some(std::path::Path::new(&weight_path)),
                                     );
                                     match self.adapter_store.store(&adapter)
-                                        .map_err(|e| McpToolError::internal(format!("Adapter store error: {e}")))
+                                        .map_err(map_adapter_store_error)
                                     {
                                         Ok(()) => {
                                             result["adapter_registered"] = json!(true);
@@ -192,7 +194,7 @@ impl TrainingServer {
                             let current_loss = Self::metrics_from_trained(&adapter).and_then(|m| m.loss);
                             if let Some(prev) = self.adapter_store
                                 .get_previous_by_skill_name(&adapter_skill, adapter.id)
-                                .map_err(|e| McpToolError::internal(format!("Adapter store error: {e}")))?
+                                .map_err(map_adapter_store_error)?
                                 && let (Some(new_loss), Some(prev_loss)) = (
                                     current_loss,
                                     Self::metrics_from_trained(&prev).and_then(|m| m.loss),
@@ -212,7 +214,7 @@ impl TrainingServer {
 
                     Ok(result)
                 }
-                Err(e) => Err(McpToolError::internal(format!("Status query failed: {e}"))),
+                Err(e) => Err(map_host_provider_error(e)),
             }
         })
         .await

@@ -9,8 +9,6 @@
 
 use crate::error::{DomainKind, ErrorKind, ServiceError};
 use hkask_inference::InferenceConfig;
-use hkask_storage::database::types::DbProvider;
-use hkask_types::WalletConfig;
 
 // ── Default values ──────────────────────────────────────────────────────────
 // Centralized here so all three constructors share the same defaults.
@@ -30,40 +28,11 @@ const DEFAULT_TEMPLATE_CACHE_PATH: &str = "/tmp/hkask-templates";
 const DEFAULT_USER_NAME: &str = "curator";
 const TEST_USER_NAME: &str = "test-user";
 
-/// Default path for the primary database file.
-/// Resolved relative to `resolve_data_dir()` unless overridden via `HKASK_DB_PATH`.
-pub const DEFAULT_DB_PATH: &str = "hkask.db";
-
-/// Resolve the hKask data directory.
-///
-/// Order of precedence:
-/// 1. `HKASK_DATA_DIR` environment variable
-/// 2. `$XDG_DATA_HOME/hkask`
-/// 3. `$HOME/.local/share/hkask`
-/// 4. Current working directory (fallback)
-///
-/// All relative database paths in `ServiceConfig` are resolved against
-/// this directory, ensuring agent databases stay in a predictable location
-/// regardless of where `kask` is invoked from.
-#[must_use]
-pub fn resolve_data_dir() -> std::path::PathBuf {
-    if let Ok(dir) = std::env::var("HKASK_DATA_DIR") {
-        let p = std::path::PathBuf::from(&dir);
-        if p.is_absolute() || p.starts_with(".") {
-            return p;
-        }
-    }
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        return std::path::PathBuf::from(xdg).join("hkask");
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        return std::path::PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("hkask");
-    }
-    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-}
+// Default DB filename and data-dir resolution are path primitives owned by
+// `hkask_types::agent_paths`; re-exported here so this crate's historical
+// public API (`hkask_services_core::DEFAULT_DB_PATH`, `::config::resolve_data_dir`)
+// keeps resolving for existing consumers.
+pub use hkask_types::agent_paths::{DEFAULT_DB_PATH, resolve_data_dir};
 
 /// Configuration resolved once at startup and shared across all services.
 ///
@@ -81,14 +50,6 @@ pub struct ServiceConfig {
 
     /// Passphrase for encrypted database access.
     pub db_passphrase: String,
-
-    /// Database provider — `sqlite` (default) or `postgres`.
-    /// Set via `HKASK_DB_PROVIDER` env var. When `postgres`, `HKASK_DATABASE_URL`
-    /// must also be set.
-    pub db_provider: DbProvider,
-
-    /// Secret for the A2A root authority and manifest delegation tokens.
-    pub a2a_secret: Vec<u8>,
 
     /// Inference configuration for the multi-provider router.
     pub inference_config: InferenceConfig,
@@ -122,9 +83,6 @@ pub struct ServiceConfig {
     /// when not explicitly set. Ignored when `in_memory: true`.
     pub memory_db_path: Option<String>,
 
-    /// Wallet configuration for rJoule payments and multi-chain deposits.
-    pub wallet_config: WalletConfig,
-
     /// Episodic memory life in days — configurable, default 180 (6 months × 30).
     ///
     /// Sets S in Wozniak & Gorzelanczyk (1995) forgetting curve: R(t) = exp(-t/S).
@@ -132,14 +90,6 @@ pub struct ServiceConfig {
     /// Recalling a memory resets its decay clock (t goes back to 0).
     /// Override via HKASK_MEMORY_LIFE_DAYS env var.
     pub memory_life_days: f64,
-
-    /// Whether the Curator daemon may auto-consolidate memory when escalations exist.
-    ///
-    /// This is an opt-in flag (default `false`) gated by P2 affirmative consent.
-    /// Even when enabled, the Curator checks consent for both `EpisodicMemory`
-    /// and `SemanticMemory` before running, and posts an escalation entry describing
-    /// the event. Override via `HKASK_CURATOR_AUTO_CONSOLIDATION=1`.
-    pub curator_auto_consolidation_enabled: bool,
 }
 
 impl ServiceConfig {
@@ -147,23 +97,20 @@ impl ServiceConfig {
     ///
     /// Reads `HKASK_DB_PATH`, `HKASK_TEMPLATE_CACHE_PATH`,
     /// `HKASK_MEMORY_DB_PATH`, and `HKASK_AGENT_NAME` from environment.
-    /// The A2A authority secret and database passphrase are resolved via
-    /// `hkask-keystore`.
+    /// The database passphrase is resolved via `hkask-keystore`.
     ///
     /// The agent name defaults to `HKASK_AGENT_NAME` env var (set by the
     /// zed-kask composition root from the Zed login username), falling back to
     /// `DEFAULT_USER_NAME` ("curator") for standalone CLI usage.
     ///
     /// \[P5\] Motivating: Essentialism — service-layer orchestration earns its existence; no raw domain logic.
-    /// pre:  keystore must have a2a_secret and db_passphrase configured
+    /// pre:  keystore must have db_passphrase configured
     /// post: returns ServiceConfig with env-derived values and keystore secrets; Err(Keystore) on secret resolution failure
     #[must_use = "result must be used"]
     pub fn from_env() -> Result<Self, ServiceError> {
         let data_dir = resolve_data_dir();
         let db_path = std::env::var("HKASK_DB_PATH")
             .unwrap_or_else(|_| data_dir.join(DEFAULT_DB_PATH).to_string_lossy().to_string());
-        let db_provider =
-            parse_db_provider(&std::env::var("HKASK_DB_PROVIDER").unwrap_or_default());
         let inference_config = InferenceConfig::from_env();
         let default_model = inference_config.default_model.clone();
         let template_cache_path = std::env::var("HKASK_TEMPLATE_CACHE_PATH")
@@ -173,17 +120,6 @@ impl ServiceConfig {
             .ok()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_USER_NAME.to_string());
-
-        // Resolve secrets from keystore. If keystore resolution fails,
-        // fall back to empty secrets (in-memory mode will be used).
-        let a2a_secret = hkask_keystore::keychain::resolve_a2a_secret()
-            .map_err(|e| ServiceError::Domain {
-                kind: ErrorKind::BadRequest,
-                domain: DomainKind::Infrastructure,
-                source: Some(Box::new(e)),
-                message: "Failed to resolve A2A secret".into(),
-            })?
-            .to_vec();
 
         let db_passphrase =
             hkask_keystore::keychain::resolve_db_passphrase_string().map_err(|e| {
@@ -200,13 +136,9 @@ impl ServiceConfig {
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(180.0);
-        let curator_auto_consolidation_enabled = read_curator_auto_consolidation_env();
-
         Ok(Self {
             db_path,
             db_passphrase,
-            db_provider,
-            a2a_secret,
             default_model,
             inference_config,
             reg_threshold: DEFAULT_REG_THRESHOLD,
@@ -216,9 +148,7 @@ impl ServiceConfig {
             user_name,
             template_cache_path,
             memory_db_path,
-            wallet_config: WalletConfig::default(),
             memory_life_days,
-            curator_auto_consolidation_enabled,
         })
     }
 
@@ -229,10 +159,10 @@ impl ServiceConfig {
     /// which derives identity from the Zed login).
     ///
     /// \[P5\] Motivating: Essentialism — service-layer orchestration earns its existence; no raw domain logic.
-    /// pre:  a2a_secret, db_passphrase, and user_name must be non-empty
+    /// pre:  db_passphrase and user_name must be non-empty
     /// post: returns ServiceConfig with provided secrets and env-derived or default values
     #[must_use]
-    pub fn from_secrets(a2a_secret: String, db_passphrase: String, user_name: String) -> Self {
+    pub fn from_secrets(db_passphrase: String, user_name: String) -> Self {
         let data_dir = resolve_data_dir();
         let db_path = std::env::var("HKASK_DB_PATH")
             .unwrap_or_else(|_| data_dir.join(DEFAULT_DB_PATH).to_string_lossy().to_string());
@@ -244,25 +174,19 @@ impl ServiceConfig {
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
             .unwrap_or(180.0);
-        let curator_auto_consolidation_enabled = read_curator_auto_consolidation_env();
-
         Self {
             db_path,
             db_passphrase,
-            db_provider: parse_db_provider(&std::env::var("HKASK_DB_PROVIDER").unwrap_or_default()),
-            a2a_secret: a2a_secret.into_bytes(),
             inference_config: inference_config.clone(),
             reg_threshold: DEFAULT_REG_THRESHOLD,
             energy_budget_cap: DEFAULT_ENERGY_BUDGET_CAP,
             gas_replenish_rate: DEFAULT_GAS_REPLENISH_RATE,
             in_memory: false,
-            default_model: inference_config.default_model.clone(),
+            default_model: inference_config.default_model,
             user_name,
             template_cache_path,
             memory_db_path,
-            wallet_config: WalletConfig::default(),
             memory_life_days,
-            curator_auto_consolidation_enabled,
         }
     }
 
@@ -279,41 +203,16 @@ impl ServiceConfig {
         Self {
             db_path: ":memory:".to_string(),
             db_passphrase: String::new(),
-            db_provider: DbProvider::Sqlite,
-            a2a_secret: vec![0u8; 32],
             inference_config: inference_config.clone(),
             reg_threshold: DEFAULT_REG_THRESHOLD,
             energy_budget_cap: DEFAULT_ENERGY_BUDGET_CAP,
             gas_replenish_rate: DEFAULT_GAS_REPLENISH_RATE,
             in_memory: true,
-            default_model: inference_config.default_model.clone(),
+            default_model: inference_config.default_model,
             user_name: TEST_USER_NAME.to_string(),
             template_cache_path: DEFAULT_TEMPLATE_CACHE_PATH.to_string(),
             memory_db_path: None,
-            wallet_config: WalletConfig::default(),
             memory_life_days: 180.0,
-            curator_auto_consolidation_enabled: false,
-        }
-    }
-}
-
-/// Read `HKASK_CURATOR_AUTO_CONSOLIDATION` env var into a bool.
-///
-/// Returns `true` when set to `"1"`, `false` otherwise (including unset).
-/// Centralized here to avoid duplicating the env-var read across constructors.
-fn read_curator_auto_consolidation_env() -> bool {
-    std::env::var("HKASK_CURATOR_AUTO_CONSOLIDATION").as_deref() == Ok("1")
-}
-
-/// Parse the `HKASK_DB_PROVIDER` env var into a `DbProvider`.
-/// Defaults to `Sqlite` for unknown or empty values.
-fn parse_db_provider(raw: &str) -> DbProvider {
-    match raw.to_lowercase().as_str() {
-        "" | "sqlite" => DbProvider::Sqlite,
-        "postgres" | "postgresql" | "pg" => DbProvider::Postgres,
-        other => {
-            tracing::warn!("Unknown HKASK_DB_PROVIDER='{other}' — falling back to sqlite");
-            DbProvider::Sqlite
         }
     }
 }
@@ -341,55 +240,33 @@ impl ServiceConfig {
         )
     }
 
-    /// Open a database driver based on `db_provider`.
+    /// Open a SQLite database driver.
     ///
-    /// - `Sqlite` → opens a SQLCipher database at `db_path` with `db_passphrase`.
-    /// - `Postgres` → connects to `HKASK_DATABASE_URL` and initializes the pgvector schema.
-    ///
+    /// Opens a SQLCipher database at `db_path` with `db_passphrase`.
     /// Returns an `Arc<dyn DatabaseDriver>` ready for store construction.
     ///
-    /// pre:  when `db_provider == Postgres`, `HKASK_DATABASE_URL` must be set.
+    /// pre:  `db_path` is a valid SQLite file path.
     /// post: returns a connected driver with schema initialized.
     pub fn open_driver(
         &self,
     ) -> Result<std::sync::Arc<dyn hkask_storage::DatabaseDriver>, ServiceError> {
-        match self.db_provider {
-            DbProvider::Sqlite => {
-                let db = hkask_storage::open_database(&self.db_path, &self.db_passphrase).map_err(
-                    |e| ServiceError::Domain {
-                        kind: ErrorKind::ServiceUnavailable,
-                        domain: DomainKind::Storage,
-                        message: e.to_string(),
-                        source: Some(Box::new(e)),
-                    },
-                )?;
-                let pool = db.sqlite_pool().map_err(|e| ServiceError::Domain {
-                    kind: ErrorKind::ServiceUnavailable,
-                    domain: DomainKind::Storage,
-                    message: e.to_string(),
-                    source: Some(Box::new(e)),
-                })?;
-                Ok(std::sync::Arc::new(
-                    hkask_storage::database::sqlite::SqliteDriver::new(pool),
-                ))
+        let db = hkask_storage::open_database(&self.db_path, &self.db_passphrase).map_err(|e| {
+            ServiceError::Domain {
+                kind: ErrorKind::ServiceUnavailable,
+                domain: DomainKind::Storage,
+                message: e.to_string(),
+                source: Some(Box::new(e)),
             }
-            DbProvider::Postgres => {
-                let url =
-                    std::env::var("HKASK_DATABASE_URL").map_err(|_| ServiceError::Domain {
-                        kind: ErrorKind::BadRequest,
-                        domain: DomainKind::Storage,
-                        message: "HKASK_DB_PROVIDER=postgres requires HKASK_DATABASE_URL to be set"
-                            .to_string(),
-                        source: None,
-                    })?;
-                hkask_storage::open_postgres(&url).map_err(|e| ServiceError::Domain {
-                    kind: ErrorKind::ServiceUnavailable,
-                    domain: DomainKind::Storage,
-                    message: e.to_string(),
-                    source: Some(Box::new(e)),
-                })
-            }
-        }
+        })?;
+        let pool = db.sqlite_pool().map_err(|e| ServiceError::Domain {
+            kind: ErrorKind::ServiceUnavailable,
+            domain: DomainKind::Storage,
+            message: e.to_string(),
+            source: Some(Box::new(e)),
+        })?;
+        Ok(std::sync::Arc::new(
+            hkask_storage::database::sqlite::SqliteDriver::new_labeled(pool, self.db_path.as_str()),
+        ))
     }
 }
 
@@ -400,12 +277,10 @@ mod tests {
 
     fn sqlite_config(path: &str) -> ServiceConfig {
         let mut config = ServiceConfig::from_secrets(
-            "test-a2a-secret".to_string(),
             "test-db-passphrase".to_string(),
             TEST_USER_NAME.to_string(),
         );
         config.db_path = path.to_string();
-        config.db_provider = DbProvider::Sqlite;
         config
     }
 

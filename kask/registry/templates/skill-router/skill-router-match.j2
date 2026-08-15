@@ -1,11 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- match
-- rank
-- recommend
-- route
-- classify
 contract:
   input:
     task_description: string
@@ -17,7 +11,6 @@ contract:
     recommendations: array
     uncovered_capabilities: array
     coverage_assessment: string
-energy_cap: 4096
 visibility: Public
 ---
 {# Template: skill-router/skill-router-match.j2 #}
@@ -71,7 +64,7 @@ Each catalog entry has:
 - `name` — skill identifier
 - `description` — what the skill does
 - `template_type` — KnowAct / WordAct / RenderAct
-- `lexicon_terms` — vocabulary that signals skill relevance
+- `description` — natural-language summary that signals skill relevance
 - `when_to_use` — trigger conditions for the skill
 
 ## Matching Method
@@ -81,10 +74,10 @@ For each candidate skill, compute a **fit_score** in [0.0, 1.0] across three dim
 | Dimension | Weight | What to evaluate |
 |-----------|--------|------------------|
 | **Capability overlap** | 0.50 | Does the skill's description cover the task's core capability need? Full overlap = 1.0, partial = 0.5, none = 0.0. |
-| **Lexicon alignment** | 0.25 | Do the task description's key verbs/nouns overlap with the skill's `lexicon_terms`? Strong overlap = 1.0, moderate = 0.5, none = 0.0. |
+| **Description alignment** | 0.25 | Do the task description's key verbs/nouns overlap with the skill's `description`? Strong overlap = 1.0, moderate = 0.5, none = 0.0. |
 | **Trigger alignment** | 0.25 | Does the task match the skill's `when_to_use` trigger conditions? Direct match = 1.0, tangential = 0.5, no match = 0.0. |
 
-**Composite fit_score** = (capability × 0.50) + (lexicon × 0.25) + (trigger × 0.25).
+**Composite fit_score** = (capability × 0.50) + (description × 0.25) + (trigger × 0.25).
 
 ## Coverage Assessment
 
@@ -129,7 +122,7 @@ Respond with a JSON object:
       "fit_score": 0.85,
       "dimension_scores": {
         "capability_overlap": 0.9,
-        "lexicon_alignment": 0.8,
+        "description_alignment": 0.8,
         "trigger_alignment": 0.7
       },
       "match_reason": "Why this skill fits this task — cite specific capability overlap",

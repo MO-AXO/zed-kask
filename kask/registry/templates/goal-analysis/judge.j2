@@ -1,10 +1,7 @@
 {# goal/judge.j2 — Verify goal completion via semantic evaluation #}
 [inference]
+max_tokens = 2048
 template_type: KnowAct
-lexicon_terms:
-- evaluate
-- assert
-- ground
 contract:
   input:
     goal_text: string
@@ -15,8 +12,7 @@ contract:
     verdict: string
     reason: string
     confidence: number
-  energy_cap: 4096
-  visibility: Public
+visibility: Public
 ---
 {# hKask v0.31.0 — A Minimal Viable Container for UserPods #}
 # Goal Judge — Completion Verification Template

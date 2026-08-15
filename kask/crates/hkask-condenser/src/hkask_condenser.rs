@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![warn(clippy::let_underscore_future)]
 //! hKask Condenser — Domain logic for context condensation
 //!
 //! Pure domain crate: compression algorithms, ontology-aware saliency
@@ -18,27 +19,24 @@
 //!     an ontology anchor using graph proximity — reusable by communication gates
 //!     and other callers independent of the compression pipeline.
 //! - **`ontology_graph`** — A lightweight cross-domain concept relationship
-//!   index (FIBO, CogAT, GOLEM, ML-Schema, OMC, PKO, DC+BIBO). Built once
+//!   index (FIBO, SUMO, GOLEM, ML-Schema, OMC, PKO, DC+BIBO). Built once
 //!   at startup via `OnceLock`, zero dependencies, no reasoners. Used as a
 //!   saliency multiplier — lines containing concepts adjacent to the anchor
 //!   concept (e.g., "market_capitalization" when anchored to a FIBO corporation)
 //!   receive bonus scores.
 //! - **`types`** — Domain types: `OntologyAnchor` (3-tier classification),
-//!   `OntologyAxis` (Pko/DcBibo), `OntologyNamespace` (Fibo/Golem/Cogat/
-//!   MlSchema/Omc), compression profiles, health signals, `CompressionRecord`
-//!   (per-compression observation for learning), `CompressionHistoryStats`.
-//! - **`engine`** — `CondenserEngine` owns profile state, compression dispatch,
-//!   and compression history (bounded ring buffer of `CompressionRecord`).
-//!   After 10+ observations per category, `recommend_algorithm()` returns the
-//!   best-performing algorithm — `compress()` auto-selects it (learning).
-//!   `suggest_profile()` recommends a more aggressive profile when health
-//!   checks flag degradation. Derives ontology anchors from tool names internally.
+//!   `OntologyAxis` (Pko/DcBibo), `OntologyNamespace` (Fibo/Golem/Sumo/
+//!   MlSchema/Omc), compression profiles, health signals.
+//! - **`engine`** — `CondenserEngine` owns profile state and compression
+//!   dispatch. Selects an algorithm per compression via the static
+//!   `default_for()` mapping. Derives ontology anchors from tool names
+//!   internally.
 //! - **`inference`** — Prompt formatting and token estimation for
 //!   LLM-assisted thread summarization.
 //!
 //! This crate provides the domain primitives consumed by:
-//! - `hkask-services-chat` (ChatService::condense_history — two-phase auto-condense:
-//!   CPU pre-compress + LLM summarize)
+//! - `kask_bridge` (`BridgeThreadCondenser` — the runtime tool-result
+//!   compression path wired into the agent turn loop)
 //! - `hkask-mcp-condenser` (MCP server — thin wrapper exposing tools)
 
 pub mod algorithms;

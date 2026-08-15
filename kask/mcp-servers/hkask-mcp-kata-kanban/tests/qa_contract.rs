@@ -6,11 +6,12 @@
 //!
 //! Category 7 (adversarial) is N/A for all kata-kanban tools — none are
 //! LLM I/O boundaries (the server is a pure state machine over sqlite).
-//! Category 3 (ocap-denial) applies to all tools: the server declares
-//! optional HKASK_KANBAN_DB / HKASK_DB_PASSPHRASE credentials; calling
-//! without them yields in-memory operation, not denial. The contract
+//! Category 3 (dependency-denial) applies to all tools: the server declares
+//! an optional HKASK_DB_PASSPHRASE credential (read via `ctx.credentials.get`)
+//! and an optional HKASK_KANBAN_DB config path (read via `std::env::var`);
+//! calling without them yields in-memory operation, not denial. The contract
 //! therefore asserts the no-credential path returns structured errors
-//! (not panics) and does NOT assert reg.guard.* (Gap B — not wired).
+//! (not panics) and does NOT assert reg.outcome (Gap B — not wired).
 //!
 //! Each test constructs a fresh in-memory KanbanServer so tests are
 //! independent and idempotent.
@@ -18,48 +19,52 @@
 #![cfg(test)]
 
 use hkask_mcp_kata_kanban::KanbanServer;
+use hkask_mcp_kata_kanban::KanbanService;
+use hkask_mcp_kata_kanban::TaskSpec;
 use hkask_mcp_kata_kanban::types::*;
-use hkask_services_kata_kanban::KanbanService;
+use hkask_mcp_swarm::{LazyLocalSwarmRuntime, LocalAgentRegistry};
 use hkask_storage::HMemStore;
 use hkask_storage::database::sqlite::SqliteDriver;
 use hkask_types::WebID;
+use std::sync::Arc;
 
 // ── Test harness ────────────────────────────────────────────────────────────
 
-/// Build an in-memory KanbanServer with the hmems table initialized.
+/// Build an in-memory KanbanServer. HMemStore::from_driver creates the
+/// `hmems` table with the canonical schema, so no manual DDL is needed here.
 fn make_server() -> KanbanServer {
     let driver = SqliteDriver::in_memory_driver();
     let store = HMemStore::from_driver(driver).expect("hmem store init");
-    store
-        .driver()
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS hmems (
-                id TEXT PRIMARY KEY, entity TEXT NOT NULL, attribute TEXT NOT NULL,
-                value TEXT NOT NULL, valid_from TEXT NOT NULL, valid_to TEXT,
-                recalled_at TEXT NOT NULL DEFAULT (datetime('now')),
-                confidence REAL NOT NULL, perspective TEXT, visibility TEXT NOT NULL,
-                owner_webid TEXT NOT NULL,
-                dimension TEXT
-            )",
-        )
-        .expect("DDL batch must succeed");
     let service = KanbanService::new(store);
-    KanbanServer::new(WebID::new(), service)
+    // Local swarm delegation surface. The ledger path is process-unique so
+    // parallel test processes don't contend on the same SQLite file; only the
+    // kanban_task_spawn happy path opens it (via get_or_init). The registry
+    // points at a nonexistent dir so spawns build task-specific agents.
+    let ledger_path = std::env::temp_dir()
+        .join(format!("kata-kanban-spawn-{}.db", std::process::id()))
+        .to_string_lossy()
+        .to_string();
+    let local_runtime = Arc::new(LazyLocalSwarmRuntime::lazy(ledger_path, None));
+    let local_registry = Arc::new(LocalAgentRegistry::new("/nonexistent"));
+    let worktree_spawn_port: Arc<dyn hkask_types::WorktreeSpawnPort> =
+        Arc::new(hkask_inference::UnavailableWorktreeSpawn);
+    KanbanServer::new(
+        WebID::new(),
+        service,
+        local_runtime,
+        local_registry,
+        worktree_spawn_port,
+        Arc::new(hkask_mcp_kata_kanban::idempotency::IdempotencyStore::default()),
+    )
 }
 
 /// Parse a tool's JSON string response into a serde_json::Value.
 ///
-/// Successful tool calls wrap the value in `{"content": <value>}` (the rmcp
-/// McpToolOutput envelope). Errors use `{"error": "...", "kind": "..."}`
-/// at the top level. This helper unwraps `content` when present so callers
-/// can assert on the inner value directly.
+/// Delegates to the canonical `hkask_types::tool_response::parse_tool_response`
+/// helper so the `content` envelope is unwrapped the same way every consumer
+/// does (`.rules`: do not re-implement the envelope unwrap locally).
 fn parse(out: &str) -> serde_json::Value {
-    let v: serde_json::Value = serde_json::from_str(out).expect("tool output must be valid JSON");
-    if let Some(content) = v.get("content") {
-        content.clone()
-    } else {
-        v
-    }
+    hkask_types::tool_response::parse_tool_response(out).expect("tool output must be valid JSON")
 }
 
 /// Assert the response is a structured McpToolError with the given kind.
@@ -88,6 +93,7 @@ async fn make_board(server: &KanbanServer, name: &str) -> String {
     let req = BoardCreateRequest {
         name: name.to_string(),
         columns: None,
+        idempotency_key: None,
     };
     let out = server
         .kanban_board_create(rmcp::handler::server::wrapper::Parameters(req))
@@ -108,6 +114,7 @@ async fn make_task(server: &KanbanServer, board_id: &str, title: &str) -> String
         criteria: None,
         gas_budget: None,
         rjoule_budget: None,
+        idempotency_key: None,
     };
     let out = server
         .kanban_task_create(rmcp::handler::server::wrapper::Parameters(req))
@@ -131,6 +138,7 @@ mod board_create {
         let req = BoardCreateRequest {
             name: "QA Board".to_string(),
             columns: None,
+            idempotency_key: None,
         };
         let out = server
             .kanban_board_create(rmcp::handler::server::wrapper::Parameters(req))
@@ -200,6 +208,7 @@ mod board_create {
                 status: "not_a_status".to_string(),
                 wip_limit: None,
             }]),
+            idempotency_key: None,
         };
         let out = server
             .kanban_board_create(rmcp::handler::server::wrapper::Parameters(req))
@@ -215,6 +224,7 @@ mod board_create {
         let req = BoardCreateRequest {
             name: long_name.clone(),
             columns: None,
+            idempotency_key: None,
         };
         let out = server
             .kanban_board_create(rmcp::handler::server::wrapper::Parameters(req))
@@ -287,6 +297,7 @@ mod task_create {
             criteria: None,
             gas_budget: None,
             rjoule_budget: None,
+            idempotency_key: None,
         };
         let out = server
             .kanban_task_create(rmcp::handler::server::wrapper::Parameters(req))
@@ -307,6 +318,7 @@ mod task_create {
             criteria: None,
             gas_budget: None,
             rjoule_budget: None,
+            idempotency_key: None,
         };
         let out = server
             .kanban_task_create(rmcp::handler::server::wrapper::Parameters(req))
@@ -325,6 +337,7 @@ mod task_create {
             criteria: None,
             gas_budget: None,
             rjoule_budget: None,
+            idempotency_key: None,
         };
         let out = server
             .kanban_task_create(rmcp::handler::server::wrapper::Parameters(req))
@@ -366,6 +379,66 @@ mod task_list {
             .and_then(|t| t.as_array())
             .expect("missing tasks array");
         assert_eq!(tasks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn carries_activity_after_comment() {
+        // R3: kanban_task_list surfaces the latest comment as `activity` on each
+        // TaskInfo so the widget can render a one-line status strip on the card.
+        // R1: the response also carries a `swarm_id` field (null when the task is
+        // not scoped to a swarm) so the widget can render the swarm link.
+        let server = make_server();
+        let bid = make_board(&server, "B").await;
+        let tid = make_task(&server, &bid, "T1").await;
+        // Add a comment — the server derives `activity` from the latest comment.
+        server
+            .kanban_task_comment(rmcp::handler::server::wrapper::Parameters(
+                TaskCommentRequest {
+                    task_id: tid.clone(),
+                    body: "Spawn executed: agent=beta, tokens=120".to_string(),
+                },
+            ))
+            .await;
+        let req = TaskListRequest {
+            board_id: bid,
+            status: None,
+        };
+        let out = server
+            .kanban_task_list(rmcp::handler::server::wrapper::Parameters(req))
+            .await;
+        let v = parse(&out);
+        let task = v
+            .get("tasks")
+            .and_then(|t| t.as_array())
+            .and_then(|a| a.first())
+            .expect("missing tasks array entry");
+        // R1: `swarm_id` is omitted (skip_serializing_if) when the task is not
+        // spawned under a swarm. The positive case (present when set) is pinned
+        // by the spawn_task lib tests (C2) + the TaskInfo mapping reads
+        // `t.swarm_id.clone()`.
+        assert!(
+            task.get("swarm_id").is_none(),
+            "swarm_id must be absent when the task is not spawned under a swarm"
+        );
+        // R3: the `activity` field is populated from the latest comment.
+        let activity = task
+            .get("activity")
+            .expect("TaskInfo must carry `activity` after a comment (R3)");
+        assert_eq!(
+            activity.get("kind").and_then(|k| k.as_str()),
+            Some("comment")
+        );
+        assert_eq!(
+            activity.get("text").and_then(|t| t.as_str()),
+            Some("Spawn executed: agent=beta, tokens=120")
+        );
+        assert!(
+            activity
+                .get("at")
+                .and_then(|a| a.as_str())
+                .is_some_and(|s| !s.is_empty()),
+            "activity.at must be a non-empty ISO timestamp"
+        );
     }
 
     #[tokio::test]
@@ -920,7 +993,19 @@ mod task_spawn {
 
     #[tokio::test]
     async fn happy() {
-        // REQ: happy
+        // The spawn delegates to the local swarm runtime. In the unit-test
+        // environment there is no inference socket, so the delegation fails at
+        // the inference call with `unavailable` — which proves the spawn reaches
+        // the real delegation path, not a static comment. The full happy path
+        // (live inference) is an integration test, not a unit test.
+        //
+        // This previously asserted `permission_denied`, because an unfunded local
+        // ledger refused the delegation before it ever attempted inference. That
+        // funding gate was removed: local agents run on the operator's own
+        // substrate, so there is nothing for the server to withhold (see
+        // `LocalSwarmRuntime::delegate`). An unfunded ledger must no longer
+        // change the outcome here — `spawn_is_not_blocked_by_an_unfunded_ledger`
+        // in `tests/idempotent_creates.rs` pins that directly.
         let server = make_server();
         let bid = make_board(&server, "B").await;
         let tid = make_task(&server, &bid, "T").await;
@@ -931,12 +1016,20 @@ mod task_spawn {
             memory_scope: Some("episodic".to_string()),
             gas_budget: Some(1000),
             rjoule_budget: None,
+            swarm_id: None,
+            idempotency_key: None,
         };
         let out = server
             .kanban_task_spawn(rmcp::handler::server::wrapper::Parameters(req))
             .await;
-        let v = parse(&out);
-        assert!(v.get("message").is_some(), "missing message: {out}");
+        // Reaches inference and fails there (no IPC socket in a unit test).
+        assert_error_kind(&out, "unavailable");
+        // Guard the regression directly: a funding refusal here would mean the
+        // local gate came back.
+        assert!(
+            !out.contains("insufficient local credits") && !out.contains("swarm_fund_local"),
+            "local spawn must not be gated on ledger funds; got: {out}"
+        );
     }
 
     #[tokio::test]
@@ -950,6 +1043,8 @@ mod task_spawn {
             memory_scope: None,
             gas_budget: None,
             rjoule_budget: None,
+            swarm_id: None,
+            idempotency_key: None,
         };
         let out = server
             .kanban_task_spawn(rmcp::handler::server::wrapper::Parameters(req))
@@ -970,7 +1065,7 @@ mod contract_propose_expect {
         let bid = make_board(&server, "B").await;
         let req = ContractProposeExpect {
             board_id: bid,
-            proposals_json: "[]".to_string(),
+            proposals: serde_json::json!([]).into(),
         };
         let out = server
             .contract_propose_expect(rmcp::handler::server::wrapper::Parameters(req))
@@ -990,7 +1085,7 @@ mod contract_propose_expect {
         let server = make_server();
         let req = ContractProposeExpect {
             board_id: "not-a-uuid".to_string(),
-            proposals_json: "[]".to_string(),
+            proposals: serde_json::json!([]).into(),
         };
         let out = server
             .contract_propose_expect(rmcp::handler::server::wrapper::Parameters(req))
@@ -1000,21 +1095,114 @@ mod contract_propose_expect {
 
     #[tokio::test]
     async fn schema_violation_malformed_proposals_json() {
-        // REQ: schema-violation — proposals_json is not valid JSON
+        // REQ: schema-violation — proposals is not a valid ExpectProposal array
         let server = make_server();
         let bid = make_board(&server, "B").await;
         let req = ContractProposeExpect {
             board_id: bid,
-            proposals_json: "not json {{{".to_string(),
+            proposals: serde_json::json!("not an ExpectProposal array").into(),
         };
         let out = server
             .contract_propose_expect(rmcp::handler::server::wrapper::Parameters(req))
             .await;
-        // Malformed JSON should produce a structured error, not a panic.
+        // A non-array proposals value should produce a structured error, not a panic.
         let v = parse(&out);
         assert!(
             v.get("error").is_some(),
-            "malformed proposals_json must produce a structured error, got: {out}"
+            "malformed proposals must produce a structured error, got: {out}"
         );
+    }
+
+    // ── PKO ontology anchoring ─────────────────────────────────────────────
+    //
+    // Boards and tasks are pure PKO: a board is a `pko:Procedure`, a task is a
+    // `pko:Step`. The three `HMem::new` write paths in `KanbanService` must
+    // anchor their h_mems so `query_by_pko_procedure(board_id)` reaches them.
+    // Without anchoring the h_mems are unreachable via the process-axis query
+    // (the `.rules` "Ontology tag field-drop trap" — the ontology blob must be
+    // set at write time, not deferred).
+
+    /// A board's h_mem is anchored as a `pko:Procedure` and reachable via
+    /// `query_by_pko_procedure(board_id)`.
+    #[test]
+    fn board_h_mem_anchored_as_pko_procedure() {
+        let driver = SqliteDriver::in_memory_driver();
+        let store = HMemStore::from_driver(driver).expect("hmem store init");
+        let query_store = store.clone();
+        let service = KanbanService::new(store);
+        let owner = WebID::new();
+
+        let board = service
+            .board_create(owner, "Test Board", &KanbanService::standard_columns())
+            .expect("board_create");
+
+        let anchored = query_store
+            .query_by_pko_procedure(&board.id.to_string())
+            .expect("query_by_pko_procedure");
+        assert_eq!(
+            anchored.len(),
+            1,
+            "board h_mem should be reachable via query_by_pko_procedure"
+        );
+        let ont = anchored[0]
+            .ontology
+            .as_ref()
+            .expect("board h_mem must carry an ontology blob");
+        assert_eq!(ont.dc_type, "pko:Procedure");
+        assert_eq!(ont.pko_procedure, Some(board.id.to_string()));
+        assert!(ont.pko_step.is_none(), "board is the procedure, not a step");
+    }
+
+    /// A task's h_mem and its board→task index h_mem are both anchored as
+    /// `pko:Step` under the board's procedure and reachable via
+    /// `query_by_pko_procedure(board_id)`.
+    #[test]
+    fn task_and_index_h_mems_anchored_as_pko_steps() {
+        let driver = SqliteDriver::in_memory_driver();
+        let store = HMemStore::from_driver(driver).expect("hmem store init");
+        let query_store = store.clone();
+        let service = KanbanService::new(store);
+        let owner = WebID::new();
+
+        let board = service
+            .board_create(owner, "Test Board", &KanbanService::standard_columns())
+            .expect("board_create");
+        let task = service
+            .task_create(board.id, TaskSpec::new("Test Task".to_string()), owner)
+            .expect("task_create");
+
+        // query_by_pko_procedure reaches the board (Procedure) + task (Step)
+        // + index (Step) = 3 h_mems.
+        let anchored = query_store
+            .query_by_pko_procedure(&board.id.to_string())
+            .expect("query_by_pko_procedure");
+        assert_eq!(
+            anchored.len(),
+            3,
+            "board + task + index h_mems should all be reachable via query_by_pko_procedure"
+        );
+
+        // Every anchored h_mem must carry a PKO procedure matching the board id.
+        for h_mem in &anchored {
+            let ont = h_mem
+                .ontology
+                .as_ref()
+                .expect("every kanban h_mem must carry an ontology blob");
+            assert_eq!(
+                ont.pko_procedure,
+                Some(board.id.to_string()),
+                "h_mem entity {} not anchored to board procedure",
+                h_mem.entity
+            );
+        }
+
+        // The task h_mem itself must be reachable (entity = TASK_ENTITY).
+        let task_h_mem = anchored
+            .iter()
+            .find(|h| h.entity == "kanban:task" && h.attribute == task.id.to_string())
+            .expect("task h_mem must be anchored and reachable");
+        let task_ont = task_h_mem.ontology.as_ref().expect("task ontology");
+        assert_eq!(task_ont.dc_type, "pko:StepExecution");
+        assert_eq!(task_ont.pko_step, Some(task.id.to_string()));
     }
 }

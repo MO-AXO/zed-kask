@@ -27,10 +27,12 @@ pub struct SearchResult {
 pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
     let mut results = Vec::new();
 
-    // Try FTS5 first
+    // Try FTS5 first. `rank` is FTS5's BM25 column (the last column, index 10);
+    // `s.pagerank` is deliberately NOT selected here — it is unused by `Symbol`,
+    // and selecting it before `rank` shifted the BM25 column to index 11 while the
+    // closure read index 10, silently returning pagerank as the relevance score.
     let sql = "SELECT s.id, s.name, s.kind, f.path, s.signature, s.visibility,
-            s.start_line, s.end_line, s.doc_comment, s.complexity_json, s.pagerank,
-            rank
+            s.start_line, s.end_line, s.doc_comment, s.complexity_json, rank
      FROM symbols_fts
      JOIN symbols s ON symbols_fts.rowid = s.id
      JOIN code_files f ON s.file_id = f.id
@@ -41,18 +43,7 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Search
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(rusqlite::params![query, limit as i64], |row| {
         Ok(SearchResult {
-            symbol: Symbol {
-                id: Some(row.get(0)?),
-                name: row.get(1)?,
-                kind: super::store::parse_kind(&row.get::<_, String>(2)?),
-                file: row.get(3)?,
-                signature: row.get(4)?,
-                visibility: super::store::parse_visibility(&row.get::<_, String>(5)?),
-                start_line: row.get::<_, i64>(6)? as usize,
-                end_line: row.get::<_, i64>(7)? as usize,
-                doc_comment: row.get(8)?,
-                complexity: super::store::parse_complexity(&row.get::<_, String>(9)?),
-            },
+            symbol: super::store::map_symbol_row(row)?,
             rank: row.get(10)?,
         })
     })?;
@@ -75,18 +66,7 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Search
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map(rusqlite::params![like_query, limit as i64], |row| {
             Ok(SearchResult {
-                symbol: Symbol {
-                    id: Some(row.get(0)?),
-                    name: row.get(1)?,
-                    kind: super::store::parse_kind(&row.get::<_, String>(2)?),
-                    file: row.get(3)?,
-                    signature: row.get(4)?,
-                    visibility: super::store::parse_visibility(&row.get::<_, String>(5)?),
-                    start_line: row.get::<_, i64>(6)? as usize,
-                    end_line: row.get::<_, i64>(7)? as usize,
-                    doc_comment: row.get(8)?,
-                    complexity: super::store::parse_complexity(&row.get::<_, String>(9)?),
-                },
+                symbol: super::store::map_symbol_row(row)?,
                 rank: 0.0, // no FTS5 rank for LIKE fallback
             })
         })?;
@@ -112,18 +92,7 @@ pub fn search_prefix(conn: &Connection, prefix: &str, limit: usize) -> Result<Ve
 
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(rusqlite::params![like, limit as i64], |row| {
-        Ok(Symbol {
-            id: Some(row.get(0)?),
-            name: row.get(1)?,
-            kind: super::store::parse_kind(&row.get::<_, String>(2)?),
-            file: row.get(3)?,
-            signature: row.get(4)?,
-            visibility: super::store::parse_visibility(&row.get::<_, String>(5)?),
-            start_line: row.get::<_, i64>(6)? as usize,
-            end_line: row.get::<_, i64>(7)? as usize,
-            doc_comment: row.get(8)?,
-            complexity: super::store::parse_complexity(&row.get::<_, String>(9)?),
-        })
+        super::store::map_symbol_row(row)
     })?;
 
     let mut results = Vec::new();
@@ -164,6 +133,13 @@ mod tests {
         let results = search(store.conn(), "test_function", 10).unwrap();
         assert!(!results.is_empty(), "should find test_function");
         assert_eq!(results[0].symbol.name, "test_function");
+        // The symbol was never finalized, so pagerank is 0.0. The `rank` field must
+        // therefore be the FTS5 BM25 score (non-zero for a match), NOT pagerank —
+        // guards against the column-index bug that returned pagerank as `rank`.
+        assert_ne!(
+            results[0].rank, 0.0,
+            "rank should be BM25, not pagerank (which is 0.0 before finalize)"
+        );
     }
 
     #[test]

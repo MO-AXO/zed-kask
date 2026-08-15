@@ -635,6 +635,22 @@ impl ConversationView {
         }
     }
 
+    /// Publish the active conversation injector so kask widgets can compose a
+    /// structured message back into this conversation (the "I disagree"
+    /// gesture). Called from the active-thread-change points
+    /// (`navigate_to_thread`, `set_server_state`). When no thread is active the
+    /// global is cleared so widgets surface a visible fallback draft rather than
+    /// silently no-op'ing (repo `.rules`).
+    // zed-kask: D21 — widget→agent compose-back seam (publish_injector).
+    fn publish_injector(&self, cx: &mut App) {
+        let injector = self.active_thread().map(|thread_view| {
+            Arc::new(ThreadConversationInjector {
+                thread_view: thread_view.downgrade(),
+            }) as Arc<dyn hkask_conversation_injector::ConversationInjector>
+        });
+        hkask_conversation_injector::set_active_injector(cx, injector);
+    }
+
     pub fn pending_tool_call<'a>(
         &'a self,
         cx: &'a App,
@@ -707,8 +723,9 @@ impl ConversationView {
 
         connected.navigate_to_thread(session_id);
         if let Some(view) = self.active_thread() {
-            view.focus_handle(cx).focus(window, cx);
+            view.read(cx).activation_focus_handle(cx).focus(window, cx);
         }
+        self.publish_injector(cx);
         cx.emit(AcpServerViewEvent::ActiveThreadChanged);
         cx.notify();
     }
@@ -718,6 +735,34 @@ impl ConversationView {
             connected.conversation.update(cx, |conversation, cx| {
                 conversation.set_work_dirs(work_dirs.clone(), cx);
             });
+        }
+    }
+}
+
+/// Production [`hkask_conversation_injector::ConversationInjector`]: holds the
+/// active `ThreadView` and composes a message back into it by pre-filling the
+/// message editor. The user reviews the composed revision request and submits
+/// via the existing Send button — this preserves the turn-loop's checkpoints
+/// and telemetry (auto-send would bypass them), and `MessageEditor::set_text`
+/// is test-gated so `clear` + `insert_text` (both production-available) achieve
+/// the same effect. Lives in `agent_ui` (the D-seam) because it needs
+/// `ThreadView` + `MessageEditor`, which only `agent_ui` has.
+struct ThreadConversationInjector {
+    thread_view: WeakEntity<ThreadView>,
+}
+
+impl hkask_conversation_injector::ConversationInjector for ThreadConversationInjector {
+    fn inject(&self, body: String, window: &mut Window, cx: &mut App) -> Task<Result<(), String>> {
+        match self.thread_view.update(cx, |thread_view, cx| {
+            thread_view.message_editor.update(cx, |editor, cx| {
+                editor.clear(window, cx);
+                editor.insert_text(&body, window, cx);
+            });
+        }) {
+            Ok(()) => Task::ready(Ok(())),
+            Err(error) => Task::ready(Err(format!(
+                "active conversation no longer exists: {error}"
+            ))),
         }
     }
 }
@@ -912,6 +957,7 @@ impl ConversationView {
         }
 
         self.server_state = state;
+        self.publish_injector(cx);
         cx.emit(StateChange);
         cx.emit(AcpServerViewEvent::ActiveThreadChanged);
         if matches!(&self.server_state, ServerState::Connected(_)) {
@@ -2388,6 +2434,11 @@ impl ConversationView {
         };
 
         let handlers = Self::request_elicitation_card_handlers(view);
+        let agent_display_name = self
+            .agent_server_store
+            .read(cx)
+            .agent_display_name(&self.agent.agent_id())
+            .unwrap_or_else(|| self.agent.agent_id().0);
 
         store
             .read(cx)
@@ -2399,6 +2450,7 @@ impl ConversationView {
                 ElicitationCard::new(
                     ix,
                     elicitation,
+                    agent_display_name.clone(),
                     self.request_elicitation_form_states.get(&elicitation.id),
                     handlers.clone(),
                 )
@@ -2439,14 +2491,14 @@ impl ConversationView {
             },
             {
                 let view = view.clone();
-                move |elicitation_id, url, window, cx| {
-                    cx.open_url(&url);
+                move |elicitation_id, _window, cx| {
                     view.update(cx, |this, cx| {
-                        this.submit_request_elicitation(elicitation_id, window, cx);
+                        this.dismiss_request_url_elicitation(elicitation_id, cx);
                     })
                     .log_err();
                 }
             },
+            move |_elicitation_id, url, _window, cx| cx.open_url(&url),
             {
                 let view = view.clone();
                 move |elicitation_id, field_name, value, cx| {
@@ -2523,34 +2575,72 @@ impl ConversationView {
             return;
         };
 
-        let response = match mode {
+        match mode {
             acp::ElicitationMode::Form(mode) => {
-                let Some(state) = self.request_elicitation_form_states.get(&elicitation_id) else {
+                let Some(state) = self
+                    .request_elicitation_form_states
+                    .get_mut(&elicitation_id)
+                else {
                     return;
                 };
-                match state.collect(&mode.requested_schema, cx) {
-                    Ok(content) => {
-                        acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
-                            acp::ElicitationAcceptAction::new().content(content),
-                        ))
-                    }
-                    Err(errors) => {
-                        self.update_request_elicitation_form_state(
-                            &elicitation_id,
-                            |state| state.set_errors(errors),
-                            cx,
-                        );
-                        return;
-                    }
-                }
+                let Some(submission) = state.begin_submission(cx) else {
+                    return;
+                };
+                let schema = mode.requested_schema;
+                let validation_task = cx.background_spawn(async move {
+                    let result = submission.validate(&schema);
+                    (submission, result)
+                });
+                self.notify_request_elicitation_renderers(cx);
+                cx.spawn(async move |this, cx| {
+                    let (submission, result) = validation_task.await;
+                    this.update(cx, |this, cx| {
+                        let is_current = this
+                            .request_elicitation_form_states
+                            .get_mut(&elicitation_id)
+                            .is_some_and(|state| {
+                                state.validation_matches_current_values(&submission, cx)
+                            });
+                        if !is_current {
+                            this.notify_request_elicitation_renderers(cx);
+                            return;
+                        }
+                        match result {
+                            Ok(content) => {
+                                this.respond_to_request_elicitation(
+                                    elicitation_id,
+                                    acp::CreateElicitationResponse::new(
+                                        acp::ElicitationAction::Accept(
+                                            acp::ElicitationAcceptAction::new().content(content),
+                                        ),
+                                    ),
+                                    cx,
+                                );
+                            }
+                            Err(errors) => {
+                                this.update_request_elicitation_form_state(
+                                    &elicitation_id,
+                                    |state| state.set_errors(errors),
+                                    cx,
+                                );
+                            }
+                        }
+                    })
+                    .log_err();
+                })
+                .detach();
             }
-            acp::ElicitationMode::Url(_) => acp::CreateElicitationResponse::new(
-                acp::ElicitationAction::Accept(acp::ElicitationAcceptAction::new()),
-            ),
-            _ => return,
-        };
-
-        self.respond_to_request_elicitation(elicitation_id, response, cx);
+            acp::ElicitationMode::Url(_) => {
+                self.respond_to_request_elicitation(
+                    elicitation_id,
+                    acp::CreateElicitationResponse::new(acp::ElicitationAction::Accept(
+                        acp::ElicitationAcceptAction::new(),
+                    )),
+                    cx,
+                );
+            }
+            _ => {}
+        }
     }
 
     fn decline_request_elicitation(
@@ -2577,6 +2667,20 @@ impl ConversationView {
             acp::CreateElicitationResponse::new(acp::ElicitationAction::Cancel),
             cx,
         );
+    }
+
+    fn dismiss_request_url_elicitation(
+        &mut self,
+        elicitation_id: ElicitationEntryId,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_elicitation_form_states.remove(&elicitation_id);
+        if let Some(store) = self.request_elicitation_store() {
+            store.update(cx, |store, cx| {
+                store.cancel_elicitation(&elicitation_id, cx);
+            });
+        }
+        self.notify_request_elicitation_renderers(cx);
     }
 
     fn respond_to_request_elicitation(
@@ -3275,6 +3379,14 @@ impl Focusable for ConversationView {
     }
 }
 
+impl ConversationView {
+    pub(crate) fn activation_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.active_thread()
+            .map(|thread| thread.read(cx).activation_focus_handle(cx))
+            .unwrap_or_else(|| self.focus_handle.clone())
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 impl ConversationView {
     /// Expands a tool call so its content is visible.
@@ -3399,6 +3511,9 @@ fn render_agent_markdown(
             wrap_button_visibility: markdown::WrapButtonVisibility::VisibleOnHover,
             border: false,
         })
+        // zed-kask: D18 — render ```media and ```graph fenced blocks via the
+        // hkask-viz-core block-renderer registry (composes media + graph widgets).
+        .media_block_renderer(hkask_viz_core::block_renderer())
         .image_resolver(move |dest_url| resolve_agent_image(dest_url, &worktree_roots))
         .on_url_click(move |text, window, cx| {
             thread_view::open_link(text, &workspace, window, cx);
@@ -5570,6 +5685,47 @@ pub(crate) mod tests {
         active_thread(&conversation_view, cx).read_with(cx, |view, cx| {
             assert_thread_list_item_count_matches_entries(view, cx);
         });
+    }
+
+    // ── D-seam pinning: ConversationView publishes the active ThreadView to the
+    // kask `hkask-conversation-injector` per-app global on activation
+    // (DIVERGENCE.md). The global is per-app, so it drops with the
+    // TestAppContext — no RAII reset is needed across tests.
+
+    #[gpui::test]
+    async fn publish_injector_wires_global_on_activation_and_clears_on_disconnect(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection), cx).await;
+        cx.run_until_parked();
+
+        // The D-seam: ConversationView::set_server_state (fired on connect)
+        // calls publish_injector, which publishes the active ThreadView to the
+        // kask global so widgets can compose back.
+        assert!(
+            cx.read(|cx| hkask_conversation_injector::shared_injector(cx).is_some()),
+            "active conversation must publish a ConversationInjector"
+        );
+
+        // Clearing: transitioning to a non-Connected server state clears the
+        // global so widgets surface a fallback draft instead of holding a
+        // dangling thread handle.
+        conversation_view.update(cx, |view, cx| {
+            view.set_server_state(
+                ServerState::LoadError {
+                    error: LoadError::Other("test disconnect".into()),
+                },
+                cx,
+            );
+        });
+        assert!(
+            cx.read(|cx| hkask_conversation_injector::shared_injector(cx).is_none()),
+            "non-Connected server state must clear the global injector"
+        );
     }
 
     async fn setup_conversation_view_with_initial_content(

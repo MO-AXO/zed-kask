@@ -1,11 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- validate
-- verify
-- classify
-- audit
-- recommend
 contract:
   input:
     skill_name: string
@@ -14,7 +8,6 @@ contract:
     validation_results: array
     pass_fail_counts: object
     fix_suggestions: array
-energy_cap: 6144
 visibility: Public
 ---
 {# Template: skill-maintenance/skill-maintenance-validate.j2 #}
@@ -55,13 +48,13 @@ Validate **all skills** in the registry directory.
 | R2 | Crate metadata valid | `crate.name`, `crate.version`, `crate.description` all present |
 | R3 | Templates list non-empty | At least one entry in `templates` array |
 | R4 | Template entry valid | Each entry has `id`, `path`, `type`, `description` |
-| R5 | template_type valid | Each .j2 `template_type` in {WordAct, KnowAct, FlowDef} |
+| R5 | template_type valid | Each .j2 `template_type` in {WordAct, KnowAct, FlowDef, RenderAct} |
 | R6 | Contract valid | Each .j2 has `contract.input` and `contract.output` with typed fields |
-| R7 | energy_cap in range | Each .j2 `energy_cap` integer in [2048, 8192] |
+| R7 | (removed) | energy_cap was removed — per-template token budget is controlled by `max_tokens` in the `[inference]` block, and per-step compute budget by `gas_cap` in the manifest |
 | R8 | Visibility valid | Each .j2 `visibility` in {Private, Public, Shared} |
 | R9 | .j2 file exists | Each template entry's `path` resolves to an actual .j2 file |
 | R10 | [inference] frontmatter valid | Each .j2 starts with `[inference]` block |
-| R11 | vocabulary terms exist | All `lexicon_terms` reference terms in workspace vocabulary |
+| R11 | template_type valid | All templates declare a valid `template_type` (KnowAct, WordAct, FlowDef, RenderAct) |
 | R12 | Jinja2 body present | Each .j2 has template body after `---` separator |
 
 ### SKILL.md Companion Checks (secondary)
@@ -84,6 +77,7 @@ Validate **all skills** in the registry directory.
 | X1 | Registry exists | manifest.yaml present | Critical |
 | X2 | No orphan SKILL.md | SKILL.md without registry → incomplete | High |
 | X3 | No drift | SKILL.md does not claim behaviors registry templates do not support | Medium |
+| X4 | Bidirectional name match | Every `.agents/skills/<name>/` has a matching `registry/manifests/<name>.yaml`, and vice versa. Report exact mismatches by name. | High |
 
 ### Process Manifest Compliance Checks (registry/manifests/*.yaml)
 
@@ -97,12 +91,16 @@ dispatches only canonical actions; non-canonical actions cause runtime errors.
 | E2 | Gas block present | Manifest has a `gas:` block with `cap > 0`, `cost_per_iteration`, `alert_threshold`, `hard_limit`. | Critical |
 | E3 | Gas cap adequate | `gas.cap` proportional to step count: simple KnowAct (1-3 steps) ≥ 5,000; multi-step FlowDef (4-7 steps) ≥ 50,000; media generation ≥ 100,000. | Medium |
 | E4 | rJoule block present | Manifest has an `rjoule:` block. If any step uses `action: select` (inference), `rjoule.cap` must be > 0. Cap proportional to inference calls: 1-2 for simple skills, 3-5 for multi-step, 5+ for media generation. | Critical |
-| E5 | Convergence block | For `category: skill` manifests: `convergence:` block with `threshold` (0.05-0.30), `max_iterations`, `min_iterations`, `convergence_field`, `on_not_reached` ("abort" or "escalate"). | Critical |
+| E5 | Convergence block | For `category: skill` manifests: `convergence:` block with `convergence_mode` (e.g. "cauchy", "" for single-pass), `max_iterations`, `min_iterations`, `on_not_reached` ("abort", "escalate", or "proceed"). Cauchy-mode manifests should have `cauchy_epsilon` and `target_artifacts_field`. Legacy fields `threshold` and `convergence_field` are deprecated but tolerated. | Critical |
 | E6 | Category valid | `manifest.category` is one of: `skill`, `qa-script`, `runtime-config`, `daemon-process`, `pipeline`. Only `skill` manifests are agent-invokable. | Critical |
 | E7 | Template ref resolvable | Every `template_ref` (that is not a runtime-resolved `{% raw %}{{...}}{% endraw %}` or `{% raw %}${...}{% endraw %}` expression) resolves to an embedded `.j2` or `.yaml` file in `registry/templates/`. | Critical |
 | E8 | Sub-manifest budgets | Any `template_ref` pointing to a `.yaml` sub-manifest (FlowDef recursion) must have `gas` and `rjoule` blocks in the sub-manifest. Sub-manifest `rjoule.cap` should be > 0 if the sub-manifest uses inference. | High |
 | E9 | Step description | Every step has a non-empty `description` field. | Critical |
 | E10 | Ordinal sequence | Step ordinals are sequential starting from 1 (or 0 for pre-processing steps). | Medium |
+| E11 | Ledger span namespace | `ledger.span_namespace` is present and equals `reg.skill.<manifest.id>` (the literal string `reg.skill.` + the manifest's `id`). The abolished `spans:` list MUST NOT be present in the `ledger:` block. | Critical |
+| E12 | lisp.eval form present | Every step with `action: compute` and `compute_ref: lisp.eval` has a non-empty `form` string in `input_mapping`. The `form` is the Lisp source the interpreter evaluates; a missing or empty `form` causes a runtime `Manifest` error (`compute 'lisp.eval': missing 'form' string`). Verify the `form` parses by checking it is a non-empty YAML string. | Critical |
+| E13 | lisp.eval step_N_result references backward | Every `{% raw %}{{ step_N_result ... }}{% endraw %}` Jinja expression inside a `lisp.eval` step's `input_mapping.env` references an ordinal `N` strictly less than the current step's ordinal. Forward references (`step_5_result` in step 3) are silent failures — the binding resolves to `null`/`undefined` with no error, and the Lisp form receives a missing value. This check catches the class of bug where a manifest author copies a binding from a later step. Also check `.field` access on `step_N_result`: if step N's result is a bare list (common for `lisp.eval` defect-list outputs), `step_N_result.field` is always `undefined` — the binding should be `step_N_result` directly, with any field access done in Lisp via `assoc`. | High |
+| E14 | lisp.eval form syntax dry-run | For every `lisp.eval` step, the `form` string is valid Lisp syntax per the `hkask_lisp` interpreter. This is a dry-run parse check (the interpreter's `parse()` function succeeds on the form). Catches unbalanced parentheses, invalid boolean literals (`#t`/`#f` instead of `true`/`false`/`nil`), and use of unsupported builtins (`eval`, `defmacro`). The supported special forms are: `quote`, `if`, `let`, `lambda`, `define`, `begin`, `and`, `or`, `not`. The supported builtins are: `+`, `-`, `*`, `/`, `=`, `!=`, `<`, `<=`, `>`, `>=`, `car`, `cdr`, `cons`, `list`, `length`, `nth`, `reverse`, `is_null`, `numberp`, `assoc`, `append`, `string=`, `concat`. `=` is numeric-only; string equality uses `string=`. String concatenation uses `concat`. List concatenation uses `append`. | High |
 
 ### Canonical Action Semantics (Pattern A type system)
 
@@ -138,7 +136,7 @@ Respond with a JSON object:
   "validation_results": [
     {
       "skill_name": "name of validated skill",
-      "check_id": "R1|R2|...|Z1|Z2|...|X1|X2|...|E1|E2|...|E10",
+      "check_id": "R1|R2|...|Z1|Z2|...|X1|X2|...|E1|E2|...|E14",
       "check_name": "Human-readable check name",
       "result": "pass|fail",
       "detail": "Specific evidence for pass or fail",
@@ -169,11 +167,11 @@ Respond with a JSON object:
 
 - Every check must be evaluated for every targeted skill — no omissions.
 - Registry checks (R1–R12) are mandatory. Companion checks (Z1–Z8) are secondary.
-- Executor compliance checks (E1–E10) are mandatory for process manifests.
+- Executor compliance checks (E1–E14) are mandatory for process manifests.
 - Fail results must include specific evidence.
 - Fix suggestions must be actionable.
 - Registry check failures (R1–R5) are always `critical`.
-- Executor compliance failures (E1, E2, E4, E5, E6, E7, E9) are always `critical`.
+- Executor compliance failures (E1, E2, E4, E5, E6, E7, E9, E11, E12) are always `critical`.
 - Safety check failures (Z5, Z6, Z7) are always `high`.
 - Missing SKILL.md (Z1 absent) is `info` — not a failure.
 - Do not execute arbitrary Python code in Jinja2 expressions (sandboxed execution).

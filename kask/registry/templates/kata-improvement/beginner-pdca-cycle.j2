@@ -1,11 +1,6 @@
 [inference]
+max_tokens = 2048
 template_type: KnowAct
-lexicon_terms:
-- plan
-- apply
-- evaluate
-- iterate
-- reflect
 contract:
   input:
     context: object
@@ -14,7 +9,6 @@ contract:
   output:
     analysis: object
     recommendation: string
-energy_cap: 4096
 visibility: Public
 ---
 {# hKask v0.28.0 — A Minimal Viable Container for UserPods #}

@@ -1,9 +1,8 @@
-//! Types for hkask-mcp-media — request types and transcript data models.
+//! Types for hkask-mcp-media — MCP tool request input structs.
 //!
-//! - Request types: MCP tool input structs (Deserialize + JsonSchema)
-//! - Transcript types: synchronized audio + word-level timed transcript
-
-pub mod transcript;
+//! All types implement `Deserialize + JsonSchema` for MCP tool input validation.
+//! Transcript types (`TimedWord`/`TranscriptSegment`/`TranscriptBundle`) are
+//! imported from `hkask_types` — not re-defined here.
 
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -15,6 +14,7 @@ pub struct GenerateImageRequest {
     pub prompt: String,
     pub image_size: Option<String>,
     pub num_images: Option<u32>,
+    pub style: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -22,6 +22,7 @@ pub struct TransformImageRequest {
     pub prompt: String,
     pub image_url: String,
     pub strength: Option<f32>,
+    pub style: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -34,14 +35,7 @@ pub struct UpscaleImageRequest {
 pub struct GenerateVideoRequest {
     pub prompt: String,
     pub duration: Option<f32>,
-}
-
-/// Workflow execution request — accepts a Fal-compatible workflow JSON string.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ExecuteWorkflowRequest {
-    /// A Fal-compatible workflow JSON string with input, run, and display nodes.
-    /// Run nodes support "mode": "sync" (default) or "mode": "queue" for long-running models.
-    pub workflow: String,
+    pub style: Option<String>,
 }
 
 // ── Image description ────────────────────────────────────────────────────
@@ -74,6 +68,18 @@ pub struct GalleryOrganizeRequest {
 
 fn default_mode() -> String {
     "read-only".to_string()
+}
+
+/// Request to expand a short media prompt into a rich, detailed prompt
+/// using a vision LLM (Fooocus "V2" pattern). Optionally applies a
+/// style preset (default, anime, realistic, cinematic, minimal).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ExpandPromptRequest {
+    /// The short media prompt to expand (e.g., "a cat in space").
+    pub prompt: String,
+    /// Optional style preset to apply to the expanded prompt.
+    /// Available: default, anime, realistic, cinematic, minimal.
+    pub style: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -171,7 +177,7 @@ pub struct FaceRemoveRequest {
 pub struct FaceScanFolderRequest {
     /// Absolute path to the folder of reference face images. Each image must
     /// have a YAML sidecar (e.g. `alice.jpg.yaml`) with `first_name`,
-    /// `last_name`, and optional `notes`. Defaults to `~/.hkask/faces/`.
+    /// `last_name`, and optional `notes`. Defaults to `mcp/media/faces/`.
     pub folder_path: Option<String>,
     /// Skip validation and register each face directly as valid (default: false).
     /// Use when you know the images are good references but validation is overly strict.
@@ -222,14 +228,6 @@ impl std::str::FromStr for FaceStatus {
             other => Err(format!("unknown face status: {}", other)),
         }
     }
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ExtractObjectRequest {
-    /// Gallery image index containing the object.
-    pub image_index: usize,
-    /// Description of the object to extract (e.g., "the golden retriever on the left").
-    pub object_description: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -382,6 +380,26 @@ pub struct VideoCaptionRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct VideoExtractFramesRequest {
+    /// URL of the video to extract frames from.
+    pub video_url: String,
+    /// Interval between frames in seconds (default 2.0).
+    #[serde(default = "default_frame_interval")]
+    pub interval_sec: f32,
+    /// Maximum number of frames to extract (default 10).
+    #[serde(default = "default_max_frames")]
+    pub max_frames: u32,
+}
+
+fn default_frame_interval() -> f32 {
+    2.0
+}
+
+fn default_max_frames() -> u32 {
+    10
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct VideoMemeRequest {
     /// Gallery image index to use as the meme base.
     pub image_index: usize,
@@ -439,4 +457,46 @@ pub struct RecordAndTranscribeRequest {
     pub duration_secs: f32,
     /// Optional ISO 639-1 language code for transcription.
     pub language: Option<String>,
+}
+
+// ── Generation lineage request types (WS-3) ─────────────────────────────
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GalleryRecordGenerationRequest {
+    /// Index of the gallery image to attach lineage to (the generated asset
+    /// must already be in the gallery — call gallery_organize / gallery_refresh
+    /// after saving the generated file).
+    pub image_index: usize,
+    /// The media op that produced the image ("generate_image",
+    /// "image_to_image", "upscale", "image_to_video", ...).
+    pub op: String,
+    /// The prompt used.
+    pub prompt: Option<String>,
+    /// The provider-specific model id used.
+    pub model: Option<String>,
+    /// The provider that produced the image ("fal.ai", "deepinfra",
+    /// "atlascloud", ...).
+    pub provider: Option<String>,
+    /// The generation seed, if known.
+    pub seed: Option<i64>,
+    /// JSON string of the generation params (serialize the `MediaGenerateParams`
+    /// used, so `gallery_reproduce` can replay them).
+    pub params: Option<String>,
+    /// Workflow id if the image came from a multi-step workflow.
+    pub workflow_id: Option<String>,
+    /// Index of the parent gallery image this was derived from (img2img /
+    /// upscale / image_to_video), if any. Resolved to an image id internally.
+    pub parent_image_index: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GalleryLineageRequest {
+    /// Index of the gallery image whose lineage to read.
+    pub image_index: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GalleryReproduceRequest {
+    /// Index of the gallery image to reproduce (re-runs its stored op + params).
+    pub image_index: usize,
 }

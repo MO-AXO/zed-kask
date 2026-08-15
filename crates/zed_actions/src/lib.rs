@@ -474,10 +474,30 @@ pub mod icon_theme_selector {
 }
 
 pub mod search {
-    use gpui::actions;
+    use gpui::{Action, actions};
+
+    /// Opens a new project search filtered down to the given directory.
+    ///
+    /// An internal forwarding action: the user-facing, keybindable entry
+    /// point is `project_panel::NewSearchInDirectory`, which resolves the
+    /// selected directory and dispatches this action with it.
+    #[derive(Clone, Debug, Default, PartialEq, Action)]
+    #[action(namespace = search, no_json, no_register)]
+    pub struct NewSearchInDirectory {
+        pub directory: String,
+    }
+
     actions!(
         search,
         [
+            /// Focuses on the search input field.
+            FocusSearch,
+            /// Selects the next search match.
+            SelectNextMatch,
+            /// Selects the previous search match.
+            SelectPreviousMatch,
+            /// Toggles case-sensitive search.
+            ToggleCaseSensitive,
             /// Toggles searching in ignored files.
             ToggleIncludeIgnored
         ]
@@ -804,25 +824,6 @@ pub mod debug_panel {
     );
 }
 
-pub mod kask_panel {
-    use gpui::actions;
-    actions!(
-        kask_panel,
-        [
-            /// Toggles the kask panel.
-            Toggle,
-            /// Toggles focus on the kask panel.
-            ToggleFocus,
-            /// Opens the kanban board view in the center pane.
-            ToggleKanbanBoard,
-            /// Opens the portfolio dashboard view in the center pane.
-            TogglePortfolioDashboard,
-            /// Opens the scenarios planning view in the center pane.
-            ToggleScenarios
-        ]
-    );
-}
-
 actions!(
     debugger,
     [
@@ -955,6 +956,8 @@ pub mod notebook {
             AddMarkdownBlock,
             /// Adds a new code cell.
             AddCodeBlock,
+            /// Deletes the current cell.
+            DeleteCell,
             /// Restarts the kernel.
             RestartKernel,
             /// Interrupts the current execution.

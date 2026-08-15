@@ -1,7 +1,7 @@
 //! Generic OpenAI-compatible model discovery via the standard `/v1/models` endpoint.
 //!
-//! Most OpenAI-compatible providers (DeepInfra, Together AI, OpenRouter, Cline,
-//! KiloCode, etc.) expose a `/v1/models` endpoint that returns a list of
+//! Most OpenAI-compatible providers (DeepInfra, OpenRouter,
+//! etc.) expose a `/v1/models` endpoint that returns a list of
 //! available models in the standard OpenAI shape:
 //!
 //! ```json
@@ -16,9 +16,8 @@
 //! This is the reusable discovery primitive used by
 //! `OpenAiCompatibleLanguageModelProvider` to auto-populate the model picker
 //! for any OpenAI-compatible provider when the user has supplied an API key.
-//! It is intentionally generic — provider-specific quirks (e.g. fal.ai's
-//! static catalog, OpenRouter's `/models/user` endpoint) live in their own
-//! crates, not here.
+//! It is intentionally generic — provider-specific quirks (e.g. OpenRouter's
+//! `/models/user` endpoint) live in their own crates, not here.
 
 use futures::AsyncReadExt;
 use http_client::{
@@ -46,7 +45,7 @@ pub enum ListModelsError {
 ///
 /// Mirrors the standard OpenAI model object plus the most common provider
 /// extensions. Fields beyond the standard `id` are optional so this parses
-/// cleanly across DeepInfra, Together AI, Cline, KiloCode, and OpenRouter
+/// cleanly across DeepInfra and OpenRouter
 /// (which extends the shape with `context_length` and capability hints).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiscoveredModel {
@@ -60,8 +59,16 @@ pub struct DiscoveredModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u64>,
     /// Optional max output tokens. Some providers report this alongside
-    /// `context_length`; others do not.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `context_length`; others do not. OpenRouter nests it under
+    /// `top_provider.max_completion_tokens` — `resolve_provider_fallbacks`
+    /// folds that into this field when the top-level value is absent.
+    /// AtlasCloud uses the field name `max_output_length` for the same
+    /// quantity, handled via the serde alias.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "max_output_length"
+    )]
     pub max_output_tokens: Option<u64>,
     /// Optional list of supported parameters. Used to detect tool support
     /// (presence of `"tools"`) and reasoning support (presence of
@@ -72,6 +79,12 @@ pub struct DiscoveredModel {
     /// present, is used to detect image support. OpenRouter populates this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub architecture: Option<ModelArchitecture>,
+    /// Optional per-provider limits. OpenRouter nests `max_completion_tokens`
+    /// and (a second copy of) `context_length` here rather than at the top
+    /// level. `resolve_provider_fallbacks` promotes these into the top-level
+    /// fields when the provider omits them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_provider: Option<TopProvider>,
 }
 
 /// Optional architecture metadata returned by some providers (notably OpenRouter).
@@ -79,6 +92,19 @@ pub struct DiscoveredModel {
 pub struct ModelArchitecture {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_modalities: Vec<String>,
+}
+
+/// Per-provider limits nested under `top_provider` in OpenRouter's
+/// `/v1/models` response. OpenRouter reports `max_completion_tokens` here
+/// instead of as a top-level `max_output_tokens`, so without parsing this
+/// every OpenRouter model would discover with `max_output_tokens: None` and
+/// the agent would send no output cap — causing mid-tool-call truncation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TopProvider {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_completion_tokens: Option<u64>,
 }
 
 /// The standard `/v1/models` response envelope.
@@ -128,8 +154,11 @@ pub async fn list_models(
         .map_err(|e| ListModelsError::ReadResponse(e.into()))?;
 
     if response.status().is_success() {
-        let parsed: ListModelsResponse =
+        let mut parsed: ListModelsResponse =
             serde_json::from_str(&body).map_err(ListModelsError::DeserializeResponse)?;
+        for model in parsed.data.iter_mut() {
+            model.resolve_provider_fallbacks();
+        }
         Ok(parsed.data)
     } else {
         Err(ListModelsError::ApiError {
@@ -141,8 +170,19 @@ pub async fn list_models(
 
 impl DiscoveredModel {
     /// Whether the provider advertises tool support via `supported_parameters`.
+    ///
+    /// When `supported_parameters` is absent (empty), the provider didn't
+    /// advertise capabilities — that's "unknown", not "unsupported".
+    /// Default to `true` so providers like DeepInfra (which omit the field but
+    /// whose models do support tools) don't get tool calling silently disabled.
+    /// This matches `OpenAiCompatibleModelCapabilities::default()` (tools: true)
+    /// used for the manual-config path, so discovery and manual config agree.
     pub fn supports_tools(&self) -> bool {
-        self.supported_parameters.iter().any(|p| p == "tools")
+        if self.supported_parameters.is_empty() {
+            true
+        } else {
+            self.supported_parameters.iter().any(|p| p == "tools")
+        }
     }
 
     /// Whether the provider advertises image input support via architecture
@@ -157,6 +197,25 @@ impl DiscoveredModel {
     /// The display name, falling back to the id when absent.
     pub fn display_name(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.id)
+    }
+
+    /// Promote `top_provider.max_completion_tokens` → `max_output_tokens` and
+    /// `top_provider.context_length` → `context_length` when the top-level
+    /// fields are `None`. OpenRouter nests these under `top_provider` rather
+    /// than at the top level, so without this step every OpenRouter model
+    /// would discover with `max_output_tokens: None` and the agent would send
+    /// no output cap — causing mid-tool-call truncation (the `ToolInput::recv`
+    /// warn path) when the provider applies its own default.
+    pub fn resolve_provider_fallbacks(&mut self) {
+        let Some(top) = self.top_provider.as_ref() else {
+            return;
+        };
+        if self.max_output_tokens.is_none() && top.max_completion_tokens.is_some() {
+            self.max_output_tokens = top.max_completion_tokens;
+        }
+        if self.context_length.is_none() && top.context_length.is_some() {
+            self.context_length = top.context_length;
+        }
     }
 }
 
@@ -177,6 +236,7 @@ mod tests {
             architecture: Some(ModelArchitecture {
                 input_modalities: vec!["text".into(), "image".into()],
             }),
+            top_provider: None,
         };
         assert!(model.supports_tools());
         assert!(model.supports_images());
@@ -192,6 +252,7 @@ mod tests {
             max_output_tokens: None,
             supported_parameters: Vec::new(),
             architecture: None,
+            top_provider: None,
         };
         assert_eq!(model.display_name(), "Llama 3.3 70B");
     }
@@ -207,7 +268,10 @@ mod tests {
         let parsed: ListModelsResponse = serde_json::from_str(&body.to_string()).unwrap();
         assert_eq!(parsed.data.len(), 2);
         assert_eq!(parsed.data[0].id, "gpt-4o");
-        assert!(!parsed.data[0].supports_tools());
+        // No `supported_parameters` field → unknown, not unsupported. Default
+        // to `true` so providers that omit the field (DeepInfra, standard
+        // OpenAI) don't get tool calling silently disabled.
+        assert!(parsed.data[0].supports_tools());
         assert!(!parsed.data[0].supports_images());
     }
 
@@ -230,6 +294,69 @@ mod tests {
         assert!(model.supports_tools());
         assert!(model.supports_images());
         assert_eq!(model.display_name(), "Llama 3.3 70B Instruct");
+    }
+
+    #[test]
+    fn test_atlascloud_max_output_length_alias() {
+        // AtlasCloud uses the field name `max_output_length` (not
+        // `max_output_tokens`, not `top_provider.max_completion_tokens`) for
+        // the per-model output cap, and wraps the list in {code, msg, data}.
+        // Without the serde alias, every AtlasCloud model would discover with
+        // `max_output_tokens: None` and the agent would send no output cap —
+        // the same mid-tool-call truncation class as the OpenRouter bug.
+        let body = json!({
+            "code": 200,
+            "msg": "succeed",
+            "data": [{
+                "id": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+                "name": "Qwen3-235B-A22B-Instruct-2507",
+                "context_length": 131072,
+                "max_output_length": 131072
+            }]
+        });
+        let mut parsed: ListModelsResponse = serde_json::from_str(&body.to_string()).unwrap();
+        // The {code, msg} wrapper is ignored — only `data` is parsed.
+        let model = parsed.data.get_mut(0).unwrap();
+        model.resolve_provider_fallbacks();
+        assert_eq!(
+            model.max_output_tokens,
+            Some(131072),
+            "AtlasCloud's max_output_length must deserialize into max_output_tokens via the alias"
+        );
+        assert_eq!(model.context_length, Some(131072));
+    }
+
+    #[test]
+    fn test_top_provider_max_completion_tokens_fallback() {
+        // OpenRouter nests `max_completion_tokens` under `top_provider` rather
+        // than as a top-level `max_output_tokens`. Without the fallback, every
+        // OpenRouter model would discover with `max_output_tokens: None`, the
+        // agent would send no output cap, and the provider would truncate
+        // mid-tool-call — surfacing as the `ToolInput::recv` warn.
+        let body = json!({
+            "data": [{
+                "id": "z-ai/glm-5.2",
+                "name": "Z.ai: GLM 5.2",
+                "context_length": 1048576,
+                "top_provider": {
+                    "context_length": 1048576,
+                    "max_completion_tokens": 131072
+                }
+            }]
+        });
+        let mut parsed: ListModelsResponse = serde_json::from_str(&body.to_string()).unwrap();
+        let model = parsed.data.get_mut(0).unwrap();
+        model.resolve_provider_fallbacks();
+        assert_eq!(
+            model.max_output_tokens,
+            Some(131072),
+            "top_provider.max_completion_tokens must promote to max_output_tokens"
+        );
+        assert_eq!(
+            model.context_length,
+            Some(1048576),
+            "top-level context_length must be preserved, not overwritten by top_provider"
+        );
     }
 
     #[test]

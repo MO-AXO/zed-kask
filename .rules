@@ -1,406 +1,107 @@
 # Rust coding guidelines
 
-* Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.
-* Do not write organizational or comments that summarize the code. Comments should only be written in order to explain "why" the code is written in some way in the case there is a reason that is tricky / non-obvious.
-* Prefer implementing functionality in existing files unless it is a new logical component. Avoid creating many small files.
-* Avoid using functions that panic like `unwrap()`, instead use mechanisms like `?` to propagate errors.
-* Be careful with operations like indexing which may panic if the indexes are out of bounds.
-* Never silently discard errors with `let _ =` on fallible operations. Always handle errors appropriately:
-  - Propagate errors with `?` when the calling function should handle them
-  - Use `.log_err()` or similar when you need to ignore errors but want visibility
-  - Use explicit error handling with `match` or `if let Err(...)` when you need custom logic
-  - Example: avoid `let _ = client.request(...).await?;` - use `client.request(...).await?;` instead
-* When implementing async operations that may fail, ensure errors propagate to the UI layer so users get meaningful feedback.
-* Never create files with `mod.rs` paths - prefer `src/some_module.rs` instead of `src/some_module/mod.rs`.
-* When creating new crates, prefer specifying the library root path in `Cargo.toml` using `[lib] path = "...rs"` instead of the default `lib.rs`, to maintain consistent and descriptive naming (e.g., `gpui.rs` or `main.rs`).
-* Avoid creative additions unless explicitly requested
-* Use full words for variable names (no abbreviations like "q" for "queue")
-* Use variable shadowing to scope clones in async contexts for clarity, minimizing the lifetime of borrowed references.
-  Example:
-  ```rust
-  executor.spawn({
-      let task_ran = task_ran.clone();
-      async move {
-          *task_ran.borrow_mut() = true;
-      }
-  });
-  ```
+* Prioritize correctness and clarity over speed and efficiency.
+* Comments explain "why", not "what". No organizational comments.
+* Prefer existing files over creating new ones. Avoid many small files.
+* No `unwrap()` — use `?` to propagate errors. Be careful with indexing.
+* Never silently discard errors with `let _ =` on fallible operations. Propagate with `?`, use `.log_err()` for visibility, or handle explicitly.
+* Async errors must propagate to the UI layer for meaningful user feedback.
+* No `mod.rs` files — use `src/module.rs` instead.
+* New crates: specify `[lib] path = "..."` in `Cargo.toml` (e.g., `gpui.rs`, not `lib.rs`).
+* No creative additions unless explicitly requested.
+* Full words for variable names (no abbreviations).
+* Use variable shadowing to scope clones in async contexts.
+* Build: use `./script/clippy` instead of `cargo clippy`.
 
 # Timers in tests
 
-* In GPUI tests, prefer GPUI executor timers over `smol::Timer::after(...)` when you need timeouts, delays, or to drive `run_until_parked()`:
-  - Use `cx.background_executor().timer(duration).await` (or `cx.background_executor.timer(duration).await` in `TestAppContext`) so the work is scheduled on GPUI's dispatcher.
-  - Avoid `smol::Timer::after(...)` for test timeouts when you rely on `run_until_parked()`, because it may not be tracked by GPUI's scheduler and can lead to "nothing left to run" when pumping.
+Use `cx.background_executor().timer(duration).await` in GPUI tests, not `smol::Timer::after(...)` — smol timers aren't tracked by GPUI's scheduler and break `run_until_parked()`.
 
-# GPUI
+# GPUI traps
 
-GPUI is a UI framework which also provides primitives for state and concurrency management.
-
-## No `block_on` on the foreground thread
-
-Never use `futures::executor::block_on` (or any blocking executor) inside a sync trait method that is called from the GPUI foreground thread. If the underlying future needs the GPUI or tokio executor to make progress, `block_on` will deadlock. Instead, make the trait method async (return `Pin<Box<dyn Future>>`) and await it in an async context like `run_turn_internal`.
-
-## Mutating `Arc<Message>` in `Thread.messages`
-
-When injecting deferred tool results into a stored `Arc<Message>`, do not use `Arc::get_mut` — it silently returns `None` when the Arc is shared (e.g., after a DB save clones the message), dropping the result. Instead, read the `AgentMessage` from the `Arc`, clone it (`AgentMessage` derives `Clone`), modify the clone, and replace the `Arc` in the vector.
-
-## Deferred results and the turn loop
-
-The `end_turn` path in `run_turn_internal` must not busy-spin or use timers to wait for pending deferred tool results — the GPUI test scheduler's `run_until_parked` will fail with "Parking forbidden" if a foreground task is alive but waiting. If deferred results are pending at `end_turn`, let the turn end. The results will be drained on the next turn iteration (triggered by a user message or `cx.notify()`).
-
-## Context
-
-Context types allow interaction with global state, windows, entities, and system services. They are typically passed to functions as the argument named `cx`. When a function takes callbacks they come after the `cx` parameter.
-
-* `App` is the root context type, providing access to global state and read and update of entities.
-* `Context<T>` is provided when updating an `Entity<T>`. This context dereferences into `App`, so functions which take `&App` can also take `&Context<T>`.
-* `AsyncApp` and `AsyncWindowContext` are provided by `cx.spawn` and `cx.spawn_in`. These can be held across await points.
-
-## `Window`
-
-`Window` provides access to the state of an application window. It is passed to functions as an argument named `window` and comes before `cx` when present. It is used for managing focus, dispatching actions, directly drawing, getting user input state, etc.
-
-## Entities
-
-An `Entity<T>` is a handle to state of type `T`. With `thing: Entity<T>`:
-
-* `thing.entity_id()` returns `EntityId`
-* `thing.downgrade()` returns `WeakEntity<T>`
-* `thing.read(cx: &App)` returns `&T`.
-* `thing.read_with(cx, |thing: &T, cx: &App| ...)` returns the closure's return value.
-* `thing.update(cx, |thing: &mut T, cx: &mut Context<T>| ...)` allows the closure to mutate the state, and provides a `Context<T>` for interacting with the entity. It returns the closure's return value.
-* `thing.update_in(cx, |thing: &mut T, window: &mut Window, cx: &mut Context<T>| ...)` takes a `AsyncWindowContext` or `VisualTestContext`. It's the same as `update` while also providing the `Window`.
-
-Within the closures, the inner `cx` provided to the closure must be used instead of the outer `cx` to avoid issues with multiple borrows.
-
-Trying to update an entity while it's already being updated must be avoided as this will cause a panic.
-
-`WeakEntity<T>` is a weak handle. It has `read_with`, `update`, and `update_in` methods that work the same, but always return an `anyhow::Result` so that they can fail if the entity no longer exists. This can be useful to avoid memory leaks - if entities have mutually recursive handles to each other they will never be dropped.
-
-## Concurrency
-
-All use of entities and UI rendering occurs on a single foreground thread.
-
-`cx.spawn(async move |cx| ...)` runs an async closure on the foreground thread. Within the closure, `cx` is `&mut AsyncApp`.
-
-When the outer cx is a `Context<T>`, the use of `spawn` instead looks like `cx.spawn(async move |this, cx| ...)`, where `this: WeakEntity<T>` and `cx: &mut AsyncApp`.
-
-To do work on other threads, `cx.background_spawn(async move { ... })` is used. Often this background task is awaited on by a foreground task which uses the results to update state.
-
-Both `cx.spawn` and `cx.background_spawn` return a `Task<R>`, which is a future that can be awaited upon. If this task is dropped, then its work is cancelled. To prevent this one of the following must be done:
-
-* Awaiting the task in some other async context.
-* Detaching the task via `task.detach()` or `task.detach_and_log_err(cx)`, allowing it to run indefinitely.
-* Storing the task in a field, if the work should be halted when the struct is dropped.
-
-A task which doesn't do anything but provide a value can be created with `Task::ready(value)`.
-
-## Elements
-
-The `Render` trait is used to render some state into an element tree that is laid out using flexbox layout. An `Entity<T>` where `T` implements `Render` is sometimes called a "view".
-
-Example:
-
-```
-struct TextWithBorder(SharedString);
-
-impl Render for TextWithBorder {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div().border_1().child(self.0.clone())
-    }
-}
-```
-
-Since `impl IntoElement for SharedString` exists, it can be used as an argument to `child`. `SharedString` is used to avoid copying strings, and is either an `&'static str` or `Arc<str>`.
-
-UI components that are constructed just to be turned into elements can instead implement the `RenderOnce` trait, which is similar to `Render`, but its `render` method takes ownership of `self` and receives `&mut App` instead of `&mut Context<Self>`. Types that implement this trait can use `#[derive(IntoElement)]` to use them directly as children.
-
-The style methods on elements are similar to those used by Tailwind CSS.
-
-If some attributes or children of an element tree are conditional, `.when(condition, |this| ...)` can be used to run the closure only when `condition` is true. Similarly, `.when_some(option, |this, value| ...)` runs the closure when the `Option` has a value.
-
-## Input events
-
-Input event handlers can be registered on an element via methods like `.on_click(|event, window, cx: &mut App| ...)`.
-
-Often event handlers will want to update the entity that's in the current `Context<T>`. The `cx.listener` method provides this - its use looks like `.on_click(cx.listener(|this: &mut T, event, window, cx: &mut Context<T>| ...)`.
-
-## Actions
-
-Actions are dispatched via user keyboard interaction or in code via `window.dispatch_action(SomeAction.boxed_clone(), cx)` or `focus_handle.dispatch_action(&SomeAction, window, cx)`.
-
-Actions with no data defined with the `actions!(some_namespace, [SomeAction, AnotherAction])` macro call. Otherwise the `Action` derive macro is used. Doc comments on actions are displayed to the user.
-
-Action handlers can be registered on an element via the event handler `.on_action(|action, window, cx| ...)`. Like other event handlers, this is often used with `cx.listener`.
-
-## Notify
-
-When a view's state has changed in a way that may affect its rendering, it should call `cx.notify()`. This will cause the view to be rerendered. It will also cause any observe callbacks registered for the entity with `cx.observe` to be called.
-
-## Entity events
-
-While updating an entity (`cx: Context<T>`), it can emit an event using `cx.emit(event)`. Entities register which events they can emit by declaring `impl EventEmitter<EventType> for EntityType {}`.
-
-Other entities can then register a callback to handle these events by doing `cx.subscribe(other_entity, |this, other_entity, event, cx| ...)`. This will return a `Subscription` which deregisters the callback when dropped.  Typically `cx.subscribe` happens when creating a new entity and the subscriptions are stored in a `_subscriptions: Vec<Subscription>` field.
-
-## Build guidelines
-
-- Use `./script/clippy` instead of `cargo clippy`
+* No `block_on` on the foreground thread — it deadlocks if the future needs the GPUI or tokio executor. Make the method async instead.
+* Don't use `Arc::get_mut` on `Thread.messages` — it returns `None` when shared. Clone the inner value, modify, replace the `Arc`.
+* Don't busy-spin or use timers to wait for deferred tool results in `end_turn` — let the turn end; results drain on the next iteration.
+* `AsyncApp` is not `Send` — background tokio tasks must use `tokio::sync::mpsc` channels with a foreground drainer, not capture `AsyncApp`.
+* `cx.background_spawn` panics on tokio-dependent futures (reqwest, tokio::time, etc.) — use `gpui_tokio::Tokio::spawn(&*cx, ...)` instead.
+* Center-pane `Item` Toggle must use `Toggle` action (not `ToggleFocus`). After `add_item_to_active_pane`, explicitly call `page.focus_handle(cx).focus(window, cx)` if focus delegates to a child entity.
 
 # Pull request hygiene
 
-When an agent opens or updates a pull request, it must:
-
-- Use a clear, correctly capitalized, imperative PR title (for example, `Fix crash in project panel`).
-- Avoid conventional commit prefixes in PR titles (`fix:`, `feat:`, `docs:`, etc.).
-- Avoid trailing punctuation in PR titles.
-- Optionally prefix the title with a crate name when one crate is the clear scope (for example, `git_ui: Add history view`).
-- Include a `Release Notes:` section as the final section in the PR body.
-- Use one bullet under `Release Notes:`:
-  - `- Added ...`, `- Fixed ...`, or `- Improved ...` for user-facing changes, or
-  - `- N/A` for docs-only and other non-user-facing changes.
-- Format release notes exactly with a blank line after the heading, for example:
-
-```
-Release Notes:
-
-- N/A
-```
-
-# Crash Investigation
-
-## Sentry Integration
-- Crash investigation prompts: `.factory/prompts/crash/investigate.md`
-- Crash fix prompts: `.factory/prompts/crash/fix.md`
-- Fetch crash reports: `script/sentry-fetch <issue-id>`
-- Generate investigation prompt from crash: `script/crash-to-prompt <issue-id>`
+- Imperative PR title, no conventional commit prefixes, no trailing punctuation.
+- Optional crate prefix (e.g., `git_ui: Add history view`).
+- `Release Notes:` section as final section, blank line after heading, one bullet (`- Added/Fixed/Improved/N/A`).
 
 # Sankey diagrams
 
-* Sankey conservation is domain-dependent, not universal. The original engineering Sankey (Sankey 1898, Schmidt 2008) requires conservation of energy/mass, but user-journey funnels, attribution paths, and value-stream maps do not conserve. A Sankey skill must carry a per-domain conservation mode (mandatory/asserted/none), not a single global rule. Assuming universal conservation produces silent "balancing" that fabricates loss branches — the exact failure mode the "never fabricate" rule exists to prevent.
-* When a prompt references an external source (URL, financial statement, codebase), delegate extraction to a specialized skill (structured-extraction, sequential-inquiry, graph-audit) — do not ask the user to transcribe data that already exists in a machine-readable source. Transcription requests shift cognitive load to the user and introduce transcription errors.
-* Never fabricate Sankey weights. A Sankey's entire semantic value is that link width encodes flow magnitude. A fabricated width is a visualization of the LLM's guess, which is worse than no diagram. If the user declines to provide a weight, mark the edge as `value=1` (unitless placeholder) and note it in the description.
+* Conservation is domain-dependent (engineering Sankey conserves, funnels/attribution don't). Carry a per-domain conservation mode.
+* Delegate external source extraction to specialized skills — don't ask users to transcribe machine-readable data.
+* Never fabricate weights. Use `value=1` placeholder if user declines to provide a weight.
 
-# Rules Hygiene
+# Rules hygiene
 
-These `.rules` files are read by every agent session. Keep them high-signal.
+* `.rules` are traps to avoid, not maps to follow. No architectural descriptions.
+* New rules must be: non-obvious, repeatedly encountered, and specific enough to act on.
+* Single-crate rules go in that crate's `.rules`, not the repo root.
+* Don't edit `.rules` inline during feature work — propose additions in PR descriptions.
 
-## After any agentic session
-If you discover a non-obvious pattern that would help future sessions, include a **"Suggested .rules additions"** heading in your PR description with the proposed text. Do **not** edit `.rules` inline during normal feature/fix work. Reviewers decide what gets merged.
+# Agent loop traps
 
-## High bar for new rules
-Editing or clarifying existing rules is always welcome. New rules must meet **all three** criteria:
-1. **Non-obvious** — someone familiar with the codebase would still get it wrong without the rule.
-2. **Repeatedly encountered** — it came up more than once (multiple hits in one session counts).
-3. **Specific enough to act on** — a concrete instruction, not a vague principle.
-
-Rules that apply to a single crate belong in that crate's own `.rules` file, not the repo root.
-
-## What NOT to put in `.rules`
-Avoid architectural descriptions of a crate (module layout, data flow, key types). These go stale fast and the agent can gather them by reading the code. Rules should be **traps to avoid**, not **maps to follow**.
-
-## No drive-by additions
-Rules emerge from validated patterns, not one-off observations. The workflow is:
-1. Agent notes a pattern during a session.
-2. Team validates the pattern in code review.
-3. A dedicated commit adds the rule with context on *why* it exists.
-
-# Center-pane Item Toggle vs ToggleFocus
-
-For center-pane `Item` views (not dock `Panel`s), the View menu entry must use
-the `Toggle` action (deploys a new item if none exists), NOT `ToggleFocus`
-(silent no-op when no item is open — produces "nothing happens" with no error).
-Dock `Panel`s register `ToggleFocus` as their `toggle_action`, so the menu
-pattern differs between docks and center-pane items.
-
-## Center-pane `Item` deploy-and-focus
-
-When a `Toggle` action handler for a center-pane `Item` deploys a new item via
-`workspace.add_item_to_active_pane(Box::new(page), None, true, window, cx)`,
-the `activate = true` flag activates the item in the pane but does NOT transfer
-keyboard focus to it on the same turn if the item's `Focusable::focus_handle`
-impl delegates to a child entity constructed inside `cx.new` (e.g. an inner
-`Editor`). The child's `FocusHandle` isn't reachable through the workspace
-focus chain until a subsequent turn. Symptom: the user must click the menu
-entry / status bar button twice — the first click adds the item, the second
-click hits the `existing` branch and focuses via `activate_item`.
-
-Fix: after `add_item_to_active_pane`, explicitly call
-`page.focus_handle(cx).focus(window, cx)` on the newly created entity. Clone
-the `Entity` before boxing it so the handle remains available:
-
-```rust
-let page = MyPage::new(workspace, window, cx);
-workspace.add_item_to_active_pane(Box::new(page.clone()), None, true, window, cx);
-page.focus_handle(cx).focus(window, cx);
-```
-
-This is NOT needed when `Focusable::focus_handle` returns a stable field
-created in the constructor (e.g. `self.focus_handle.clone()`), because that
-handle is reachable immediately. The trap is specific to delegated focus
-handles (child `Editor`, child `Input`, etc.).
+* **Tool retry death spiral (hard-enforced).** The `ToolRetryTracker` in `crates/agent/src/tool_retry_tracker.rs` tracks two dimensions: `(tool_name, input_hash) → failure_count` (identical retries) and `tool_name → consecutive_failure_count` (trivially different inputs, same tool). After 3 failures, the tool result carries a warning with the Bayesian probability of success (`1/(N+2)`) and a directive to switch tools. After 5 failures, the tool hard-refuses — `handle_tool_use_event` returns an error result without calling `tool.run()`. A successful call resets both trackers. This covers all tools uniformly (built-in + MCP) because they all dispatch through `handle_tool_use_event` → `run_tool`. The tracker lives on `Thread` (per-thread, not per-session).
 
 # zed-kask integration traps
 
-These traps recur when modifying the Kask↔Zed seam. Each was hit multiple
-times across audit cycles 3–6.
+## Divergence surface
 
-## Tests must pin deliberate zed-kask deviations from upstream
+`DIVERGENCE.md` defines what's ours (`kask/`) vs upstream Zed. Don't "fix" upstream files speculatively — push fixes into `kask/` behind a D-seam. If an upstream edit is unavoidable, add a D-seam entry + test in the same PR. Every `// zed-kask:` comment disabling upstream behavior needs a test pinning the disabled behavior.
 
-Every `// zed-kask:` comment that disables upstream behavior needs a
-corresponding test asserting the disabled behavior stays disabled. The
-upstream tests still assert the old behavior and will fail silently (CI
-normalizes them as "pre-existing failures"). When you change a production
-path with a `// zed-kask:` comment, grep the test files for the old
-assertions and update them in the same commit. Cycles 3 and 4 both found
-stale tests asserting upstream behavior that zed-kask deliberately removed
-(body injection, catalog budget, description-length warnings).
+## Failure signals
 
-## Process-global hooks set at runtime need a startup-failure signal
+* Every `set_*` hook wired conditionally must `log::warn!` on failure — operators can't distinguish "not configured" from "configured but broken" without it. `OnceLock` hooks must warn on the `Err` branch of `set`; `Mutex` hooks are re-settable and don't need it.
+* Numeric env vars that fail to parse must `log::warn!` naming the malformed value, not silently fall back.
+* Opt-in `HKASK_USE_*` features that fail must log the failure classification (HTTP status, error variant), not collapse to `None` via `.ok()?`.
+* `unwrap_or(0)` on regulation-loop sense inputs is a broken feedback loop — a DB outage returns 0, which the loop reads as "no deviation." Propagate the error or emit `tracing::warn!`.
+* When a deferred task wires multiple hooks in one `if` block, the `else` warn must name ALL unwired hooks, not just one.
 
-Every `set_*` hook in `crates/agent/src/agent.rs` and `crates/zed/src/main.rs`
-that's wired conditionally must `log::warn!` when the condition fails, not
-silently leave the hook `None`. The pattern: `resolve_x().unwrap_or_default()`
-or `if condition { set_hook(Some(...)) }` without an `else` branch leaves
-the hook absent with no signal. Operators reading logs cannot distinguish
-"not configured" from "configured but broken". Always add a `log::warn!` in
-the failure branch naming the hook, the failure reason, and the remediation
-(`set HKASK_*` env var, open the panel, etc.). Cycle 5 found the
-`a2a_secret` resolution path silently producing an empty secret; the same
-pattern exists for `TOOL_ROUTER`, `CONTEXT_INJECTOR`, and `THREAD_CONDENSER`.
+## Skill system
 
-When a deferred task wires multiple `set_*` hooks inside a single `if`
-block, the `else` branch warn must name ALL hooks left unwired, not just
-one. An operator reading the log sees "manifest executor not wired" and
-misses that 4 other hooks are also unwired. The warn is the effector that
-drives operator remediation; if it only names 1 of 5 hooks, the operator
-cannot remediate correctly.
+* Skill invocation = `skill` tool call, not `read_file(SKILL.md)`. The manifest encodes the methodology.
+* Skill cascade context must carry `{{ task }}` — without it, templates run blind.
+* `ManifestExecutor` final-result extraction uses `last_result_step` (O(1)). Reuse `extract_final_step_result`, don't re-implement.
+* `LazyToolRouter` filters MCP tools only — built-in Zed tools must bypass the router.
+* Convention priors from `.rules` must be verified against the codebase before use — rules can be stale.
 
-## Cross-thread GPUI communication uses channels, not `AsyncApp` handles
+## Settings and constants
 
-`AsyncApp` is not `Send` (GPUI is single-threaded; it holds `Rc`/`Weak<AppCell>`).
-Background tokio tasks that need to dispatch to the GPUI foreground must use a
-`tokio::sync::mpsc` channel with a foreground drainer spawned via
-`cx.spawn(async move |cx| { while let Some(...) = rx.recv().await { ... } })`,
-not capture `AsyncApp`. This applies to any `Send + Sync` trait (e.g.
-`RegulationSink`, `AlertSink`) implemented over GPUI state. Cycle 6 found
-this the hard way — the first `ToastAlertSink` impl captured `AsyncApp` and
-failed to compile as `Send + Sync`.
+* Kask settings defaults live in `Default` impls only — not in `#[serde(default)]`, `From<Content>` literals, or `mcp_env()` comparison literals.
+* Model-name constants must reference `hkask_inference::model_constants::DEFAULT_*_MODEL`, not re-declare literals across crates.
+* MCP server credentials/config are scoped per-server via allowlists. New servers use `Some(&[])` for both, never `None`. Allowlists must align with actual env-var reads.
+* After `INFERENCE_SOCKET_PATH` is set, call `sync_kask_mcp_servers` again so servers restart with updated env.
 
-## Kask MCP servers have two parallel launch paths by design
+## MCP server patterns
 
-Kask MCP servers (`hkask-mcp-{id}` binaries) are launched by two independent
-systems. Do not try to unify them — they serve different consumers with
-different scoping and governance requirements:
+* Tool responses are `{"content": <value>}` envelopes — use `unwrap_tool_envelope`, don't re-implement.
+* Error classification must be per-variant, not blanket `McpToolError::internal`.
+* Tool inputs accepting arbitrary JSON must use `AnyJsonValue`, not `serde_json::Value` (schemars renders `Value` as bare `true`, which breaks strict-schema providers).
+* Live-mutation probe suites must run with `--test-threads=1` and keep probes self-contained.
 
-1. **`McpRuntime` (app-global)** — launches one copy of each server for
-   governed dispatch (OCAP token verification, gas/rjoule budgeting,
-   `reg.tool.*` span emission). Serves the skill cascade (FlowDef) and kask
-   panel. Runs outside any project context.
+## Dead code patterns
 
-2. **`ContextServerStore` (per-project)** — each project launches its own
-   copies via `ContextServerDescriptorRegistry` descriptors (registered by
-   `sync_kask_mcp_servers` in `main.rs`). Serves the agent tool picker.
-   Project-scoped, no governance membrane.
+* Trait-with-one-impl is speculative generality — grep for `self.<field>` before merging; if only constructor matches, it's unwired. This generalizes to: convention helpers with only test callers are dead code, and folded-service modules with no production callers outside the subtree are dead surface.
+* Advertised invariants (doc comments claiming security gates, audit surfaces, migrations) must point to the enforcement line. If no enforcement point exists, the doc must say "not yet enforced." Validation gates must return `Undetermined`/`Skipped` when the check wasn't performed, not `Ready` with empty findings.
+* `Manifest `ocap:` is declared config, not a security gate. The real gates are `McpRuntime::invoke` (token + gas) and per-agent `mcp_tools` allowlist. Token expiry is NOT enforced. Don't re-add `ocap:` blocks or `OcapConfig` without wiring into the runtime gate.
+* Cargo.toml deps outlive their consumers — when deleting a source file, grep for `use <dep>` in remaining `src/` and `tests/`; zero hits = remove the dep.
 
-The `ContextServerDescriptorRegistry` is app-level (global), but the
-`ContextServerStore` that actually spawns processes is per-project. Both
-systems launching independent process instances is correct — removing either
-path breaks its consumers (removing `McpRuntime` breaks FlowDef skills;
-removing `ContextServerStore` registration hides kask tools from the agent).
+## Other traps
 
-The `KaskMcpDescriptor::command()` method resolves env vars (credentials,
-inference socket) at call time. After `INFERENCE_SOCKET_PATH` is set (in a
-deferred task post-login), `sync_kask_mcp_servers` must be called again so
-the registry notifies `ContextServerStore` to restart servers with the
-updated env.
+* `LanguageModelInferencePort` honors `model_override` via registry resolution — silently dropping it caused the condenser to use the wrong model.
+* `LanguageModelProvider` registry subscriptions must filter self-events to avoid unbounded warn storms.
+* Ontology tag field-drop: a widget that doesn't parse an `ontology` field silently drops it — add an S4 sensor test asserting the widget parses the field.
+* `.desktop` files must never declare `text/plain`, `application/x-zerosize`, `x-scheme-handler/zed`, or `Keywords=zed` — run `check-desktop-no-collision.sh` before committing.
+* Stale diagnostics after bulk edits: the crate's lib root is authoritative, not individual-file diagnostics. Don't retry stale diagnostics or fix phantom errors.
+* LLM-improves-against-LLM-scored-target loops can game the scorer. Three mitigations required: ground in real sources, preserve load-bearing properties, validate against external ground truth.
 
-## Model-dependent kask wiring must run in the deferred task
+# kask registry guidelines
 
-The `set_manifest_executor`, `set_tool_invoker`, `set_scoped_inference`,
-`set_regulation_status`, and `set_thread_condenser` hooks are `OnceLock`-based
-and depend on `LanguageModelRegistry::default_model()` being populated. At
-startup (before user auth), `default_model()` returns `None`. Wiring these
-hooks synchronously at startup leaves them unwired for the entire session when
-no model is configured at startup — the "Process-global hooks set at runtime
-need a startup-failure signal" trap. They must be wired from the deferred task
-that runs after the Zed user resolves.
-
-## LazyToolRouter filters MCP tools only
-
-The `LazyToolRouter` in `crates/agent/src/tool_router.rs` was introduced to
-tame MCP tool floods, not to filter built-in zed tools.
-`Thread::enabled_tools` must skip built-in tools (those in
-`crate::tools::ALL_TOOL_NAMES`) when applying the router — filtering them
-caused the agent to lose access to `fetch`, `diagnostics`, `list_directory`,
-etc. on ordinary coding requests, with the model discovering the loss only via
-"tool not found" errors mid-turn. The filtering logic is extracted into
-`tool_router::apply_router_bypassing_built_ins` for testability without the
-process-global `TOOL_ROUTER` `OnceLock`.
-
-## Skill invocation is `skill` tool call, not `read_file(SKILL.md)`
-
-When a user asks to "run", "apply", "use", or "invoke" a skill on a target
-(e.g., "run skill-maintenance on each of the 42 skills"), the correct agent
-action is a single `skill` tool call with the skill's name and the target as
-context. Do not `read_file` the `SKILL.md` body and improvise the methodology
-— the manifest encodes the methodology; the catalog `description` only tells the
-agent which skill to invoke. The system-prompt skills section
-(`crates/agent/src/templates/system_prompt.hbs`) pins this for the model;
-this rule pins it for agent sessions that read `.rules`. The failure mode is
-the agent `read_file`-ing `~/.agents/skills/<name>/SKILL.md` and then
-researching/questioning the skill instead of running its cascade — observed
-when asked to run `skill-maintenance` across the corpus.
-
-## ManifestExecutor final-result extraction must be ordinal-keyed
-
-`ManifestExecutor::execute_manifest` returns `HashMap<String, Value>` with step
-results under `step_{ordinal}_result` keys. HashMap iteration order is
-randomized (`RandomState`), so `values().last()` picks an arbitrary step, not
-the final one. Any caller that extracts a "final result" must parse the ordinal
-from `step_N_result` keys and pick the highest. The canonical extractors are
-`extract_final_step_result` in `kask_bridge/src/skill_executor.rs` (for the
-bridge) and the same-named free function in `hkask-templates/src/executor.rs`
-(for `execute_flowdef`'s sub-cascade result). Reuse them — do not re-implement
-with `.last()`. This bug was found independently in both call sites in the
-same audit.
-
-## Skill cascade context must carry the user's task
-
-Both `SkillTool::run` (`crates/agent/src/tools/skill_tool.rs`) and
-`NativeAgent::send_skill_invocation` (`crates/agent/src/agent.rs`) must inject
-the user's task into the cascade context as `task` (a
-`serde_json::Value::String`). Templates reference `{{ task }}` to act on the
-user's request. Passing an empty context (`HashMap::new()`) causes the cascade
-to run blind — templates get model defaults but never the actual request,
-producing generic outputs unrelated to the user's intent. The `SkillToolInput.task`
-field exists for this purpose; do not remove it or bypass it. The failure mode
-is silent (no error, just wrong output) and was present at both call sites
-before the fix.
-
-## Convention priors drawn from .rules must be verified against the codebase
-
-A `.rules` trap used as a "convention prior" (expected-field model for
-gradient analysis or audit) must be verified against the codebase before
-use. `.rules` entries can be stale — renamed functions, inlined variables,
-removed hooks. A convention prior that references a nonexistent artifact
-produces false gradients or wastes audit cycles hunting for a symbol that
-doesn't exist. Before treating a `.rules` trap as the expected field, grep
-for the artifact name in `crates/` — if no match, the `.rules` entry is
-itself a finding (stale refactor, topological hole).
-
-## Kask settings defaults must live in `Default` impls — the single source of truth
-
-Do not encode kask settings defaults in `#[serde(default = "...")]` attributes
-on `KaskSettings` or its subsection structs (dead code — the settings system
-deserializes `SettingsContent`, not `KaskSettings`, so the serde attributes
-never fire), in `From<Content>` literals (use `unwrap_or(default.field)` where
-`default = Self::default()`), or in `mcp_env()` comparison literals (compare
-against `Default::default().field`, not a magic number). The drift class
-(serde says `true`, `Default` says `false`, `mcp_env` says `1024`) silently
-disabled all 10 kask MCP servers when users omitted `kask.mcp` and panicked in
-`EmbeddingStore::from_driver` when users omitted `kask.corpus`. `Default` is
-the single source of truth; `From` and `mcp_env` read from it. The settings UI
-(`kask_page.rs`) must also resolve via `From<Content>` rather than applying its
-own `unwrap_or(false)` — otherwise the UI shows toggles as off while the
-runtime sees them as on (the inference-providers display bug).
+* Convergence-check `primary_result` must incorporate ALL substantive step results, not just the first. Exception: single-step skills can use `step_1_result` directly.
+* Config sub-structs must use `#[serde(default, deny_unknown_fields)]` — without it, extra fields are silently dropped.

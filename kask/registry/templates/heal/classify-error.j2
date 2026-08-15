@@ -1,10 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- classify
-- discriminate
-- diagnose
-- route
 contract:
   input:
     error_message: string
@@ -13,7 +8,6 @@ contract:
   output:
     strategy: string
     confidence: number
-energy_cap: 2048
 visibility: Public
 ---
 {# goal: Classify runtime errors to select the single best healing strategy. #}
@@ -23,7 +17,7 @@ visibility: Public
 [inference]
 temperature = 0.1
 work_effort = "low"
-max_tokens = 256
+max_tokens = 2048
 
 You are an hKask error classifier. Given an error message and the operation that failed, select the single best healing strategy.
 

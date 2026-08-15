@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+/// Default max output tokens for OCR inference calls.
+pub(crate) fn default_ocr_max_tokens() -> u32 {
+    8192
+}
+
 // ── Complexity Tiers ──────────────────────────────────────────────────────
 
 /// Complexity tier derived from pixel-density heuristics.
@@ -63,10 +68,11 @@ impl std::fmt::Display for OcrBackend {
 // ── Thresholds Module ─────────────────────────────────────────────────────
 
 /// Default vision LLM model for OCR.
-/// Uses kask-ocr on RunPod (OLMOCR-2, synchronous /runsync endpoint).
+/// Uses kask-ocr on RunPod (OLMOCR-2), routed through the inference port
+/// (the port handles provider credentials — not `RUNPOD_*` env vars read in
+/// this crate).
 /// Override via `HKASK_OCR_MODEL` env var or `llm_model` pipeline parameter.
-/// Requires RUNPOD_API_KEY and RUNPOD_OCR_ENDPOINT env vars.
-pub const DEFAULT_LLM_OCR_MODEL: &str = "RunPod/kask-ocr";
+pub const DEFAULT_LLM_OCR_MODEL: &str = hkask_inference::model_constants::DEFAULT_OCR_MODEL;
 
 /// Configurable OCR complexity thresholds.
 ///
@@ -112,6 +118,34 @@ impl ThresholdConfig {
             ComplexityTier::Moderate
         } else {
             ComplexityTier::Complex
+        }
+    }
+
+    /// Build from env vars, falling back to [`ThresholdConfig::default`].
+    ///
+    /// Reads `HKASK_OCR_SIMPLE_MAX`, `HKASK_OCR_MODERATE_MAX`,
+    /// `HKASK_OCR_SAMPLE_RATE`, and `HKASK_OCR_TUNEABLE`. Malformed values fall
+    /// back to the corresponding default field, mirroring the `TriageConfig::from_env`
+    /// pattern.
+    pub fn from_env() -> Self {
+        let default = Self::default();
+        Self {
+            simple_max: std::env::var("HKASK_OCR_SIMPLE_MAX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.simple_max),
+            moderate_max: std::env::var("HKASK_OCR_MODERATE_MAX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.moderate_max),
+            moderate_sample_rate: std::env::var("HKASK_OCR_SAMPLE_RATE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(default.moderate_sample_rate),
+            tuneable: std::env::var("HKASK_OCR_TUNEABLE")
+                .ok()
+                .map(|v| v == "true" || v == "1")
+                .unwrap_or(default.tuneable),
         }
     }
 }

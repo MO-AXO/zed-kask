@@ -1,8 +1,8 @@
 ---
 title: "RunPod LoRA Training Guide"
 audience: [ml-engineers, developers]
-last_updated: 2026-07-24
-version: "0.31.0"
+last_updated: 2026-08-04
+version: "0.33.1"
 status: "Active"
 domain: "Training"
 mds_categories: [domain, lifecycle]
@@ -342,7 +342,7 @@ No per-harness images, no pre-baked packages, no CUDA toolkit.
 
 ---
 
-## Lesson 11: Rust-Only Tooling Policy — No Python in Our Code
+## Lesson 12: Rust-Only Tooling Policy — No Python in Our Code
 
 **Symptom**: Policy violation. Python scripts baked into the image for config
 generation and manifest writing.
@@ -416,6 +416,13 @@ sequenceDiagram
     Rust->>Pod: cancel() via GraphQL when done
 ```
 
+<!-- DIAGRAM_ALIGNMENT
+id: DIAG-TRAIN-001
+verified_date: 2026-08-04
+verified_against: mcp-servers/hkask-mcp-training/src/providers/runpod.rs (RunpodHost::submit, generate_install_script), mcp-servers/hkask-mcp-training/src/providers/harness.rs (AxolotlHarness config generation), mcp-servers/hkask-mcp-training/src/providers/trl_harness.rs (TrlHarness script generation)
+status: VERIFIED
+-->
+
 ---
 
 ## Key Files
@@ -438,7 +445,7 @@ sequenceDiagram
 
 ---
 
-## Lesson 12: TRL Harness — Pin TRL Version in the Pod Template
+## Lesson 13: TRL Harness — Pin TRL Version in the Pod Template
 
 **Symptom**: Adapter trained with TRL produces garbage output when loaded with
 a different TRL/transformers version at inference time.

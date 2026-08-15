@@ -1,5 +1,5 @@
 # Bug Hunt Process Manifest
-# ℏKask v0.31.0 — Exploratory bug hunting as phased PDCA
+# ℏKask v0.34.0 — Exploratory bug hunting as phased PDCA
 # Decomposed from monolithic expedition into: Charter → Probe → Oracle → Taxonomize → Report → Convergence
 #
 # v0.31.0 refinement (self-improvement cycle 1, proposed-not-committed):
@@ -34,27 +34,19 @@ manifest:
     honest process-stabilization + coverage-estimate metrics and iterates until
     critical quality threats are resolved or escalation is required.
   functional_role: flowdef
-  version: 0.31.0
+  version: "0.34.0"
   editor: curator-or-human-admin
   visibility: Public
+  enforce_inputs: true
 
 convergence:
-  # Rationale: 0.25 is the highest threshold of all hKask skills — intentional.
-  # Bug hunting is exploratory, not exhaustive. A 0.25 threshold means
-  # findings are directionally stable and critical quality threats are
-  # identified, but not every bug class has been exhaustively searched.
-  # For exhaustive elimination, chain with `diagnose` on specific findings.
-  #
-  # v0.31.0 refinement: convergence_field now reads the composite
-  # convergence_metric (process_stabilization + coverage_estimate). When not
-  # converged, the convergence step emits next_charter_focus, which the loop
-  # step routes back into charter as prior_expedition.next_charter_focus.
-  threshold: 0.25
-  improvement_gate: threshold_only
-  max_iterations: 3
-  min_iterations: 1
-  convergence_field: step_6_result.convergence_metric
+  convergence_mode: "cauchy"
+  cauchy_epsilon: 0.03
+  cauchy_window: 3
+  max_iterations: 10
+  min_iterations: 2
   on_not_reached: escalate
+  target_artifacts_field: "current_artifacts"
 
 gas:
   cap: 100000
@@ -70,7 +62,7 @@ rjoule:
 inputs:
   - name: target
     type: object
-    required: true
+    required: false
   - name: quality_criteria
     type: string
     required: true
@@ -101,16 +93,8 @@ inputs:
       check when not converged) to direct the next iteration. When absent,
       the expedition runs as a first pass with no prior context.
 
-fusion:
-  judge: deepseek-v4-pro
-  panel:
-    - Kimi2.7
-    - Qwen3.7 Max
-    - GLM5.2
-  mode: best-of-n
-  skills:
-    - pragmatic-cybernetics
-  max_rounds: 3
+ledger:
+  span_namespace: reg.skill.bug-hunt
 
 steps:
   - ordinal: 1
@@ -124,9 +108,9 @@ steps:
     renderer: minijinja
     template_ref: bug-hunt/bug-hunt-charter
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
-      target: "{{ target }}"
+      target: "{{ task | default(target) }}"
       quality_criteria: "{{ quality_criteria }}"
       prior_expedition: "{{ prior_expedition | default({}) }}"
 
@@ -178,7 +162,7 @@ steps:
     renderer: minijinja
     template_ref: bug-hunt/bug-hunt-oracle
     gas_cap: 6144
-    timeout_seconds: 90
+    timeout_seconds: 180
     input_mapping:
       charter: "{{ step_1_result }}"
       probe_findings: "{{ step_2_result.probe_findings | default(probe_findings | default('')) }}"
@@ -193,7 +177,7 @@ steps:
     renderer: minijinja
     template_ref: bug-hunt/bug-hunt-taxonomize
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
       evaluated_findings: "{{ step_3_result.evaluated_findings | default([]) }}"
       charter: "{{ step_1_result }}"
@@ -210,7 +194,7 @@ steps:
     renderer: minijinja
     template_ref: bug-hunt/bug-hunt-report
     gas_cap: 4096
-    timeout_seconds: 60
+    timeout_seconds: 150
     input_mapping:
       charter: "{{ step_1_result }}"
       evaluated_findings: "{{ step_3_result.evaluated_findings | default([]) }}"
@@ -224,28 +208,27 @@ steps:
       prior_expedition: "{{ prior_expedition | default({}) }}"
 
   - ordinal: 6
-    action: select
+    action: compute
+    compute_ref: lisp.eval
     description: >
-      Compute normalized convergence metric via saturation detection.
-      v0.31.0 refinement: Now emits two sub-metrics — process_stabilization_metric
-      (what the metric always measured: severity-weighted unresolved findings +
-      stability overlap) and coverage_estimate (Beizer taxonomy coverage +
-      charter scope coverage). The composite convergence_metric weights both.
-      When not converged, emits next_charter_focus to direct the next iteration.
-    renderer: minijinja
-    template_ref: bug-hunt/bug-hunt-convergence-check
-    gas_cap: 2000
-    timeout_seconds: 30
+      Compute structural-validity score from step 5's actual report output.
+      The convergence signal is the count of open quality threats:
+      summary.confirmed_bugs + summary.potential_bugs. Lower = more converged.
+      If either field is absent, the form errors (no silent default).
+    gas_cap: 100
+    timeout_seconds: 10
     input_mapping:
-      primary_result: "{{ step_5_result.report | default(step_5_result) }}"
-      charter: "{{ step_1_result }}"
-    fusion: false
+      form: "(+ (assoc \"confirmed_bugs\" (assoc \"summary\" step_5_result)) (assoc \"potential_bugs\" (assoc \"summary\" step_5_result)))"
+      env:
+        step_5_result: "{{ step_5_result }}"
+      max_steps: 10000
+      max_depth: 32
 
   - ordinal: 7
     action: loop
     description: >
       Re-enter bug-hunt cycle if convergence is not met. v0.31.0 refinement:
-      routes step_6_result.next_charter_focus back to step 1 as
+      routes step_7_result.next_charter_focus back to step 1 as
       prior_expedition.next_charter_focus, along with the prior report's
       lessons_learned and pattern_signatures, closing the feedback loop.
     input_mapping:
@@ -253,7 +236,8 @@ steps:
       prior_expedition:
         lessons_learned: "{{ step_5_result.lessons_learned | default([]) }}"
         pattern_signatures: "{{ step_5_result.pattern_signatures | default([]) }}"
-        next_charter_focus: "{{ step_6_result.next_charter_focus | default('') }}"
+        next_charter_focus: "{{ step_5_result.next_charter_focus | default('') }}"
+      convergence_signal: "{{ step_6_result }}"
 
 error_handling:
   on_gas_exceeded: abort
@@ -261,38 +245,3 @@ error_handling:
   max_retries: 1
   retry_backoff_seconds: 1
   on_validation_failure: abort
-
-ocap:
-  required_capabilities:
-    - resource: template
-      action: render
-      template_id: bug-hunt/bug-hunt-charter
-      gas_budget: 4096
-    - resource: template
-      action: render
-      template_id: bug-hunt/bug-hunt-probe
-      gas_budget: 2048
-    - resource: template
-      action: render
-      template_id: bug-hunt/bug-hunt-oracle
-      gas_budget: 6144
-    - resource: template
-      action: render
-      template_id: bug-hunt/bug-hunt-taxonomize
-      gas_budget: 4096
-    - resource: template
-      action: render
-      template_id: bug-hunt/bug-hunt-report
-      gas_budget: 4096
-    - resource: template
-      action: render
-      template_id: bug-hunt/bug-hunt-convergence-check
-      gas_budget: 2000
-    - resource: manifest
-      action: execute
-      template_id: bug-hunt
-      gas_budget: 1000
-  delegation_chain_required: true
-  signature_algorithm: ed25519
-  capability_expiry_seconds: 3600
-  template_scoped: true

@@ -1,80 +1,69 @@
 #![forbid(unsafe_code)]
+#![warn(clippy::let_underscore_future)]
 //! hKask Types — Foundation types for the hKask tool platform
 //!
 
 pub mod agent_paths;
 pub mod corpus;
 pub mod crypto;
-pub mod curation;
 pub mod curator;
 pub mod document;
 pub mod error;
 pub mod event;
-pub mod fusion;
-pub mod goal;
+
+pub mod hmem_ontology;
 pub mod id;
 pub mod inference_ipc;
 
-pub mod keychain_keys;
-pub mod loops;
+pub mod json_extract;
+pub mod kanban_status;
+pub mod kanban_wire;
 pub mod macros;
 pub mod observable_span;
 pub mod regulation;
 pub mod secret;
-pub mod server_config;
 pub mod skill;
 pub mod template;
 pub mod template_type;
 
 pub mod ports;
 pub mod time;
-pub mod tool_taint;
-pub mod transcript;
+pub mod tool_response;
+pub mod tool_schema;
+
+pub mod url_utils;
 pub mod visibility;
-pub mod wallet_types;
+pub mod voice;
 
 #[cfg(feature = "sql")]
 pub mod sql_impls;
 
 // ── Essential re-exports (used by ≥3 downstream crates) ─────────────────
 
-pub use crypto::Ed25519PublicKey;
-pub use curation::{
-    BoundaryClassification, DataCategory, DataSovereigntyBoundary, UserSovereigntyState,
-};
+pub use crypto::{Ed25519PublicKey, Ed25519Signature};
 pub use curator::{CurationThresholdConfig, CuratorDirective, CuratorHandle, EscalationSeverity};
 pub use document::{Block, DocStructure, Page};
-pub use error::{
-    CapabilityDenied, DatabaseErrorKind, DbError, DbProvider, InfrastructureError, McpErrorKind,
-    NotFound,
-};
+pub use error::{DatabaseErrorKind, DbError, InfrastructureError, McpErrorKind, NotFound};
 pub use event::{RegulationRecord, RegulationSink};
-pub use goal::GoalState;
-pub use id::{
-    ApiKeyId, BoardId, BotID, ColumnId, CommentId, EmbeddingID, EscalationID, EventID, GoalID,
-    HMemId, Id, IdKind, PhaseId, PodID, TaskId, TemplateID, UserID, WalletId, WebID,
-};
-pub use regulation::CircuitState;
 
-pub use loops::{
-    ActionDecision, ActionType, BudgetOption, Deviation, DeviationDirection,
-    ExperienceClassification, ImpactReport, LoopId, LoopMetrics, RegulationData, RegulatoryAction,
-    RegulatoryActionParams, Signal, SignalMetric, TriggerOrigin,
+pub use id::{
+    BoardId, BotID, ColumnId, CommentId, EmbeddingID, EscalationID, EventID, GoalID, HMemId, Id,
+    IdKind, PhaseId, PodID, TaskId, TemplateID, UserID, WebID,
 };
+pub use kanban_status::TaskStatus;
+pub use regulation::LedgerHealth;
+
 pub use observable_span::ObservableSpan;
 pub use skill::SkillPolarity;
 pub use template::LLMParameters;
 pub use template_type::TemplateType;
-pub use tool_taint::ToolTaint;
-pub use transcript::{TimedWord, TranscriptBundle, TranscriptSegment};
+pub use tool_schema::{AnyJsonValue, find_boolean_schema_positions};
+
+pub use hmem_ontology::HMemOntology;
 pub use visibility::{Confidence, Dimension, Visibility};
+pub use voice::VoiceDesign;
 
 pub use ports::*;
-pub use wallet_types::{
-    ApiKeyCapability, ChainId, DepositAddress, DepositReference, Encumbrance, EncumbranceStatus,
-    GAS_PER_RJOULE, PrivacyMode, RJoule, RateLimitConfig, TransactionType, WalletBalance,
-    WalletConfig, WalletError, WalletTransaction,
-};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HMemEntry {
@@ -88,6 +77,10 @@ pub struct HMemEntry {
     pub perspective: String,
     pub visibility: String,
     pub dimension: Option<String>,
+    /// Dual-axis ontological anchoring (P5.4), serialized as JSON.
+    /// `None` for legacy entries created before the ontology column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ontology: Option<String>,
 }
 
 /// A proposal template for a contract missing its user-facing `expect:` annotation.
@@ -105,6 +98,3 @@ pub struct ExpectProposal {
     pub suggested_goal_principle: String,
     pub existing_constraining_principles: Vec<String>,
 }
-
-pub mod voice;
-pub use voice::VoiceDesign;

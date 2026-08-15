@@ -2,7 +2,7 @@ use collab_ui::collab_panel;
 use gpui::{App, Menu, MenuItem, OsAction};
 use release_channel::ReleaseChannel;
 use terminal_view::terminal_panel;
-use zed_actions::{Quit, assistant, debug_panel, dev, git_panel, kask_panel, project_panel};
+use zed_actions::{Quit, assistant, debug_panel, dev, git_panel, project_panel};
 
 pub fn app_menus(cx: &mut App) -> Vec<Menu> {
     let mut view_items = vec![
@@ -45,8 +45,9 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         MenuItem::action("Debugger Panel", debug_panel::ToggleFocus),
         MenuItem::action("Agent Panel", assistant::ToggleFocus),
         MenuItem::action("Git Panel", git_panel::ToggleFocus),
-        MenuItem::action("Kask Panel", kask_panel::Toggle),
         MenuItem::action("Kask Extensions", kask_extensions_ui::Toggle),
+        MenuItem::action("Agent Swarm", swarm_panel::Toggle),
+        MenuItem::action("Kanban Board", kanban_panel::Toggle),
         MenuItem::separator(),
         MenuItem::action("Diagnostics", diagnostics::Deploy),
         MenuItem::separator(),
@@ -62,11 +63,15 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
 
     vec![
         Menu {
-            name: "Zed".into(),
+            // zed-kask: D16 — leftmost app menu renamed from "Zed" to "z-k".
+            // On macOS the platform overrides this title with the app's bundle
+            // name ("Zed-Kask" via D7); the rename only takes effect on the
+            // cross-platform title-bar `ApplicationMenu` (Linux/Windows).
+            name: "z-k".into(),
             disabled: false,
             items: vec![
                 MenuItem::action("About Zed", zed_actions::About),
-                MenuItem::action("Check for Updates", auto_update::Check),
+                MenuItem::action("Update Zed-Kask", super::RunZedKaskUpdate),
                 MenuItem::separator(),
                 MenuItem::submenu(Menu::new("Settings").items([
                     MenuItem::action("Open Settings", zed_actions::OpenSettings),
@@ -290,10 +295,6 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             name: "Help".into(),
             disabled: false,
             items: vec![
-                MenuItem::action(
-                    "View Release Notes Locally",
-                    auto_update_ui::ViewReleaseNotesLocally,
-                ),
                 MenuItem::action("View Telemetry", zed_actions::OpenTelemetryLog),
                 MenuItem::action("View Dependency Licenses", zed_actions::OpenLicenses),
                 MenuItem::action("Show Welcome", onboarding::ShowWelcome),
@@ -324,4 +325,34 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             ],
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    // zed-kask: D16 — pins the leftmost app menu name is "z-k" so an upstream
+    // merge cannot silently revert it to "Zed".
+    #[test]
+    fn test_leftmost_menu_name_is_zk() {
+        let cx = TestAppContext::single();
+        let menus = cx.update(|cx| app_menus(cx));
+        let leftmost = menus
+            .first()
+            .expect("app_menus should return at least one menu");
+        assert_eq!(leftmost.name.as_ref(), "z-k");
+    }
+
+    #[test]
+    fn test_leftmost_menu_has_zed_kask_update_item() {
+        let cx = TestAppContext::single();
+        let menus = cx.update(|cx| app_menus(cx));
+        let leftmost = menus
+            .first()
+            .expect("app_menus should return at least one menu");
+        assert!(leftmost.items.iter().any(|item| {
+            matches!(item, MenuItem::Action { name, .. } if name.as_ref() == "Update Zed-Kask")
+        }));
+    }
 }

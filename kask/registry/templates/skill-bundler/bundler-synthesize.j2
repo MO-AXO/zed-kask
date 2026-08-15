@@ -1,16 +1,5 @@
 [inference]
 template_type: KnowAct
-lexicon_terms:
-- decompose
-- graph
-- anchor
-- compare
-- detect
-- decimate
-- fuse
-- recompose
-- generate
-- serialize
 contract:
   input:
     composed_skills: array
@@ -24,7 +13,6 @@ contract:
     fusions: array
     novel_edges: array
     collision_resolutions: array
-energy_cap: 8192
 visibility: Public
 ---
 {# Template: skill-bundler/bundler-synthesize.j2 #}

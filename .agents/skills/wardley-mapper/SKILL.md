@@ -1,8 +1,7 @@
 ---
 name: wardley-mapper
 visibility: public
-description: "Generic Wardley mapping methodology. Given a set of components and their relationships, inventories them, classifies each on the evolution axis (Genesis → Custom → Product → Commodity), maps them on the value chain (visibility vs evolution), identifies strategic movement (what to commoditize, invest in, divest, or build), and produces a Wardley map with recommendations. Applicable to any system — software platforms, business capabilities, technology stacks.
-"
+description: "Generic Wardley mapping methodology. Given components and their relationships, classifies each on the evolution axis (Genesis to Custom to Product to Commodity), maps them on the value chain, identifies strategic movement, and produces a Wardley map."
 ---
 
 # Wardley Mapper
@@ -17,7 +16,6 @@ Generic Wardley mapping methodology. Given a set of components and their relatio
 - When mapping classified components onto a value chain (visibility vs. evolution) and generating a visual Mermaid quadrant chart.
 - When identifying strategic movement, including what to commoditize, what to keep as a differentiator, what is missing, or how the system has drifted from a previous state.
 - When synthesizing actionable, prioritized strategic recommendations (invest, divest, commoditize, ecosystem) from a Wardley map.
-- When evaluating the completeness and convergence of a Wardley mapping PDCA cycle to ensure all components are classified and recommendations are actionable.
 
 ## Instructions
 
@@ -45,6 +43,12 @@ Generic Wardley mapping methodology. Given a set of components and their relatio
 4. Define dependency links to other components by name.
 5. Generate a Mermaid quadrant chart visualizing the map.
 
+### surface-map
+
+1. Render the quadrant chart (from map-value-chain) and strategic recommendations (from synthesize-recommendations) as a single markdown string containing a fenced ```mermaid block.
+2. This is the cascade's final user-facing output — without this step, the diagram stays buried in an intermediate step result and never reaches the chat stream.
+3. Deterministic (no LLM call) — pure Jinja2 rendering via the `render` action.
+
 ### identify-movement
 
 1. Analyze the current map for strategic movement across five dimensions.
@@ -63,14 +67,6 @@ Generic Wardley mapping methodology. Given a set of components and their relatio
 5. Be specific in the recommended actions.
 6. Flag uncertainty and lower confidence for recommendations based on sparse data.
 
-### convergence-check
-
-1. Compute the convergence metric for the Wardley mapping PDCA cycle.
-2. Verify that all components are classified on the evolution axis.
-3. Verify that value chain positions and coordinates are assigned.
-4. Verify that movement analysis is complete and recommendations are specific and traceable.
-5. Check for critical gaps in the inventory.
-
 ## Registry Templates
 
 | Template | Type | Purpose |
@@ -80,7 +76,7 @@ Generic Wardley mapping methodology. Given a set of components and their relatio
 | `map-value-chain.j2` | KnowAct | Place each classified component on the value chain map (Y: visibility, X: evolution) with coordinates and dependency links. Generates a Mermaid quadrant chart.  |
 | `identify-movement.j2` | KnowAct | Identify strategic movement: what to commoditize, what to keep at Product, what's over-commoditized, what's missing, and drift from a previous map.  |
 | `synthesize-recommendations.j2` | KnowAct | Synthesize actionable strategic recommendations (commoditize, invest, divest, ecosystem, alignment) from the movement analysis and map. Prioritized by impact, specific, traceable to components.  |
-| `convergence-check.j2` | KnowAct | Compute convergence metric for the Wardley mapping PDCA cycle. Checks all components classified, map complete, movement identified, and recommendations actionable. |
+| `present-map.j2` | RenderAct | Surface the Wardley Map quadrant chart and recommendations as a markdown string with a fenced ```mermaid block. The cascade's final user-facing output — without it, the diagram stays buried in an intermediate step result. Deterministic (no LLM call).  |
 
 ## Constraints
 
@@ -89,5 +85,5 @@ Generic Wardley mapping methodology. Given a set of components and their relatio
 - `map-value-chain.j2`: Public.
 - `identify-movement.j2`: Public.
 - `synthesize-recommendations.j2`: Public.
-- `convergence-check.j2`: Public.
+- `present-map.j2`: Public. RenderAct (no inference) — surfaces the diagram as the cascade's final output.
 - Registry is authoritative — when this SKILL.md disagrees with registry templates, the registry wins.
