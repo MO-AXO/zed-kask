@@ -415,6 +415,29 @@ pub fn parse_skill_frontmatter(
 ) -> Result<Skill> {
     let (metadata, _body, load_warnings) = parse_skill_file_content_for_loading(content)?;
 
+    // A non-core skill cannot bear a reserved (core) name. This blocks a
+    // hand-edited, marketplace-installed, or project-local SKILL.md from
+    // usurping a core skill's identity at load time.
+    //
+    // Global skills are exempt from this check: the seeder (`seed_shipped_skills`)
+    // owns the global skills directory and always writes `core: true` for core
+    // skills. A stale on-disk global file missing `core: true` (e.g. from a
+    // previous install) must not be rejected here — it will be overwritten by
+    // the seeder on the next startup cycle. Rejecting it produces a noisy
+    // SkillLoadError on every launch until seeding catches up.
+    //
+    // Marketplace and project-local sources are not seeder-controlled, so
+    // the check applies: a marketplace or project-owned SKILL.md with a
+    // reserved name and no `core: true` is a usurpation attempt.
+    let is_global = matches!(source, SkillSource::Global);
+    if !is_global && is_reserved_skill_name(&metadata.name) && !metadata.core {
+        anyhow::bail!(
+            "skill name '{}' is reserved for a core skill; \
+             a user skill cannot use this name",
+            metadata.name
+        );
+    }
+
     let directory_path = skill_file_path
         .parent()
         .context("SKILL.md file has no parent directory")?
@@ -464,17 +487,6 @@ fn parse_skill_file_content_for_loading(
     let (metadata, body) = extract_skill_frontmatter(content)?;
 
     validate_name(&metadata.name).map_err(anyhow::Error::msg)?;
-    // A non-core skill cannot bear a reserved (core) name. This blocks a
-    // hand-edited or marketplace-installed SKILL.md from usurping a core
-    // skill's identity at load time. Legitimate core skills (frontmatter
-    // `core: true`) pass this check.
-    if is_reserved_skill_name(&metadata.name) && !metadata.core {
-        anyhow::bail!(
-            "skill name '{}' is reserved for a core skill; \
-             a user skill cannot use this name",
-            metadata.name
-        );
-    }
     let load_warnings =
         validate_description_for_loading(&metadata.description).map_err(anyhow::Error::msg)?;
 
@@ -2783,21 +2795,60 @@ description: A skill with no body content
 
     #[test]
     fn test_parse_skill_frontmatter_rejects_user_skill_with_reserved_name() {
-        // A non-core skill (frontmatter `core: false` or missing) whose
-        // name is a reserved (core) name must be refused at load time.
-        // This blocks a hand-edited or marketplace-installed SKILL.md from
-        // usurping a core skill's identity.
+        // A non-core skill (frontmatter `core: false` or missing) whose name
+        // is a reserved (core) name must be refused at load time when loaded
+        // from a non-Global source (marketplace or project-local). This blocks
+        // a hand-edited or marketplace-installed SKILL.md from usurping a core
+        // skill's identity.
         let content = "---\nname: create-skill\ndescription: Hostile takeover\n---\nbody\n";
+        // Project-local: must be rejected.
         let result = parse_skill_frontmatter(
-            Path::new("/skills/create-skill/SKILL.md"),
+            Path::new("/project/.agents/skills/create-skill/SKILL.md"),
             content,
-            SkillSource::Global,
+            SkillSource::ProjectLocal {
+                worktree_id: SkillScopeId(0),
+                worktree_root_name: "my-project".into(),
+            },
         );
-        let err = result.expect_err("user skill with reserved name must be rejected");
+        let err = result.expect_err("project-local user skill with reserved name must be rejected");
         assert!(
             err.to_string().contains("reserved"),
             "error should mention 'reserved', got: {err}"
         );
+        // Marketplace: must also be rejected.
+        let result = parse_skill_frontmatter(
+            Path::new("/skills/_marketplace/alice/create-skill/SKILL.md"),
+            content,
+            SkillSource::Public {
+                source_user: std::sync::Arc::from("alice"),
+                original_skill_id: std::sync::Arc::from("alice/create-skill"),
+            },
+        );
+        let err = result.expect_err("marketplace user skill with reserved name must be rejected");
+        assert!(
+            err.to_string().contains("reserved"),
+            "error should mention 'reserved', got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_skill_frontmatter_accepts_stale_global_core_skill_missing_core_flag() {
+        // A Global skill with a reserved name but missing `core: true` (a stale
+        // on-disk file from before `core: true` was added to the frontmatter)
+        // must NOT be rejected. The seeder will overwrite it on the next startup
+        // cycle. Rejecting it produces a noisy SkillLoadError on every launch
+        // until seeding catches up, which is the bug this test pins.
+        let content = "---\nname: create-skill\ndescription: Stale seeded copy\n---\nbody\n";
+        let skill = parse_skill_frontmatter(
+            Path::new("/skills/create-skill/SKILL.md"),
+            content,
+            SkillSource::Global,
+        )
+        .expect("stale global core skill (missing core: true) must be accepted, not rejected");
+        assert_eq!(skill.name, "create-skill");
+        // core is false because the stale file lacks the flag — that's expected;
+        // the seeder will fix it on the next cycle.
+        assert!(!skill.core);
     }
 
     #[test]
