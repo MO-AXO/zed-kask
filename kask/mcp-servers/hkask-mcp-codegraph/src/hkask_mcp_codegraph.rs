@@ -164,7 +164,9 @@ fn default_batch_size() -> u32 {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TraverseRequest {
     symbol: String,
+    /// Traversal direction. One of: "incoming", "outgoing", "both". Defaults to "both".
     #[serde(default)]
+    #[schemars(with = "String")]
     direction: Direction,
     #[serde(default = "default_depth")]
     max_depth: u64,
@@ -183,7 +185,9 @@ pub struct ImpactRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ContextRequest {
     query: String,
+    /// Context budget. One of: "small", "medium", "large". Defaults to "medium".
     #[serde(default)]
+    #[schemars(with = "String")]
     budget: ContextBudget,
 }
 
@@ -197,6 +201,8 @@ pub enum AnalysisKind {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AnalysisRequest {
+    /// Analysis kind. One of: "dead_code", "complexity".
+    #[schemars(with = "String")]
     kind: AnalysisKind,
 }
 

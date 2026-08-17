@@ -58,6 +58,7 @@ pub enum ImportFormat {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LedgerImportRequest {
     pub portfolio: String,
+    #[schemars(with = "String")]
     pub format: ImportFormat,
     pub data: String,
 }
@@ -65,6 +66,7 @@ pub struct LedgerImportRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct LedgerExportRequest {
     pub portfolio: String,
+    #[schemars(with = "String")]
     pub format: ImportFormat,
 }
 
@@ -122,9 +124,9 @@ pub enum AggregationMethod {
 pub struct CharacteristicsRequest {
     pub portfolio: String,
     pub date: String,
-    /// Aggregation method for weighted averages. Defaults to
-    /// `weighted_arithmetic` when omitted.
+    /// Aggregation method for weighted averages. One of: "weighted_arithmetic", "weighted_harmonic", "weighted_median", "winsorized". Defaults to "weighted_arithmetic".
     #[serde(default)]
+    #[schemars(with = "String")]
     pub aggregation: AggregationMethod,
 }
 
@@ -393,7 +395,8 @@ pub struct ForecastRecordRequest {
     pub symbol: String,
     /// When the forecast was made (YYYY-MM-DD)
     pub forecast_date: String,
-    /// Forecast horizon.
+    /// Forecast horizon. One of: "3mo", "6mo", "1yr", "2yr", "3yr"
+    #[schemars(with = "String")]
     pub horizon: Horizon,
     /// Forecast valuation multiple (e.g., P/E or EV/FCF)
     pub forecast_multiple: f64,
@@ -734,11 +737,13 @@ pub struct EpValuationRequest {
     /// Invested capital growth rate (0.0–0.30, default 0.0).
     /// Models the AFG growth driver: reinvestment that expands the capital base.
     pub ic_growth_rate: Option<f64>,
-    /// Competitive fade horizon override.
+    /// Competitive fade horizon override. One of: "Wide", "Narrow", "None", "Default".
     /// If omitted, we attempt to derive from moat_result.
+    #[schemars(with = "Option<String>")]
     pub moat_override: Option<crate::economic_profit::FadeHorizon>,
-    /// Moat classification from moat_check.
+    /// Moat classification from moat_check. One of: "Wide", "Narrow", "None", "Default".
     /// Only used when moat_override is not provided.
+    #[schemars(with = "Option<String>")]
     pub moat_result: Option<crate::economic_profit::FadeHorizon>,
     /// Stage 1 years: hold current EP constant before fade (1–5, default 3).
     pub stage1_years: Option<u8>,
