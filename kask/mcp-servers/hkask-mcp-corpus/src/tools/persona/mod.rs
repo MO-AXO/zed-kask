@@ -211,16 +211,11 @@ fn default_half() -> f64 {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(tag = "action", rename_all = "lowercase")]
-pub enum RegistryAction {
-    List,
-    Remove { author: String },
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RegistryRequest {
-    #[serde(flatten)]
-    pub action: RegistryAction,
+    /// Action to perform. One of: "list", "remove".
+    pub action: String,
+    /// Author name to remove (required when action is "remove").
+    pub author: Option<String>,
     pub db_path: String,
     pub passphrase: String,
 }
@@ -780,8 +775,8 @@ impl CorpusServer {
                 EmbeddingStore::from_driver(Arc::new(SqliteDriver::new(pool)), embedding_dim())
                     .map_err(|e| map_embedding_error(e, "embedding store init"))?;
 
-            let json_str = match params.action {
-                RegistryAction::List => {
+            let json_str = match params.action.to_lowercase().as_str() {
+                "list" => {
                     let centroids = store
                         .query_by_prefix("style:")
                         .map_err(|e| map_embedding_error(e, "query centroids"))?;
@@ -811,7 +806,8 @@ impl CorpusServer {
                     })
                     .map_err(|e| McpToolError::internal(e.to_string()))? // rr0044-ok: serialize-own-struct
                 }
-                RegistryAction::Remove { author } => {
+                "remove" => {
+                    let author = params.author.unwrap_or_default();
                     let prefix = format!("style:{}:", author);
                     let refs = store
                         .query_by_prefix(&prefix)
@@ -879,6 +875,12 @@ impl CorpusServer {
                         entries: vec![],
                     })
                     .map_err(|e| McpToolError::internal(e.to_string()))? // rr0044-ok: serialize-own-struct
+                }
+                _ => {
+                    return Err(McpToolError::invalid_params(format!(
+                        "Unknown action '{}'. Expected 'list' or 'remove'.",
+                        params.action
+                    )));
                 }
             };
 
