@@ -355,7 +355,9 @@ pub struct LoraParams {
     /// Bias type for LoRA. `"none"` (default) is the only safe setting for
     /// must-merge inference. `"all"` and `"lora_only"` break merge equivalence.
     /// Axolotl YAML: emitted via `peft:` config block.
+    /// One of: "none" (default), "all", "lora_only".
     #[serde(default)]
+    #[schemars(with = "String")]
     pub bias: LoraBias,
 }
 
@@ -654,12 +656,16 @@ pub struct TrainingParams {
     ///
     /// Authority: the skill recommends; the operator accepts, overrides, or
     /// rejects; the runtime enforces harness-method compatibility (G-H1).
+    /// One of: "axolotl", "trl", "ludwig".
     #[serde(default)]
+    #[schemars(with = "Option<String>")]
     pub harness: Option<TrainingHarnessId>,
     /// TRL trainer selection — only meaningful when `harness = Trl`.
     /// `None` defaults to `Sft` when `harness = Trl`.
     /// Ignored when `harness = Axolotl` or `None`.
+    /// One of: "sft", "dpo", "kto", "orpo", "reward".
     #[serde(default)]
+    #[schemars(with = "Option<String>")]
     pub trl_trainer: Option<TrlTrainer>,
 }
 
