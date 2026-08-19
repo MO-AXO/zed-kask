@@ -670,8 +670,9 @@ pub enum TranscriptMode {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CompanyTranscriptRequest {
     pub symbol: String,
-    /// Fetch mode. `earnings` (default) hits FMP; `corpus` hits SerpAPI YouTube.
+    /// Fetch mode. One of: "earnings" (default, hits FMP), "corpus" (hits SerpAPI YouTube).
     #[serde(default)]
+    #[schemars(with = "String")]
     pub mode: TranscriptMode,
     /// Calendar year (e.g. 2024). Required for `earnings` mode when
     /// `quarters_back` is not used. Ignored for `corpus` mode.

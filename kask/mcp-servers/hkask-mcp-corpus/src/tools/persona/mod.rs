@@ -877,7 +877,7 @@ impl CorpusServer {
                     .map_err(|e| McpToolError::internal(e.to_string()))? // rr0044-ok: serialize-own-struct
                 }
                 _ => {
-                    return Err(McpToolError::invalid_params(format!(
+                    return Err(McpToolError::invalid_argument(format!(
                         "Unknown action '{}'. Expected 'list' or 'remove'.",
                         params.action
                     )));
